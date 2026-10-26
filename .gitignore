@@ -1,0 +1,6 @@
+# Your list, settings and API keys - never commit these.
+data/
+
+__pycache__/
+*.pyc
+.venv/
