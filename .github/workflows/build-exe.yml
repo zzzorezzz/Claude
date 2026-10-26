@@ -1,4 +1,4 @@
-name: Build Watchlist.exe
+name: Build Watchlist (Windows + Mac)
 
 on:
   push:
@@ -71,4 +71,72 @@ jobs:
         with:
           name: Watchlist-exe
           path: dist/Watchlist.exe
+          retention-days: 90
+
+  mac:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the tests on macOS
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Install build tools
+        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2
+
+      - name: Build Watchlist.app
+        run: >
+          pyinstaller main.py --noconfirm --windowed
+          --name Watchlist
+          --icon packaging/watchlist.icns
+          --osx-bundle-identifier app.watchlist.desktop
+          --add-data "watchlist/web:watchlist/web"
+
+      - name: Check the app has everything it needs
+        run: |
+          report="$RUNNER_TEMP/self-test.json"
+          dist/Watchlist.app/Contents/MacOS/Watchlist --self-test "$report"
+          cat "$report"; echo
+          python3 - "$report" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          missing = {k: v for k, v in report.items() if v is not True}
+          if missing:
+              sys.exit(f"missing from Watchlist.app: {missing}")
+          PY
+
+      - name: Start the app and load it
+        run: |
+          dist/Watchlist.app/Contents/MacOS/Watchlist --no-open --port 8791 --data "$RUNNER_TEMP/watchlist-data" &
+          pid=$!
+          for i in $(seq 60); do curl -sf http://127.0.0.1:8791/api/ping && break; sleep 1; done
+          echo
+          for page in / /app.js /style.css /icon.svg; do
+            curl -sf -o /dev/null -w "$page -> %{http_code}, %{size_download} bytes\n" "http://127.0.0.1:8791$page"
+          done
+          curl -sf http://127.0.0.1:8791/api/state | python3 -c "import json,sys; print('VLC on this Mac:', repr(json.load(sys.stdin)['status']['vlc']))"
+          kill $pid
+          test -d "$RUNNER_TEMP/watchlist-data"
+
+      - name: Make Watchlist.dmg
+        run: |
+          mkdir dmg
+          cp -R dist/Watchlist.app dmg/
+          ln -s /Applications dmg/Applications
+          for attempt in 1 2 3; do
+            hdiutil create -volname Watchlist -srcfolder dmg -ov -format UDZO Watchlist.dmg && break
+            sleep 5
+          done
+          test -f Watchlist.dmg
+          ls -lh Watchlist.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Watchlist-mac
+          path: Watchlist.dmg
           retention-days: 90

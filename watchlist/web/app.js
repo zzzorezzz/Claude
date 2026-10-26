@@ -72,6 +72,8 @@ const fmtRuntime = (m) => (!m ? '' : m >= 60 ? `${Math.floor(m / 60)}h ${m % 60 
 const fmtMoney = (n) => (n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${Math.round(n / 1e6)}M` : `$${n.toLocaleString()}`);
 const epLabel = (p) => `S${p.season} E${p.episode}`;
 const isSeries = (item) => item.format === 'series';
+const isMac = () => S.status.platform === 'darwin';
+const pcName = () => (isMac() ? 'Mac' : 'PC');
 const browserName = () => (/opera\s*gx/i.test(S.status.browser || '') ? 'Opera GX' : 'your browser');
 const findItem = (id) => S.items.find((i) => i.id === id);
 
@@ -85,9 +87,23 @@ async function reload() {
   S.items = data.items;
   S.collections = data.collections;
   S.status = data.status;
+  S.version = data.version;
   render();
   refreshOpenTitle();
 }
+
+// With sync on, the other computer can change the list at any time: check
+// every few seconds (and when the window comes back into focus).
+async function checkForChanges() {
+  if (document.hidden || S.checking) return;
+  S.checking = true;
+  try {
+    const { version } = await api('GET', '/api/version');
+    if (version !== S.version) await reload();
+  } catch { /* the app is closing, or busy: try again next time */ } finally { S.checking = false; }
+}
+setInterval(checkForChanges, 6000);
+window.addEventListener('focus', checkForChanges);
 
 // Broken poster images fall back to the title text behind them.
 document.addEventListener('error', (e) => {
@@ -208,7 +224,7 @@ function cardHTML(item) {
   if (isSeries(item)) meta.push(epLabel(item.progress));
   else if (item.runtime) meta.push(fmtRuntime(item.runtime));
   const badge = !item.local_folder ? ''
-    : item.local_broken ? '<span class="badge-pc warn">FILE ISSUE</span>' : '<span class="badge-pc">ON PC</span>';
+    : item.local_broken ? '<span class="badge-pc warn">FILE ISSUE</span>' : `<span class="badge-pc">ON ${pcName().toUpperCase()}</span>`;
   return `<div class="card" data-id="${esc(item.id)}" tabindex="0" draggable="true">
     <div class="poster-fallback">${esc(item.title)}</div>
     ${item.poster ? `<img class="poster" src="${esc(item.poster)}" alt="" loading="lazy">` : ''}
@@ -328,6 +344,13 @@ function viewAction(name, data) {
 /* ============================================================== views */
 
 function setupBanner() {
+  const syncProblem = S.status.sync?.problem
+    ? `<div class="setup-banner"><b>Sync:</b> ${esc(S.status.sync.problem)}<span class="spacer"></span>
+       <button class="btn btn-sm btn-white" data-do="settings">Sync settings</button></div>` : '';
+  return syncProblem + keysBanner();
+}
+
+function keysBanner() {
   const missing = [];
   if (!S.status.tmdb) missing.push('your TMDB token (movies & TV)');
   if (!S.status.mal) missing.push('your MyAnimeList Client ID (anime)');
@@ -565,7 +588,7 @@ function openItemMenu(item, anchor, { inTitle = false } = {}) {
 async function removeItem(id) {
   const item = findItem(id);
   if (!item) return;
-  const ok = await confirmModal(`Remove "${item.title}"?`, 'It will be taken off your list. Files on your PC are not touched.', 'Remove');
+  const ok = await confirmModal(`Remove "${item.title}"?`, `It will be taken off your list. Files on your ${pcName()} are not touched.`, 'Remove');
   if (!ok) return;
   try {
     await api('DELETE', `/api/items/${id}`);
@@ -783,6 +806,7 @@ function refreshOpenTitle() {
   $$('#modal-root .overlay').forEach((wrap) => {
     if (!wrap.dataset.itemId) return;
     if (!findItem(wrap.dataset.itemId)) { closeModal(wrap); return; }
+    if ($('.tm-trailer', wrap)) return;
     const scroll = wrap.scrollTop;
     drawTitle(wrap);
     wrap.scrollTop = scroll;
@@ -853,7 +877,7 @@ function drawTitle(wrap) {
       </div>
       <aside class="tm-side">${side.join('')}</aside>
     </div>
-    <section class="tm-section"><h3>On your PC</h3><div class="folder-line" id="folder-line"></div></section>
+    <section class="tm-section"><h3>On your ${pcName()}</h3><div class="folder-line" id="folder-line"></div></section>
     ${series ? '<section class="tm-section"><h3>Episodes<span class="spacer"></span><span id="ep-picker"></span></h3><div class="episodes" id="ep-list"></div></section>' : ''}`;
 
   drawFolderLine(wrap);
@@ -1025,7 +1049,7 @@ async function drawEpisodes(wrap) {
     const current = st.season === p.season && n === p.episode;
     const tags = [
       current ? '<span class="tag tag-next">UP NEXT</span>' : '',
-      available.has(key) ? '<span class="tag tag-pc">ON PC</span>' : '',
+      available.has(key) ? `<span class="tag tag-pc">ON ${pcName().toUpperCase()}</span>` : '',
       watched ? '<span class="tag tag-done">✓ Watched</span>' : '',
       current ? '' : '<button class="ep-set" title="Make this the next episode">Set as next</button>',
     ].join('');
@@ -1160,7 +1184,7 @@ function watchChoice(wrap) {
   const body = watchBody(wrap, `<h2>How do you want to watch?</h2>
     <p class="sub">${esc(item.title)}${picker ? ' · ' : ''}${picker}</p>
     <div class="choices">
-      <button class="choice" data-choice="local">${ICON.pc}<b>On my PC</b><span>${item.local_folder ? 'Play from your saved folder in VLC' : 'Pick the folder once, then it plays in VLC'}</span></button>
+      <button class="choice" data-choice="local">${ICON.pc}<b>On my ${pcName()}</b><span>${item.local_folder ? 'Play from your saved folder in VLC' : 'Pick the folder once, then it plays in VLC'}</span></button>
       <button class="choice" data-choice="online">${ICON.globe}<b>Online</b><span>Netflix → HBO Max (${esc(region)}) → everythingmoe</span></button>
     </div>`);
   const readEp = () => {
@@ -1255,7 +1279,7 @@ function drawLocal(wrap, { choose = false } = {}) {
     ${info.videos.length > 1 ? `<details style="margin-top:16px" ${choose ? 'open' : ''}><summary>All files in the folder (${info.videos.length}) - click one to pick it</summary>${videoList}</details>` : ''}
     ${footer}`);
   if (!S.status.vlc) {
-    body.insertAdjacentHTML('afterbegin', '<div class="warn" style="margin-bottom:16px">VLC wasn\'t found on this PC. Install it from videolan.org, or set its location in Settings.</div>');
+    body.insertAdjacentHTML('afterbegin', `<div class="warn" style="margin-bottom:16px">VLC wasn't found on this ${pcName()}. Install it from videolan.org, or set its location in Settings.</div>`);
   }
   body.addEventListener('click', (e) => localAction(wrap, e));
   $('#w-sub', body).addEventListener('change', async (e) => {
@@ -1349,7 +1373,7 @@ async function watchOnline(wrap, { reason = '', fix = false } = {}) {
       ${res.message ? `<p class="note">${esc(res.message)}</p>` : ''}
       <div class="btns" style="justify-content:center;margin-top:16px"><button class="btn btn-white" data-w="done">Done</button>
       <button class="btn btn-ghost" data-w="again">Open the page again</button>
-      ${fix ? '<button class="btn btn-ghost" data-w="fix">Fix the file on my PC</button>' : ''}</div></div>`);
+      ${fix ? `<button class="btn btn-ghost" data-w="fix">Fix the file on my ${pcName()}</button>` : ''}</div></div>`);
     body.addEventListener('click', (e) => {
       const w = e.target.closest('[data-w]')?.dataset.w;
       if (w === 'done') closeModal(wrap);
@@ -1371,10 +1395,12 @@ async function openSettings() {
   let data;
   try { data = await api('GET', '/api/settings'); } catch (e) { fail(e); return; }
   const s = data.settings;
+  const mac = data.status.platform === 'darwin';
+  const sync = data.status.sync || {};
   const countries = [...new Set([s.region, ...COUNTRIES])]
     .map((c) => ({ c, name: regionName(c) })).sort((a, b) => a.name.localeCompare(b.name));
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><form class="modal-pad" autocomplete="off">
-    <h2>Settings</h2><p class="sub">Saved only on this PC, never uploaded anywhere.</p>
+    <h2>Settings</h2><p class="sub">Saved only on this ${pcName()}. Keys and app locations are set separately on each computer.</p>
     <h4>Online info</h4>
     <label class="field"><span>TMDB token (movies & TV shows)</span>
       <input class="input" name="tmdb_api_key" type="password" value="${esc(s.tmdb_api_key)}" placeholder="Paste your API Read Access Token or API Key">
@@ -1384,25 +1410,35 @@ async function openSettings() {
       <small>myanimelist.net/apiconfig → your app → Client ID.</small></label>
     <div class="btns" style="margin-bottom:6px"><button class="btn btn-ghost btn-sm" type="button" data-s="show">Show keys</button>
       <button class="btn btn-ghost btn-sm" type="button" data-s="test">Save & test keys</button><span id="test-out" class="small"></span></div>
+    <h4>Sync between computers</h4>
+    <label class="field"><span>Sync folder</span>
+      <div class="input-row"><input class="input" name="sync_folder" value="${esc(s.sync_folder)}" placeholder="Not syncing - choose a folder in Google Drive, OneDrive, Dropbox or iCloud Drive">
+      <button class="btn btn-ghost btn-sm" type="button" data-s="sync-browse">Choose…</button>
+      ${s.sync_folder ? '<button class="btn btn-ghost btn-sm" type="button" data-s="sync-off">Stop syncing</button>' : ''}</div>
+      <small>${sync.problem ? `<span class="bad">${esc(sync.problem)}</span>`
+        : s.sync_folder ? `<span class="ok">✓ Syncing.</span> Your list is in ${esc(sync.file)}.`
+        : 'Your list is only on this computer right now.'}
+        Choose a folder that both computers sync, then choose the same folder on the other computer and the two lists are merged.
+        Titles, progress, folders and collections sync; each computer remembers its own video folders.</small></label>
     <h4>Watching online</h4>
     <label class="field"><span>Your country</span>
       <select class="select" name="region">${countries.map(({ c, name }) => `<option value="${c}" ${c === s.region ? 'selected' : ''}>${esc(name)} (${c})</option>`).join('')}</select>
       <small>Used to check what's on Netflix and HBO Max where you are.</small></label>
     <label class="field"><span>Browser</span>
-      <div class="input-row"><input class="input" name="browser_path" value="${esc(s.browser_path)}" placeholder="${esc(data.status.browser || 'Opera GX: ...\\AppData\\Local\\Programs\\Opera GX\\launcher.exe')}">
+      <div class="input-row"><input class="input" name="browser_path" value="${esc(s.browser_path)}" placeholder="${esc(data.status.browser || (mac ? '/Applications/Opera GX.app' : 'Opera GX: ...\\AppData\\Local\\Programs\\Opera GX\\launcher.exe'))}">
       <button class="btn btn-ghost btn-sm" type="button" data-s="browser">Browse</button></div>
       <small>${data.status.browser ? `<span class="ok">✓ Using:</span> ${esc(data.status.browser)}. Leave empty to keep this.`
-        : '<span class="bad">Opera GX wasn\'t found</span> - links open in your default browser. Browse to Opera GX\'s launcher.exe to use it.'}
+        : `<span class="bad">Opera GX wasn't found</span> - links open in your default browser. ${mac ? 'Browse to Opera GX in Applications' : "Browse to Opera GX's launcher.exe"} to use it.`}
         Netflix, HBO Max, everythingmoe and trailers open here.</small></label>
     <label class="field"><span>Netflix link</span><input class="input" name="netflix_url" value="${esc(s.netflix_url)}"></label>
     <label class="field"><span>HBO Max link</span><input class="input" name="hbomax_url" value="${esc(s.hbomax_url)}"></label>
     <label class="field"><span>If neither has it, open</span><input class="input" name="fallback_url" value="${esc(s.fallback_url)}">
       <small>{title} in a link is replaced with the title's name.</small></label>
-    <h4>Watching on your PC</h4>
+    <h4>Watching on your ${pcName()}</h4>
     <label class="field"><span>VLC location</span>
-      <div class="input-row"><input class="input" name="vlc_path" value="${esc(s.vlc_path)}" placeholder="${esc(data.status.vlc || 'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe')}">
+      <div class="input-row"><input class="input" name="vlc_path" value="${esc(s.vlc_path)}" placeholder="${esc(data.status.vlc || (mac ? '/Applications/VLC.app' : 'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe'))}">
       <button class="btn btn-ghost btn-sm" type="button" data-s="vlc">Browse</button></div>
-      <small>${data.status.vlc ? `<span class="ok">✓ Found VLC:</span> ${esc(data.status.vlc)}. Leave empty to use this.` : '<span class="bad">VLC not found.</span> Install it from videolan.org or browse to vlc.exe.'}</small></label>
+      <small>${data.status.vlc ? `<span class="ok">✓ Found VLC:</span> ${esc(data.status.vlc)}. Leave empty to use this.` : `<span class="bad">VLC not found.</span> Install it from videolan.org or browse to ${mac ? 'VLC in Applications' : 'vlc.exe'}.`}</small></label>
     <label class="check-row"><input type="checkbox" name="queue_next_episodes" ${s.queue_next_episodes ? 'checked' : ''}> Queue the following episodes in VLC</label>
     <div class="btns" style="margin-top:22px"><button class="btn btn-red" type="submit">Save</button>
       <button class="btn btn-ghost" type="button" data-s="cancel">Cancel</button></div>
@@ -1413,13 +1449,12 @@ async function openSettings() {
     return {
       tmdb_api_key: f.get('tmdb_api_key'), mal_client_id: f.get('mal_client_id'), region: f.get('region'),
       netflix_url: f.get('netflix_url'), hbomax_url: f.get('hbomax_url'), fallback_url: f.get('fallback_url'),
-      vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), queue_next_episodes: form.queue_next_episodes.checked,
+      vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), sync_folder: f.get('sync_folder'), queue_next_episodes: form.queue_next_episodes.checked,
     };
   };
   const save = async () => {
     const res = await api('PUT', '/api/settings', values());
-    S.status = res.status;
-    render();
+    await reload();  // turning sync on can bring in titles from the other computer
     return res;
   };
   form.addEventListener('submit', async (e) => {
@@ -1437,11 +1472,23 @@ async function openSettings() {
           i.type = i.type === 'password' ? 'text' : 'password';
         });
       } else if (a === 'vlc') {
-        const { path } = await api('POST', '/api/browse', { kind: 'file', types: 'exe', title: 'Find vlc.exe', initial: 'C:\\Program Files\\VideoLAN\\VLC' });
+        const { path } = await api('POST', '/api/browse', mac
+          ? { kind: 'file', types: 'app', title: 'Find VLC', initial: '/Applications' }
+          : { kind: 'file', types: 'exe', title: 'Find vlc.exe', initial: 'C:\\Program Files\\VideoLAN\\VLC' });
         if (path) form.vlc_path.value = path;
       } else if (a === 'browser') {
-        const { path } = await api('POST', '/api/browse', { kind: 'file', types: 'exe', title: "Find Opera GX's launcher.exe" });
+        const { path } = await api('POST', '/api/browse', mac
+          ? { kind: 'file', types: 'app', title: 'Find Opera GX', initial: '/Applications' }
+          : { kind: 'file', types: 'exe', title: "Find Opera GX's launcher.exe" });
         if (path) form.browser_path.value = path;
+      } else if (a === 'sync-browse') {
+        const { path } = await api('POST', '/api/browse', { kind: 'folder', title: 'Choose a folder both computers sync', initial: form.sync_folder.value });
+        if (path) form.sync_folder.value = path;
+      } else if (a === 'sync-off') {
+        form.sync_folder.value = '';
+        await save();
+        toast('Sync turned off - your list stays on this computer');
+        closeModal(wrap); openSettings();
       } else if (a === 'test') {
         const out = $('#test-out', form);
         out.textContent = 'Testing…';

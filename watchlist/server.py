@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -43,7 +44,34 @@ class App:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.settings = Settings(self.data_dir / "settings.json")
-        self.store = Store(self.data_dir / "watchlist.json")
+        self.sync_problem = ""
+        self.store = Store(self._list_path(), self.data_dir / "local.json")
+
+    # ---- syncing between computers
+
+    def _list_path(self):
+        folder = self.settings.get()["sync_folder"]
+        if folder:
+            if os.path.isdir(folder):
+                self.sync_problem = ""
+                return Path(folder) / "watchlist.json"
+            self.sync_problem = (f"The sync folder isn't available right now ({folder}), so this "
+                                 "computer's own copy of your list is being used until it's back.")
+        return self.data_dir / "watchlist.json"
+
+    def set_sync_folder(self, folder):
+        folder = (folder or "").strip().strip('"')
+        if folder and not os.path.isdir(folder):
+            raise ApiError("that folder doesn't exist")
+        self.settings.update({"sync_folder": folder})
+        self.store.use_file(self._list_path())
+
+    def retry_sync(self):
+        """A sync folder that was missing at startup (drive not ready) may be back."""
+        if self.sync_problem and self.settings.get()["sync_folder"]:
+            path = self._list_path()
+            if not self.sync_problem:
+                self.store.use_file(path)
 
     # ---- helpers
 
@@ -57,7 +85,10 @@ class App:
         s = self.settings.get()
         return {"tmdb": bool(s["tmdb_api_key"]), "mal": bool(s["mal_client_id"]),
                 "region": s["region"], "vlc": launcher.find_vlc(s["vlc_path"]),
-                "browser": launcher.find_browser(s["browser_path"])}
+                "browser": launcher.find_browser(s["browser_path"]),
+                "platform": sys.platform,
+                "sync": {"folder": s["sync_folder"], "file": str(self.store.path),
+                         "problem": self.sync_problem}}
 
     def open_link(self, url):
         browser = launcher.find_browser(self.settings.get()["browser_path"])
@@ -187,6 +218,7 @@ class Handler(BaseHTTPRequestHandler):
     ROUTES = [
         ("GET", r"/api/ping", "ping"),
         ("GET", r"/api/state", "state"),
+        ("GET", r"/api/version", "version"),
         ("GET", r"/api/search", "search"),
         ("POST", r"/api/items", "add_item"),
         ("GET", r"/api/items/(\w+)", "get_item"),
@@ -312,8 +344,14 @@ class Handler(BaseHTTPRequestHandler):
         return {"app": "watchlist"}
 
     def api_state(self, body):
+        self.app.retry_sync()
         return {"items": self.app.store.list(), "collections": self.app.store.collections(),
-                "status": self.app.status()}
+                "status": self.app.status(), "version": self.app.store.current_version()}
+
+    def api_version(self, body):
+        """Polled by the window, so changes from the other computer show up."""
+        self.app.retry_sync()
+        return {"version": self.app.store.current_version()}
 
     def api_search(self, body):
         item_type = self.query.get("type", "")
@@ -447,6 +485,10 @@ class Handler(BaseHTTPRequestHandler):
         return {"settings": self.app.settings.get(), "status": self.app.status()}
 
     def api_put_settings(self, body):
+        if "sync_folder" in body:
+            folder = str(body.pop("sync_folder") or "")
+            if folder.strip().strip('"') != self.app.settings.get()["sync_folder"]:
+                self.app.set_sync_folder(folder)
         settings = self.app.settings.update(body)
         return {"settings": settings, "status": self.app.status()}
 

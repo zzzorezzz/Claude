@@ -30,12 +30,16 @@ DEFAULT_SETTINGS = {
     "netflix_url": "https://www.netflix.com/search?q={title}",
     "hbomax_url": "https://play.hbomax.com/search?q={title}",
     "fallback_url": "https://everythingmoe.com",
+    # A folder both computers sync (Google Drive, OneDrive, Dropbox, iCloud
+    # Drive...). When set, the list lives there instead of the data folder.
+    "sync_folder": "",
     # Last folder picked in a folder dialog, so the next one starts there.
     "last_folder": "",
 }
 
 URL_KEYS = ("netflix_url", "hbomax_url", "fallback_url")
-TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "last_folder")
+TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "sync_folder",
+             "last_folder")
 
 
 def default_data_dir() -> Path:
@@ -43,9 +47,13 @@ def default_data_dir() -> Path:
     if env:
         return Path(env).expanduser()
     if getattr(sys, "frozen", False):
-        # Watchlist.exe: keep your list in %APPDATA%\Watchlist, so it survives
-        # moving or replacing the .exe.
-        return Path(os.environ.get("APPDATA") or Path.home()) / "Watchlist"
+        # The packaged app: keep your list outside the app itself, so it
+        # survives moving or replacing Watchlist.exe / Watchlist.app.
+        if sys.platform == "win32":
+            return Path(os.environ.get("APPDATA") or Path.home()) / "Watchlist"
+        if sys.platform == "darwin":
+            return Path.home() / "Library" / "Application Support" / "Watchlist"
+        return Path.home() / ".watchlist"
     return Path(__file__).resolve().parent.parent / "data"
 
 

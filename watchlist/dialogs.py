@@ -16,6 +16,7 @@ _WEBVIEW_TYPES = {
     "video": ("Video files (*.mkv;*.mp4;*.avi;*.mov;*.wmv;*.m4v;*.webm;*.ts)", "All files (*.*)"),
     "subtitle": ("Subtitles (*.srt;*.ass;*.ssa;*.vtt;*.sub)", "All files (*.*)"),
     "exe": ("Programs (*.exe)", "All files (*.*)"),
+    "app": ("Applications (*.app)",),
 }
 
 _TK_SCRIPT = r"""

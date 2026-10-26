@@ -1,4 +1,4 @@
-"""Start Watchlist: python -m watchlist (or double-click Watchlist.bat)."""
+"""Start Watchlist: python -m watchlist (or open Watchlist.exe / Watchlist.app)."""
 
 import argparse
 import json
@@ -22,9 +22,16 @@ def _already_running(port):
 def _tell(message):
     """Print, and also show a message box when running as Watchlist.exe (no console)."""
     print(message)
-    if getattr(sys, "frozen", False) and sys.platform == "win32":
+    if not getattr(sys, "frozen", False):
+        return
+    if sys.platform == "win32":
         import ctypes
         ctypes.windll.user32.MessageBoxW(None, message, "Watchlist", 0x10)
+    elif sys.platform == "darwin":
+        import subprocess
+        subprocess.run(["osascript", "-e", "on run argv", "-e",
+                        'display alert "Watchlist" message (item 1 of argv) as critical',
+                        "-e", "end run", message], check=False)
 
 
 def _self_test(path):
@@ -32,7 +39,9 @@ def _self_test(path):
     from .server import WEB_DIR
     report = {"frozen": bool(getattr(sys, "frozen", False)),
               "web_files": all((WEB_DIR / f).is_file() for f in ("index.html", "app.js", "style.css"))}
-    for module in ("webview", "clr"):
+    # The modules the app window needs: pythonnet on Windows, PyObjC + WebKit on a Mac.
+    needed = {"win32": ("webview", "clr"), "darwin": ("webview", "webview.platforms.cocoa")}
+    for module in needed.get(sys.platform, ("webview",)):
         try:
             __import__(module)
             report[module] = True

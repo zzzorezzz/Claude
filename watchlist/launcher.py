@@ -16,9 +16,35 @@ class LaunchError(Exception):
     pass
 
 
+def _mac_bundle(path):
+    """"/Applications/X.app/Contents/MacOS/X" or "/Applications/X.app" -> "/Applications/X.app"."""
+    parts = Path(path).parts
+    for i, part in enumerate(parts):
+        if part.lower().endswith(".app"):
+            return str(Path(*parts[:i + 1]))
+    return ""
+
+
+def _bundle_binary(bundle):
+    """The program inside a macOS .app bundle."""
+    import plistlib
+    try:
+        with open(Path(bundle) / "Contents" / "Info.plist", "rb") as fh:
+            name = plistlib.load(fh).get("CFBundleExecutable") or Path(bundle).stem
+    except (OSError, ValueError):
+        name = Path(bundle).stem
+    return Path(bundle) / "Contents" / "MacOS" / name
+
+
 def find_vlc(configured=""):
-    if configured and Path(configured).is_file():
-        return configured
+    if configured:
+        p = Path(configured)
+        if p.suffix.lower() == ".app" and p.is_dir():
+            binary = _bundle_binary(p)
+            if binary.is_file():
+                return str(binary)
+        if p.is_file():
+            return configured
     candidates = []
     if sys.platform == "win32":
         try:
@@ -78,7 +104,7 @@ def open_url(url, browser=""):
     if not url.lower().startswith(("http://", "https://")):
         raise LaunchError("only web links can be opened")
     if browser:
-        _spawn([browser, url])
+        _spawn(_browser_command(browser, url))
     elif not webbrowser.open(url, new=2):
         raise LaunchError("couldn't open your default browser")
 
@@ -152,7 +178,8 @@ def _registry_browser(name_part):
 def find_browser(configured=""):
     """The browser to use: the one set in Settings, else Opera GX if it's installed.
     Returns "" when neither is found (the system default browser is used then)."""
-    if configured and Path(configured).is_file():
+    if configured and (Path(configured).is_file()
+                       or (_mac_bundle(configured) and Path(configured).exists())):
         return configured
     if sys.platform == "win32":
         found = _registry_browser("operagx")
@@ -168,11 +195,17 @@ def find_browser(configured=""):
                 if p.is_file():
                     return str(p)
     elif sys.platform == "darwin":
-        for p in (Path("/Applications/Opera GX.app/Contents/MacOS/Opera"),
-                  Path.home() / "Applications/Opera GX.app/Contents/MacOS/Opera"):
-            if p.is_file():
+        for p in (Path("/Applications/Opera GX.app"), Path.home() / "Applications/Opera GX.app"):
+            if p.is_dir():
                 return str(p)
     return ""
+
+
+def _browser_command(browser, url, new_window=False):
+    if sys.platform == "darwin" and _mac_bundle(browser):
+        # On a Mac, ask the running browser to open it rather than starting a second copy.
+        return ["open", "-a", _mac_bundle(browser), url]
+    return [browser] + (["--new-window"] if new_window else []) + [url]
 
 
 def open_app_window(url, browser=""):
@@ -192,7 +225,7 @@ def open_app_window(url, browser=""):
             # e.g. the WebView2 runtime is missing: use the browser instead.
             dialogs.window = None
     if browser:
-        _spawn([browser, "--new-window", url])
+        _spawn(_browser_command(browser, url, new_window=True))
     else:
         webbrowser.open(url, new=1)
     return False

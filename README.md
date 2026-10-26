@@ -1,6 +1,7 @@
 # Watchlist
 
-A Netflix-style desktop app for the TV shows, anime and movies you plan to watch.
+A Netflix-style desktop app for Windows and Mac, for the TV shows, anime and movies you plan to watch.
+Your list can sync between your computers.
 
 - **Home screen:** three rows (TV Shows, Anime, Movies), each showing your 5–6 most popular titles and a **Show more** tile for the full list.
   - Movies are ordered by box office, TV shows by TMDB popularity, and anime by MyAnimeList members.
@@ -24,7 +25,7 @@ A Netflix-style desktop app for the TV shows, anime and movies you plan to watch
 
 1. Install **VLC** from <https://www.videolan.org/>. The app finds it automatically.
 2. Download **Watchlist.exe**:
-   1. On GitHub, open the repo's **Actions** tab and click the latest green **Build Watchlist.exe** run.
+   1. On GitHub, open the repo's **Actions** tab and click the latest green **Build Watchlist (Windows + Mac)** run.
    2. At the bottom, under **Artifacts**, click **Watchlist-exe**. A zip downloads.
    3. Unzip it and put `Watchlist.exe` wherever you like, such as your Desktop or a `C:\Apps` folder.
 3. Double-click **Watchlist.exe**. It opens in its own window; close the window to quit.
@@ -39,6 +40,38 @@ To get a newer version later, download it the same way and replace the old `Watc
 
 To put it on the taskbar or Start menu, right-click `Watchlist.exe` and choose **Pin to taskbar** or **Pin to Start**.
 
+## Setup (Mac)
+
+1. Install **VLC** from <https://www.videolan.org/> and drag it into **Applications**. The app finds it there.
+2. Download **Watchlist.dmg**:
+   1. On GitHub, open the repo's **Actions** tab and click the latest green **Build Watchlist (Windows + Mac)** run.
+   2. At the bottom, under **Artifacts**, click **Watchlist-mac**. Open the zip that downloads, if your Mac doesn't open it for you.
+3. Open **Watchlist.dmg** and drag **Watchlist** onto the **Applications** folder next to it.
+4. The first time, macOS blocks it because the app isn't from a paid Apple developer account:
+   1. Open Watchlist from Applications. When macOS says it can't be opened, click **Done** (or **OK**).
+   2. Open **System Settings → Privacy & Security**, scroll down to the message about Watchlist, and click **Open Anyway**. Confirm with your password.
+
+   After that it opens normally. This works on Apple Silicon Macs (M1 and newer).
+5. In the app, open **Settings** and paste your TMDB token and MyAnimeList Client ID, as on Windows.
+
+## Syncing between Windows and Mac
+
+Your list can stay in sync between your computers through a folder that both of them sync.
+That can be **Google Drive**, **OneDrive**, **Dropbox** or **iCloud Drive**; install that app on both computers if you haven't already.
+
+1. Make a folder for it in the cloud drive, for example `Google Drive/Watchlist`.
+2. On the first computer, open **Settings → Sync between computers**, click **Choose…**, pick that folder and click **Save**.
+3. On the other computer, do the same, picking the same folder. If both computers already had titles, the two lists are merged.
+
+From then on, anything you change on one computer shows up on the other within a few seconds of the cloud drive syncing it, even while the app is open.
+
+- **What syncs:** titles and their info, progress and **Mark watched**, folders, collections and removed titles.
+- **What stays on each computer:** each show's video folder (Mac and Windows paths are different), "Not working" marks, your keys and the VLC/Opera GX locations.
+
+  The video files themselves aren't copied. If they're in your cloud drive too, just choose the folder once on each computer.
+- **Editing on both at once is fine.** Changes are merged title by title, including any "conflicted copy" files the cloud app makes.
+- **If the sync folder isn't available** (the cloud drive isn't running yet), the app uses that computer's own copy of the list and shows a notice. It switches back once the folder is there.
+
 ### Running from source instead
 
 If you'd rather run the Python code directly:
@@ -52,17 +85,20 @@ If you'd rather run the Python code directly:
 
 Netflix, HBO Max, everythingmoe.com and YouTube trailers open in **Opera GX**.
 The app finds Opera GX automatically.
-If it isn't found, Settings says so: click **Browse** next to "Browser" and pick Opera GX's `launcher.exe`, usually in `C:\Users\<you>\AppData\Local\Programs\Opera GX\`.
-If no Opera GX is set, links open in your Windows default browser.
+If it isn't found, Settings says so: click **Browse** next to "Browser" and pick Opera GX.
+On Windows that's `launcher.exe`, usually in `C:\Users\<you>\AppData\Local\Programs\Opera GX\`; on a Mac it's **Opera GX** in Applications.
+If no Opera GX is set, links open in your default browser.
 
 ## Your data
 
 Your list, collections and settings, including your keys, are saved only on your PC:
 
 - **Watchlist.exe:** in `%APPDATA%\Watchlist`. Paste that into File Explorer's address bar to open it.
+- **Watchlist.app:** in `~/Library/Application Support/Watchlist`. In Finder, press Shift+Cmd+G and paste that to open it.
+- **With sync on,** the list itself (`watchlist.json`) is in your sync folder instead.
 - **Running from source:** in the `data` folder next to the code. That folder is git-ignored, so it never goes into the repository.
 
-Back that folder up if you reinstall Windows.
+Back that folder up if you reinstall your computer.
 
 ## Good to know
 
@@ -88,6 +124,6 @@ python main.py --self-test out.json          # check pywebview and the UI files 
 ```
 
 The app is plain Python (standard library only, plus optional `pywebview`) with a vanilla HTML/CSS/JS front end in `watchlist/web/`.
-`Watchlist.exe` is built with PyInstaller by the GitHub Actions workflow in `.github/workflows/build-exe.yml` on every push.
-That workflow also runs the tests on Windows and smoke-tests the built `.exe`.
+`Watchlist.exe` and `Watchlist.app` are built with PyInstaller by the GitHub Actions workflow in `.github/workflows/build-exe.yml` on every push.
+That workflow also runs the tests on Windows and macOS and smoke-tests both builds.
 It serves the UI on `http://127.0.0.1:8765` and only accepts requests from this computer.
