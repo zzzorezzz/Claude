@@ -13,7 +13,7 @@ A Netflix-style desktop app for the TV shows, anime and movies you plan to watch
   - The right episode plays in VLC, with the following episodes queued.
   - Matching `.srt`/`.ass` subtitle files are found and loaded. You can switch subtitles, pick another subtitle file, or open its folder.
 - **Watch now → Online:**
-  1. The app checks whether the title is on **Netflix**, then **HBO Max**, in your country (Pakistan by default), and opens that service in your default browser.
+  1. The app checks whether the title is on **Netflix**, then **HBO Max**, in your country (Pakistan by default), and opens that service in **Opera GX**.
   2. If neither has it, **everythingmoe.com** opens.
 
 ## Setup (Windows)
@@ -25,7 +25,7 @@ A Netflix-style desktop app for the TV shows, anime and movies you plan to watch
    ```
    py -m pip install -r requirements.txt
    ```
-   Without it, the app opens in an Edge window instead, which works just as well.
+   Without it, the app opens in an Opera GX window instead, which works just as well.
 5. Double-click **`Watchlist.bat`**.
    - A small black window stays open while the app runs; close it to quit.
 6. In the app, click the **gear icon (Settings)** and paste:
@@ -33,6 +33,13 @@ A Netflix-style desktop app for the TV shows, anime and movies you plan to watch
    - your **MyAnimeList Client ID**: from myanimelist.net/apiconfig.
 
    Click **Save & test keys** to check both.
+
+## Browser
+
+Netflix, HBO Max, everythingmoe.com and YouTube trailers open in **Opera GX**.
+The app finds Opera GX automatically.
+If it isn't found, Settings says so: click **Browse** next to "Browser" and pick Opera GX's `launcher.exe`, usually in `C:\Users\<you>\AppData\Local\Programs\Opera GX\`.
+If no Opera GX is set, links open in your Windows default browser.
 
 ## Your data
 

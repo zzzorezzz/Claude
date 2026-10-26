@@ -150,6 +150,18 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(res["service"], "everythingmoe")
         self.assertIn("No TMDB token", res["message"])
 
+    def test_links_open_in_the_chosen_browser(self):
+        opera = touch(self.media, "Opera GX/launcher.exe")
+        self.app.settings.update({"browser_path": str(opera)})
+        _, state = self.call("GET", "/api/state")
+        self.assertEqual(state["status"]["browser"], str(opera))
+        show = self.add("tv", "tmdb", "tv/1396")
+        _, res = self.call("POST", f"/api/items/{show['id']}/online")
+        self.assertEqual(self.spawned[-1], [str(opera), "https://www.netflix.com/search?q=Breaking+Bad"])
+        self.call("POST", "/api/open", {"url": "https://www.youtube.com/watch?v=x"})
+        self.assertEqual(self.spawned[-1], [str(opera), "https://www.youtube.com/watch?v=x"])
+        self.assertEqual(self.opened, [], "the system default browser isn't used")
+
     def test_collections(self):
         item = self.add("movie", "tmdb", "movie/27205")
         _, col = self.call("POST", "/api/collections", {"name": "Weekend binge"})

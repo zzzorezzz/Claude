@@ -20,6 +20,9 @@ DEFAULT_SETTINGS = {
     "region": "PK",
     # Full path to vlc.exe. Empty means auto-detect.
     "vlc_path": "",
+    # Browser for streaming sites (and the app window without pywebview).
+    # Empty means auto-detect Opera GX, falling back to the system default.
+    "browser_path": "",
     # Queue the following episodes in VLC after the one you start.
     "queue_next_episodes": True,
     # Links opened for online viewing. {title} is replaced with the title.
@@ -31,7 +34,7 @@ DEFAULT_SETTINGS = {
 }
 
 URL_KEYS = ("netflix_url", "hbomax_url", "fallback_url")
-TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "last_folder")
+TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "last_folder")
 
 
 def default_data_dir() -> Path:

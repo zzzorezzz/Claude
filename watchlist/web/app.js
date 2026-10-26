@@ -68,6 +68,7 @@ const fmtRuntime = (m) => (!m ? '' : m >= 60 ? `${Math.floor(m / 60)}h ${m % 60 
 const fmtMoney = (n) => (n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${Math.round(n / 1e6)}M` : `$${n.toLocaleString()}`);
 const epLabel = (p) => `S${p.season} E${p.episode}`;
 const isSeries = (item) => item.format === 'series';
+const browserName = () => (/opera\s*gx/i.test(S.status.browser || '') ? 'Opera GX' : 'your browser');
 const findItem = (id) => S.items.find((i) => i.id === id);
 
 function upsert(item) {
@@ -813,7 +814,7 @@ function playTrailer(wrap, item) {
   if (!item.trailer) {
     const q = encodeURIComponent(`${item.title} ${item.year || ''} trailer`);
     api('POST', '/api/open', { url: `https://www.youtube.com/results?search_query=${q}` })
-      .then(() => toast('No trailer saved - opened a YouTube search in your browser'))
+      .then(() => toast(`No trailer saved - opened a YouTube search in ${browserName()}`))
       .catch(fail);
     return;
   }
@@ -1132,8 +1133,8 @@ async function watchOnline(wrap) {
     const body = watchBody(wrap, `<div class="center">
       <div class="result-icon">${found ? '✅' : '🔎'}</div>
       <h2>${found ? `Opening ${esc(res.service)}` : `Not on Netflix or HBO Max in ${esc(region)}`}</h2>
-      <p class="sub">${found ? `${esc(item.title)} is on ${esc(res.service)} in ${esc(region)}. It's open in your browser${isSeries(item) ? ` - you're up to ${epLabel(wrap.st.ep)}` : ''}.`
-        : 'everythingmoe.com is open in your browser so you can pick a site from there.'}</p>
+      <p class="sub">${found ? `${esc(item.title)} is on ${esc(res.service)} in ${esc(region)}. It's open in ${browserName()}${isSeries(item) ? ` - you're up to ${epLabel(wrap.st.ep)}` : ''}.`
+        : `everythingmoe.com is open in ${browserName()} so you can pick a site from there.`}</p>
       ${res.services.length ? `<div class="muted small">Streaming in ${esc(region)} on:</div><div class="services" style="justify-content:center">${res.services.map((s) => `<span class="chip">${esc(s)}</span>`).join('')}</div>` : ''}
       ${res.message ? `<p class="note">${esc(res.message)}</p>` : ''}
       <div class="btns" style="justify-content:center;margin-top:16px"><button class="btn btn-white" data-w="done">Done</button>
@@ -1175,6 +1176,12 @@ async function openSettings() {
     <label class="field"><span>Your country</span>
       <select class="select" name="region">${countries.map(({ c, name }) => `<option value="${c}" ${c === s.region ? 'selected' : ''}>${esc(name)} (${c})</option>`).join('')}</select>
       <small>Used to check what's on Netflix and HBO Max where you are.</small></label>
+    <label class="field"><span>Browser</span>
+      <div class="input-row"><input class="input" name="browser_path" value="${esc(s.browser_path)}" placeholder="${esc(data.status.browser || 'Opera GX: ...\\AppData\\Local\\Programs\\Opera GX\\launcher.exe')}">
+      <button class="btn btn-ghost btn-sm" type="button" data-s="browser">Browse</button></div>
+      <small>${data.status.browser ? `<span class="ok">✓ Using:</span> ${esc(data.status.browser)}. Leave empty to keep this.`
+        : '<span class="bad">Opera GX wasn\'t found</span> - links open in your default browser. Browse to Opera GX\'s launcher.exe to use it.'}
+        Netflix, HBO Max, everythingmoe and trailers open here.</small></label>
     <label class="field"><span>Netflix link</span><input class="input" name="netflix_url" value="${esc(s.netflix_url)}"></label>
     <label class="field"><span>HBO Max link</span><input class="input" name="hbomax_url" value="${esc(s.hbomax_url)}"></label>
     <label class="field"><span>If neither has it, open</span><input class="input" name="fallback_url" value="${esc(s.fallback_url)}">
@@ -1194,7 +1201,7 @@ async function openSettings() {
     return {
       tmdb_api_key: f.get('tmdb_api_key'), mal_client_id: f.get('mal_client_id'), region: f.get('region'),
       netflix_url: f.get('netflix_url'), hbomax_url: f.get('hbomax_url'), fallback_url: f.get('fallback_url'),
-      vlc_path: f.get('vlc_path'), queue_next_episodes: form.queue_next_episodes.checked,
+      vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), queue_next_episodes: form.queue_next_episodes.checked,
     };
   };
   const save = async () => {
@@ -1220,6 +1227,9 @@ async function openSettings() {
       } else if (a === 'vlc') {
         const { path } = await api('POST', '/api/browse', { kind: 'file', types: 'exe', title: 'Find vlc.exe', initial: 'C:\\Program Files\\VideoLAN\\VLC' });
         if (path) form.vlc_path.value = path;
+      } else if (a === 'browser') {
+        const { path } = await api('POST', '/api/browse', { kind: 'file', types: 'exe', title: "Find Opera GX's launcher.exe" });
+        if (path) form.browser_path.value = path;
       } else if (a === 'test') {
         const out = $('#test-out', form);
         out.textContent = 'Testing…';

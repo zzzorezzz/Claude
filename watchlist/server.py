@@ -56,7 +56,15 @@ class App:
     def status(self):
         s = self.settings.get()
         return {"tmdb": bool(s["tmdb_api_key"]), "mal": bool(s["mal_client_id"]),
-                "region": s["region"], "vlc": launcher.find_vlc(s["vlc_path"])}
+                "region": s["region"], "vlc": launcher.find_vlc(s["vlc_path"]),
+                "browser": launcher.find_browser(s["browser_path"])}
+
+    def open_link(self, url):
+        browser = launcher.find_browser(self.settings.get()["browser_path"])
+        try:
+            launcher.open_url(url, browser)
+        except launcher.LaunchError as e:
+            raise ApiError(str(e)) from e
 
     def refresh_metadata(self, item):
         s = self.settings.get()
@@ -167,10 +175,7 @@ class App:
             result.update(service="HBO Max", url=launcher.fill_link(s["hbomax_url"], title))
         else:
             result.update(service="everythingmoe", url=launcher.fill_link(s["fallback_url"], title))
-        try:
-            launcher.open_url(result["url"])
-        except launcher.LaunchError as e:
-            raise ApiError(str(e)) from e
+        self.open_link(result["url"])
         self.store.update(item["id"], {"last_played": time.time()})
         return result
 
@@ -447,10 +452,7 @@ class Handler(BaseHTTPRequestHandler):
         return {"path": path}
 
     def api_open_link(self, body):
-        try:
-            launcher.open_url(str(body.get("url", "")))
-        except launcher.LaunchError as e:
-            raise ApiError(str(e)) from e
+        self.app.open_link(str(body.get("url", "")))
         return {"ok": True}
 
     def api_reveal(self, body):

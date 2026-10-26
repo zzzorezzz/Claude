@@ -4,11 +4,10 @@ import argparse
 import json
 import sys
 import urllib.request
-import webbrowser
 from pathlib import Path
 
 from . import launcher
-from .config import default_data_dir
+from .config import Settings, default_data_dir
 from .server import App, make_server, start_background_refresh
 
 
@@ -25,18 +24,20 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--data", help="folder for your list and settings (default: ./data)")
     ap.add_argument("--browser", action="store_true",
-                    help="open in your normal browser instead of an app window")
+                    help="open in your browser (Opera GX) instead of an app window")
     ap.add_argument("--no-open", action="store_true", help="don't open any window")
     args = ap.parse_args(argv)
 
     url = f"http://127.0.0.1:{args.port}/"
+    data_dir = Path(args.data) if args.data else default_data_dir()
     if _already_running(args.port):
         print(f"Watchlist is already running - opening {url}")
         if not args.no_open:
-            launcher.open_app_window(url, Path(args.data or default_data_dir()))
+            browser = launcher.find_browser(Settings(data_dir / "settings.json").get()["browser_path"])
+            launcher.open_app_window(url, browser)
         return 0
 
-    app = App(Path(args.data) if args.data else default_data_dir())
+    app = App(data_dir)
     try:
         server = make_server(app, args.port)
     except OSError as e:
@@ -46,14 +47,15 @@ def main(argv=None):
     print(f"Watchlist is running at {url}")
     print("Keep this window open while you use the app. Close it (or press Ctrl+C) to quit.")
 
+    browser = launcher.find_browser(app.settings.get()["browser_path"])
     if not args.no_open:
         if args.browser:
-            webbrowser.open(url, new=1)
+            launcher.open_url(url, browser)
         else:
             import threading
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
-            if launcher.open_app_window(url, app.data_dir):
+            if launcher.open_app_window(url, browser):
                 # The pywebview window was closed: quit.
                 server.shutdown()
                 return 0

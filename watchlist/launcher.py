@@ -1,6 +1,7 @@
-"""Starting VLC, the default browser, the file manager and the app window."""
+"""Starting VLC, the browser (Opera GX), the file manager and the app window."""
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -67,10 +68,13 @@ def play_in_vlc(vlc, playlist):
     _spawn(vlc_command(vlc, playlist))
 
 
-def open_url(url):
+def open_url(url, browser=""):
+    """Open a web link in `browser` (a path), or the system default browser."""
     if not url.lower().startswith(("http://", "https://")):
         raise LaunchError("only web links can be opened")
-    if not webbrowser.open(url, new=2):
+    if browser:
+        _spawn([browser, url])
+    elif not webbrowser.open(url, new=2):
         raise LaunchError("couldn't open your default browser")
 
 
@@ -107,27 +111,66 @@ def fill_link(template, title):
     return template.replace("{title}", urllib.parse.quote_plus(title))
 
 
-def _app_browser():
-    """Edge or Chrome, which can show a page as its own app window."""
-    names = ["msedge", "chrome", "google-chrome", "chromium", "chromium-browser"]
-    if sys.platform == "win32":
-        for env in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
-            base = os.environ.get(env)
-            if not base:
-                continue
-            for rel in (r"Microsoft\Edge\Application\msedge.exe",
-                        r"Google\Chrome\Application\chrome.exe"):
-                p = Path(base) / rel
-                if p.is_file():
-                    return str(p)
-    for name in names:
-        found = shutil.which(name)
-        if found:
-            return found
+def _registry_browser(name_part):
+    """Path of an installed browser whose Windows registry name contains name_part."""
+    try:
+        import winreg
+    except ImportError:
+        return ""
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            root = winreg.OpenKey(hive, r"SOFTWARE\Clients\StartMenuInternet")
+        except OSError:
+            continue
+        with root:
+            i = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(root, i)
+                except OSError:
+                    break
+                i += 1
+                if name_part not in sub.lower().replace(" ", ""):
+                    continue
+                try:
+                    with winreg.OpenKey(root, sub + r"\shell\open\command") as key:
+                        command = winreg.QueryValueEx(key, "")[0]
+                except OSError:
+                    continue
+                m = re.match(r'\s*"([^"]+)"|\s*(\S+)', command or "")
+                path = m and (m.group(1) or m.group(2))
+                if path and Path(path).is_file():
+                    return path
     return ""
 
 
-def open_app_window(url, data_dir):
+def find_browser(configured=""):
+    """The browser to use: the one set in Settings, else Opera GX if it's installed.
+    Returns "" when neither is found (the system default browser is used then)."""
+    if configured and Path(configured).is_file():
+        return configured
+    if sys.platform == "win32":
+        found = _registry_browser("operagx")
+        if found:
+            return found
+        for env in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+            base = os.environ.get(env)
+            if not base:
+                continue
+            for rel in (r"Programs\Opera GX\launcher.exe", r"Programs\Opera GX\opera.exe",
+                        r"Opera GX\launcher.exe", r"Opera GX\opera.exe"):
+                p = Path(base) / rel
+                if p.is_file():
+                    return str(p)
+    elif sys.platform == "darwin":
+        for p in (Path("/Applications/Opera GX.app/Contents/MacOS/Opera"),
+                  Path.home() / "Applications/Opera GX.app/Contents/MacOS/Opera"):
+            if p.is_file():
+                return str(p)
+    return ""
+
+
+def open_app_window(url, browser=""):
     """Open the UI. Returns True if it blocks until the window is closed."""
     try:
         import webview  # pywebview, optional
@@ -138,11 +181,8 @@ def open_app_window(url, data_dir):
                               background_color="#141414")
         webview.start()
         return True
-    browser = _app_browser()
     if browser:
-        profile = Path(data_dir) / "window-profile"
-        _spawn([browser, f"--app={url}", f"--user-data-dir={profile}",
-                "--window-size=1440,900", "--no-first-run"])
-        return False
-    webbrowser.open(url, new=1)
+        _spawn([browser, "--new-window", url])
+    else:
+        webbrowser.open(url, new=1)
     return False
