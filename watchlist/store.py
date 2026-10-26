@@ -35,6 +35,8 @@ def _blank_item() -> dict:
         "progress": {"season": 1, "episode": 1},
         "local_folder": "",
         "local_file": "",
+        # Set with "Not working": Watch now goes online until it's fixed.
+        "local_broken": False,
         "added": time.time(),
         "last_played": None,
         "updated": time.time(),
@@ -84,6 +86,8 @@ class Store:
         for item in self._items:
             for key, value in _blank_item().items():
                 item.setdefault(key, value)
+        for col in self._collections:
+            col.setdefault("type", None)
 
     def _save(self):
         write_json(self.path, {"version": 1, "items": self._items,
@@ -139,14 +143,17 @@ class Store:
         with self._lock:
             return copy.deepcopy(self._collections)
 
-    def add_collection(self, name: str):
+    def add_collection(self, name: str, kind=None):
+        """kind None: a collection any title can join. kind "tv"/"anime"/"movie":
+        a folder inside that section, which holds each title at most once."""
         name = (name or "").strip()
         if not name:
-            raise ValueError("give the collection a name")
+            raise ValueError("give it a name")
         with self._lock:
-            if any(c["name"].lower() == name.lower() for c in self._collections):
-                raise ValueError(f'you already have a collection called "{name}"')
-            col = {"id": uuid.uuid4().hex[:10], "name": name, "created": time.time()}
+            if any(c["name"].lower() == name.lower() and c.get("type") == kind
+                   for c in self._collections):
+                raise ValueError(f'you already have one called "{name}"')
+            col = {"id": uuid.uuid4().hex[:10], "name": name, "type": kind, "created": time.time()}
             self._collections.append(col)
             self._save()
             return copy.deepcopy(col)
@@ -172,6 +179,19 @@ class Store:
             for item in self._items:
                 item["collections"] = [c for c in item["collections"] if c != col_id]
             self._save()
+
+    def move_to_folder(self, item_id, folder_id):
+        """Put a title in one of its section's folders ("" = no folder)."""
+        with self._lock:
+            item = self._find(item_id)
+            folders = {c["id"] for c in self._collections if c.get("type") == item["type"]}
+            if folder_id and folder_id not in folders:
+                raise KeyError(folder_id)
+            item["collections"] = [c for c in item["collections"] if c not in folders]
+            if folder_id:
+                item["collections"].append(folder_id)
+            self._save()
+            return copy.deepcopy(item)
 
     def set_item_collections(self, item_id, col_ids):
         with self._lock:

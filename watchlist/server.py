@@ -199,6 +199,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/online", "online"),
         ("POST", r"/api/items/(\w+)/watched", "watched"),
         ("PUT", r"/api/items/(\w+)/collections", "item_collections"),
+        ("PUT", r"/api/items/(\w+)/folder", "move_to_folder"),
         ("POST", r"/api/collections", "add_collection"),
         ("PUT", r"/api/collections/(\w+)", "rename_collection"),
         ("DELETE", r"/api/collections/(\w+)", "delete_collection"),
@@ -356,11 +357,26 @@ class Handler(BaseHTTPRequestHandler):
                 patch["local_file"] = ""
         if "local_file" in body:
             path = str(body["local_file"]).strip().strip('"')
+            if path and not os.path.isfile(path):
+                raise ApiError("that file doesn't exist")
             folder = patch.get("local_folder", item["local_folder"])
-            if path and not (os.path.isfile(path) and folder and _inside(path, folder)):
-                raise ApiError("pick a file inside this title's folder")
+            if path and not (folder and _inside(path, folder)):
+                # A file picked from somewhere else: its folder becomes the title's folder.
+                patch["local_folder"] = os.path.dirname(path)
             patch["local_file"] = path
+        if "local_broken" in body:
+            patch["local_broken"] = bool(body["local_broken"])
+        elif "local_folder" in patch or "local_file" in patch:
+            # Pointing the title at a new folder or file counts as fixing it.
+            patch["local_broken"] = False
         return self.app.store.update(item_id, patch)
+
+    def api_move_to_folder(self, body, item_id):
+        self.app.item(item_id)
+        try:
+            return self.app.store.move_to_folder(item_id, str(body.get("folder") or ""))
+        except KeyError:
+            raise ApiError("folder not found", HTTPStatus.NOT_FOUND) from None
 
     def api_delete_item(self, body, item_id):
         self.app.item(item_id)
@@ -409,7 +425,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.store.set_item_collections(item_id, [str(c) for c in cols])
 
     def api_add_collection(self, body):
-        return self.app.store.add_collection(body.get("name", ""))
+        kind = body.get("type") or None
+        if kind is not None and kind not in TYPES:
+            raise ApiError("type must be movie, tv or anime")
+        return self.app.store.add_collection(body.get("name", ""), kind)
 
     def api_rename_collection(self, body, col_id):
         try:

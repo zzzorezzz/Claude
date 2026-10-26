@@ -32,7 +32,11 @@ const S = {
   genre: '',
   query: '',
   featured: null,
+  folderSel: {},       // per section: '' (all), 'none' (not in a folder) or a folder id
 };
+
+const sectionFolders = (type) => S.collections.filter((c) => c.type === type);
+const globalCollections = () => S.collections.filter((c) => !c.type);
 
 async function api(method, path, body) {
   const opts = { method, headers: { 'X-Watchlist': '1' } };
@@ -203,10 +207,12 @@ function cardHTML(item) {
   if (item.year) meta.push(item.year);
   if (isSeries(item)) meta.push(epLabel(item.progress));
   else if (item.runtime) meta.push(fmtRuntime(item.runtime));
-  return `<div class="card" data-id="${esc(item.id)}" tabindex="0">
+  const badge = !item.local_folder ? ''
+    : item.local_broken ? '<span class="badge-pc warn">FILE ISSUE</span>' : '<span class="badge-pc">ON PC</span>';
+  return `<div class="card" data-id="${esc(item.id)}" tabindex="0" draggable="true">
     <div class="poster-fallback">${esc(item.title)}</div>
     ${item.poster ? `<img class="poster" src="${esc(item.poster)}" alt="" loading="lazy">` : ''}
-    ${item.local_folder ? '<span class="badge-pc">ON PC</span>' : ''}
+    ${badge}
     <div class="card-info">
       <div class="card-buttons">
         <button class="cb play" data-act="watch" title="Watch now">${ICON.play}</button>
@@ -219,7 +225,7 @@ function cardHTML(item) {
   </div>`;
 }
 
-const addTileHTML = (type) => `<button class="tile tile-add" data-add="${type}" title="Add ${TYPE_ONE[type]}">
+const addTileHTML = (type, folder) => `<button class="tile tile-add" data-add="${type}" ${folder ? `data-col="${esc(folder.id)}"` : ''} title="Add ${TYPE_ONE[type]}">
   <span class="plus">+</span><span>Add ${TYPE_ONE[type]}</span></button>`;
 
 function rowHTML({ title, link, items, addType, emptyText, tools = '' }) {
@@ -239,7 +245,7 @@ function rowHTML({ title, link, items, addType, emptyText, tools = '' }) {
 // One delegated handler for every card, tile and button in the main view.
 $('#view').addEventListener('click', (e) => {
   const add = e.target.closest('[data-add]');
-  if (add) { openAdd(add.dataset.add); return; }
+  if (add) { openAdd(add.dataset.add, '', add.dataset.col || ''); return; }
   const action = e.target.closest('[data-do]');
   if (action) { viewAction(action.dataset.do, action.dataset); return; }
   const card = e.target.closest('.card');
@@ -263,11 +269,56 @@ $('#view').addEventListener('contextmenu', (e) => {
   if (item) openItemMenu(item, { x: e.clientX, y: e.clientY });
 });
 
+// Drag a poster onto a folder chip to move it into that folder.
+$('#view').addEventListener('dragstart', (e) => {
+  const card = e.target.closest('.card');
+  if (!card) return;
+  e.dataTransfer.setData('text/x-watchlist', card.dataset.id);
+  e.dataTransfer.effectAllowed = 'move';
+  document.body.classList.add('dragging');
+});
+$('#view').addEventListener('dragend', () => {
+  document.body.classList.remove('dragging');
+  $$('.drop-over').forEach((el) => el.classList.remove('drop-over'));
+});
+$('#view').addEventListener('dragover', (e) => {
+  const target = e.target.closest('[data-drop]');
+  if (!target || !e.dataTransfer.types.includes('text/x-watchlist')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  target.classList.add('drop-over');
+});
+$('#view').addEventListener('dragleave', (e) => {
+  const target = e.target.closest('[data-drop]');
+  if (target && !target.contains(e.relatedTarget)) target.classList.remove('drop-over');
+});
+$('#view').addEventListener('drop', (e) => {
+  const target = e.target.closest('[data-drop]');
+  if (!target) return;
+  e.preventDefault();
+  target.classList.remove('drop-over');
+  const id = e.dataTransfer.getData('text/x-watchlist');
+  if (id) moveToFolder(id, target.dataset.drop === 'none' ? '' : target.dataset.drop);
+});
+
+async function moveToFolder(itemId, folderId) {
+  const item = findItem(itemId);
+  if (!item) return;
+  try {
+    upsert(await api('PUT', `/api/items/${itemId}/folder`, { folder: folderId }));
+    render(); refreshOpenTitle();
+    const folder = S.collections.find((c) => c.id === folderId);
+    toast(folder ? `Moved ${item.title} to ${folder.name}` : `Took ${item.title} out of its folder`);
+  } catch (err) { fail(err); }
+}
+
 function viewAction(name, data) {
   if (name === 'settings') openSettings();
   else if (name === 'watch') { const it = findItem(data.id); if (it) openWatch(it); }
   else if (name === 'info') openTitle(data.id);
   else if (name === 'new-collection') newCollection();
+  else if (name === 'new-folder') newCollection(data.type).then((f) => { if (f) { S.folderSel[data.type] = f.id; render(); } });
+  else if (name === 'pick-folder') { S.folderSel[data.type] = data.id; render(); }
   else if (name === 'rename-collection') renameCollection(data.id);
   else if (name === 'delete-collection') deleteCollection(data.id);
   else if (name === 'search-online') openAdd(data.type, S.query.trim());
@@ -353,18 +404,40 @@ function sortLabel() {
 }
 
 function renderCategory(view, type) {
-  const items = ofType(type);
+  const all = ofType(type);
+  const folders = sectionFolders(type);
+  const folderIds = new Set(folders.map((f) => f.id));
+  let sel = S.folderSel[type] || '';
+  if (sel && sel !== 'none' && !folderIds.has(sel)) sel = S.folderSel[type] = '';
+  if (sel === 'none' && !folders.length) sel = S.folderSel[type] = '';
+  const unsorted = all.filter((i) => !i.collections.some((c) => folderIds.has(c)));
+  const items = !sel ? all : sel === 'none' ? unsorted : all.filter((i) => i.collections.includes(sel));
+  const current = folders.find((f) => f.id === sel);
   const what = type === 'movie' && S.sort === 'popular' ? 'highest grossing first' : sortLabel();
+  const chip = (id, label, count, icon = '') => `<button class="folder-chip ${sel === id ? 'on' : ''}" data-do="pick-folder"
+      data-type="${type}" data-id="${esc(id)}" ${id ? `data-drop="${esc(id)}"` : ''}>${icon}<span>${esc(label)}</span><small>${count}</small></button>`;
   view.innerHTML = `<div class="page">
     <div class="page-head"><h1>${TYPE_PLURAL[type]}</h1>
-      <span class="count">${items.length} title${items.length === 1 ? '' : 's'} · ${what}</span>${filterNote()}
-      <span class="spacer"></span><button class="btn btn-red btn-sm" data-add="${type}">+ Add ${TYPE_ONE[type]}</button></div>
-    <div class="grid">${addTileHTML(type)}${items.map(cardHTML).join('')}</div>
+      <span class="count">${all.length} title${all.length === 1 ? '' : 's'} · ${what}</span>${filterNote()}
+      <span class="spacer"></span>
+      <button class="btn btn-ghost btn-sm" data-do="new-folder" data-type="${type}">${ICON.folder} New folder</button>
+      <button class="btn btn-red btn-sm" data-add="${type}" ${current ? `data-col="${esc(current.id)}"` : ''}>+ Add ${TYPE_ONE[type]}</button></div>
+    <div class="folder-bar">
+      ${chip('', 'All', all.length)}
+      ${folders.map((f) => chip(f.id, f.name, all.filter((i) => i.collections.includes(f.id)).length, ICON.folder)).join('')}
+      ${folders.length ? chip('none', 'Not in a folder', unsorted.length) : ''}
+    </div>
+    <p class="hint">${folders.length ? 'Drag a poster onto a folder to move it there, or use ⋯ → Move to folder.'
+      : `Make folders to sort your ${TYPE_PLURAL[type].toLowerCase()} however you like.`}</p>
+    ${current ? `<div class="folder-head"><h2>${ICON.folder} ${esc(current.name)}</h2>
+      <button class="btn btn-ghost btn-sm" data-do="rename-collection" data-id="${esc(current.id)}">Rename</button>
+      <button class="btn btn-ghost btn-sm" data-do="delete-collection" data-id="${esc(current.id)}">Delete folder</button></div>` : ''}
+    <div class="grid">${sel === 'none' ? '' : addTileHTML(type, current)}${items.map(cardHTML).join('')}</div>
   </div>`;
 }
 
 function renderCollections(view) {
-  const rows = S.collections.map((c) => {
+  const rows = globalCollections().map((c) => {
     const items = sortItems(applyGenre(S.items.filter((i) => i.collections.includes(c.id))));
     return rowHTML({
       title: c.name, link: `#/collections/${c.id}`, items,
@@ -377,7 +450,8 @@ function renderCollections(view) {
     <div class="page-head" style="padding:0 var(--side)"><h1>Collections</h1>${filterNote()}<span class="spacer"></span>
       <button class="btn btn-red btn-sm" data-do="new-collection">+ New collection</button></div>
     ${rows || `<div class="empty-state"><h2>No collections yet</h2>
-      <p>Collections are your own folders, like "Weekend binge" or "Watch with friends".<br>A title can be in as many as you like.</p>
+      <p>Collections mix TV shows, anime and movies, like "Weekend binge" or "Watch with friends".<br>A title can be in as many as you like.
+      For folders inside one section, use "New folder" on the TV Shows, Anime or Movies page.</p>
       <button class="btn btn-white" data-do="new-collection">+ Create your first collection</button></div>`}
   </div>`;
 }
@@ -385,6 +459,7 @@ function renderCollections(view) {
 function renderCollection(view, id) {
   const col = S.collections.find((c) => c.id === id);
   if (!col) { location.hash = '#/collections'; return; }
+  if (col.type) { S.folderSel[col.type] = col.id; location.hash = `#/${col.type}`; return; }
   const items = sortItems(applyGenre(S.items.filter((i) => i.collections.includes(id))));
   view.innerHTML = `<div class="page">
     <div class="page-head"><h1>${esc(col.name)}</h1><span class="count">${items.length} title${items.length === 1 ? '' : 's'}</span>${filterNote()}
@@ -428,16 +503,28 @@ function openItemMenu(item, anchor, { inTitle = false } = {}) {
   closeMenu();
   const menu = document.createElement('div');
   menu.className = 'menu ctx';
-  const cols = S.collections.map((c) => `<button data-col="${esc(c.id)}"><span class="check">${item.collections.includes(c.id) ? '✓' : ''}</span>${esc(c.name)}</button>`).join('');
+  const folders = sectionFolders(item.type);
+  const inFolder = folders.find((f) => item.collections.includes(f.id));
+  const folderBtns = folders.map((f) => `<button data-folder="${esc(f.id)}"><span class="check">${inFolder === f ? '●' : ''}</span>${esc(f.name)}</button>`).join('');
+  const cols = globalCollections().map((c) => `<button data-col="${esc(c.id)}"><span class="check">${item.collections.includes(c.id) ? '✓' : ''}</span>${esc(c.name)}</button>`).join('');
   menu.innerHTML = `${inTitle ? '' : `<button data-m="watch">▶&nbsp; Watch now</button><button data-m="info">ⓘ&nbsp; More info</button><hr>`}
-    <div class="menu-label">Collections</div>${cols || '<div class="menu-label" style="text-transform:none">No collections yet</div>'}
+    <div class="menu-label">Move to folder (${esc(TYPE_PLURAL[item.type])})</div>${folderBtns}
+    ${inFolder ? '<button data-folder=""><span class="check"></span>Not in a folder</button>' : ''}
+    <button data-m="new-folder"><span class="check">+</span>New folder…</button><hr>
+    <div class="menu-label">Collections</div>${cols}
     <button data-m="new-col"><span class="check">+</span>New collection…</button><hr>
     <button data-m="refresh">↻&nbsp; Refresh info</button>
     <button data-m="remove" class="danger">✕&nbsp; Remove from list</button>`;
   menu.addEventListener('click', async (e) => {
     e.stopPropagation();
     const colBtn = e.target.closest('[data-col]');
+    const folderBtn = e.target.closest('[data-folder]');
     try {
+      if (folderBtn) {
+        closeMenu();
+        await moveToFolder(item.id, folderBtn.dataset.folder);
+        return;
+      }
       if (colBtn) {
         const id = colBtn.dataset.col;
         const now = findItem(item.id);
@@ -453,7 +540,10 @@ function openItemMenu(item, anchor, { inTitle = false } = {}) {
       closeMenu();
       if (m === 'watch') openWatch(findItem(item.id));
       else if (m === 'info') openTitle(item.id);
-      else if (m === 'new-col') {
+      else if (m === 'new-folder') {
+        const folder = await newCollection(item.type);
+        if (folder) await moveToFolder(item.id, folder.id);
+      } else if (m === 'new-col') {
         const col = await newCollection();
         if (col) {
           const now = findItem(item.id);
@@ -545,11 +635,13 @@ function confirmModal(title, text, ok = 'OK') {
 
 /* ======================================================== collections */
 
-async function newCollection() {
-  const name = await promptModal({ title: 'New collection', placeholder: 'e.g. Weekend binge', ok: 'Create' });
+async function newCollection(type = null) {
+  const name = await promptModal(type
+    ? { title: `New folder in ${TYPE_PLURAL[type]}`, placeholder: 'e.g. Rewatch, Shounen, Seasonal…', ok: 'Create' }
+    : { title: 'New collection', label: 'Collections can mix TV shows, anime and movies.', placeholder: 'e.g. Weekend binge', ok: 'Create' });
   if (!name) return null;
   try {
-    const col = await api('POST', '/api/collections', { name });
+    const col = await api('POST', '/api/collections', { name, type });
     S.collections.push(col);
     render();
     return col;
@@ -559,7 +651,7 @@ async function newCollection() {
 async function renameCollection(id) {
   const col = S.collections.find((c) => c.id === id);
   if (!col) return;
-  const name = await promptModal({ title: 'Rename collection', value: col.name });
+  const name = await promptModal({ title: col.type ? 'Rename folder' : 'Rename collection', value: col.name });
   if (!name) return;
   try {
     Object.assign(col, await api('PUT', `/api/collections/${id}`, { name }));
@@ -571,6 +663,7 @@ async function deleteCollection(id) {
   const col = S.collections.find((c) => c.id === id);
   if (!col) return;
   if (!await confirmModal(`Delete "${col.name}"?`, 'The titles in it stay in your list.', 'Delete')) return;
+  if (col.type && S.folderSel[col.type] === id) S.folderSel[col.type] = '';
   try {
     await api('DELETE', `/api/collections/${id}`);
     if (location.hash === `#/collections/${id}`) location.hash = '#/collections';
@@ -580,13 +673,12 @@ async function deleteCollection(id) {
 
 /* ============================================================ add flow */
 
-function openAdd(type = 'tv', query = '') {
+function openAdd(type = 'tv', query = '', preCol = '') {
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>Add to your list</h2><p class="sub">Search online - the summary, ratings and trailer are added automatically.</p>
     <div class="tabs">${TYPES.map((t) => `<button data-type="${t}">${TYPE_ONE[t] === 'anime' ? 'Anime' : TYPE_ONE[t][0].toUpperCase() + TYPE_ONE[t].slice(1)}</button>`).join('')}</div>
     <div class="input-row"><input class="input" id="add-q" placeholder="Search…" autocomplete="off" spellcheck="false">
-      <select class="select" id="add-col" title="Also add to a collection"><option value="">No collection</option>
-      ${S.collections.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select></div>
+      <select class="select" id="add-col" title="Also put it in a folder or collection"></select></div>
     <div id="add-out"></div></div>`, 'add-modal');
   const st = { type, seq: 0 };
   const input = $('#add-q', wrap);
@@ -596,6 +688,14 @@ function openAdd(type = 'tv', query = '') {
     st.type = t;
     $$('.tabs button', wrap).forEach((b) => b.classList.toggle('on', b.dataset.type === t));
     input.placeholder = t === 'anime' ? 'Search MyAnimeList, or paste a myanimelist.net/anime/… link' : `Search ${TYPE_PLURAL[t]} on TMDB…`;
+    const select = $('#add-col', wrap);
+    const keep = select.value || preCol;
+    const folders = sectionFolders(t);
+    const cols = globalCollections();
+    select.innerHTML = '<option value="">No folder</option>'
+      + (folders.length ? `<optgroup label="${esc(TYPE_PLURAL[t])} folders">${folders.map((f) => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join('')}</optgroup>` : '')
+      + (cols.length ? `<optgroup label="Collections">${cols.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</optgroup>` : '');
+    select.value = [...folders, ...cols].some((c) => c.id === keep) ? keep : '';
     run();
   };
   const run = async () => {
@@ -709,8 +809,10 @@ function drawTitle(wrap) {
   if (item.mal_rank) side.push(`<div>MAL rank: <span>#${item.mal_rank}</span></div>`);
   if (item.mal_members) side.push(`<div>MAL members: <span>${item.mal_members.toLocaleString()}</span></div>`);
   if (item.votes) side.push(`<div>Votes: <span>${item.votes.toLocaleString()}</span></div>`);
-  const cols = S.collections.filter((c) => item.collections.includes(c.id));
-  side.push(`<div>Collections: <span>${cols.length ? esc(cols.map((c) => c.name).join(', ')) : 'none'}</span></div>`);
+  const folder = sectionFolders(item.type).find((c) => item.collections.includes(c.id));
+  const cols = globalCollections().filter((c) => item.collections.includes(c.id));
+  side.push(`<div>Folder: <span>${folder ? esc(folder.name) : 'none'}</span></div>`);
+  if (cols.length) side.push(`<div>Collections: <span>${esc(cols.map((c) => c.name).join(', '))}</span></div>`);
   const links = Object.entries(item.links || {}).map(([k, url]) => `<button class="linkish" data-link="${esc(url)}">${{ tmdb: 'TMDB', imdb: 'IMDb', mal: 'MyAnimeList' }[k] || esc(k)}</button>`);
   if (links.length) side.push(`<div>Links: <span>${links.join(' · ')}</span></div>`);
 
@@ -803,6 +905,12 @@ async function titleClick(wrap, e) {
       if (await chooseFolder(item)) loadLocal(wrap);
     } else if (t === 'open-folder') {
       await api('POST', '/api/reveal', { item_id: item.id });
+    } else if (t === 'choose-file') {
+      openChooseFile(item);
+    } else if (t === 'mark-broken' || t === 'mark-ok') {
+      upsert(await api('PUT', `/api/items/${item.id}`, { local_broken: t === 'mark-broken' }));
+      render(); refreshOpenTitle();
+      toast(t === 'mark-broken' ? 'Marked as not working - Watch now will go online' : 'Watch now will play the file again');
     } else if (t === 'forget-folder') {
       upsert(await api('PUT', `/api/items/${item.id}`, { local_folder: '' }));
       wrap.st.local = null;
@@ -846,9 +954,16 @@ function drawFolderLine(wrap) {
     const nVid = local.videos.length;
     found = `<span>${nVid} video file${nVid === 1 ? '' : 's'}${isSeries(item) ? `, ${local.available.length} episode${local.available.length === 1 ? '' : 's'} recognised` : ''}</span>`;
   }
-  line.innerHTML = `<code>${esc(item.local_folder)}</code>${found}
+  const status = item.local_broken
+    ? `<div class="local-status bad">⚠ Marked as not working - Watch now goes online until you fix it.
+        Choose the right file or folder, or press "It works now".</div>`
+    : '<div class="local-status ok">✓ Watch now plays from here in VLC. If the wrong file plays or it won\'t play, press "Not working".</div>';
+  line.innerHTML = `${status}<code>${esc(item.local_folder)}</code>${found}
+    <button class="btn btn-ghost btn-sm" data-t="choose-file">Choose file…</button>
     <button class="btn btn-ghost btn-sm" data-t="open-folder">Open folder</button>
-    <button class="btn btn-ghost btn-sm" data-t="choose-folder">Change</button>
+    <button class="btn btn-ghost btn-sm" data-t="choose-folder">Change folder</button>
+    ${item.local_broken ? '<button class="btn btn-white btn-sm" data-t="mark-ok">It works now</button>'
+      : '<button class="btn btn-ghost btn-sm" data-t="mark-broken">Not working</button>'}
     <button class="btn btn-ghost btn-sm" data-t="forget-folder">Forget</button>`;
 }
 
@@ -951,10 +1066,82 @@ async function chooseFolder(item) {
   } catch (e) { fail(e); return null; }
 }
 
+// Watch now: a title with a working folder plays straight away; one marked
+// "not working" goes online; anything else asks On my PC / Online.
 function openWatch(item, ep) {
   const wrap = openModal('', 'watch-modal');
   wrap.st = { id: item.id, ep: ep ? { ...ep } : { ...item.progress } };
-  watchChoice(wrap);
+  if (item.local_folder && !item.local_broken) autoLocal(wrap);
+  else if (item.local_folder) watchOnline(wrap, { reason: 'Its file is marked as not working, so going online instead.', fix: true });
+  else watchChoice(wrap);
+}
+
+// Pick a file by hand (from the title page or after a wrong episode).
+function openChooseFile(item, ep) {
+  const wrap = openModal('', 'watch-modal');
+  wrap.st = { id: item.id, ep: ep ? { ...ep } : { ...item.progress } };
+  watchLocal(wrap, { choose: true });
+}
+
+const whatLabel = (wrap) => {
+  const item = findItem(wrap.st.id);
+  return isSeries(item) ? epLabel(wrap.st.ep) : item.title;
+};
+
+async function fetchLocal(wrap, path = '') {
+  const q = new URLSearchParams({ season: wrap.st.ep.season, episode: wrap.st.ep.episode, path });
+  wrap.st.info = await api('GET', `/api/items/${wrap.st.id}/local?${q}`);
+  return wrap.st.info;
+}
+
+async function autoLocal(wrap) {
+  const item = findItem(wrap.st.id);
+  const what = whatLabel(wrap);
+  watchBody(wrap, `<div class="center"><div class="spinner"></div><p class="muted">Starting ${esc(what)}…</p></div>`);
+  let info;
+  try {
+    info = await fetchLocal(wrap);
+  } catch (e) {
+    return watchOnline(wrap, { reason: `Couldn't read ${item.title}'s folder (${e.message}), so going online.`, fix: true });
+  }
+  if (!wrap.isConnected) return;
+  if (!info.exists) {
+    return watchOnline(wrap, { reason: `${item.title}'s folder wasn't found (moved, renamed or the drive isn't plugged in), so going online.`, fix: true });
+  }
+  if (!info.target) {
+    return watchOnline(wrap, { reason: `${what} isn't in ${item.title}'s folder, so going online.`, fix: true });
+  }
+  try {
+    await playFile(wrap, info.target, info.subtitles[0]);
+  } catch (e) {
+    if (wrap.isConnected) watchOnline(wrap, { reason: `The file couldn't be played (${e.message}), so going online.`, fix: true });
+  }
+}
+
+async function playFile(wrap, video, sub) {
+  const item = findItem(wrap.st.id);
+  const res = await api('POST', `/api/items/${item.id}/play`, {
+    path: video.path, subtitle: sub ? sub.path : '',
+    season: wrap.st.ep.season, episode: wrap.st.ep.episode,
+  });
+  await reload();
+  if (wrap.isConnected) drawPlaying(wrap, res, video, sub);
+}
+
+function drawPlaying(wrap, res, video, sub) {
+  const item = findItem(wrap.st.id);
+  const body = watchBody(wrap, `<div class="center">
+    <div class="result-icon">▶️</div>
+    <h2>Playing ${esc(whatLabel(wrap))} in VLC</h2>
+    <p class="sub">${esc(video.name)}<br>
+      <span class="small">Subtitles: ${sub ? esc(sub.name) : 'none found'}${res.queued ? ` · the next ${res.queued} episode${res.queued === 1 ? '' : 's'} play after it, in order` : ''}</span></p>
+    <div class="btns" style="justify-content:center"><button class="btn btn-white" data-w="done">Done</button>
+      <button class="btn btn-ghost" data-w="choose">Wrong episode? Choose the file</button></div>
+    <div class="btns" style="justify-content:center;margin-top:10px">
+      <button class="btn btn-ghost btn-sm" data-w="broken">File not working - watch online instead</button></div>
+  </div>`);
+  body.addEventListener('click', (e) => localAction(wrap, e));
+  if (item.format === 'movie') $('[data-w="choose"]', body).textContent = 'Wrong file? Choose another';
 }
 
 function watchBody(wrap, html) {
@@ -986,11 +1173,22 @@ function watchChoice(wrap) {
     const c = e.target.closest('[data-choice]')?.dataset.choice;
     if (!c) return;
     readEp();
-    if (c === 'local') watchLocal(wrap); else watchOnline(wrap);
+    if (c === 'local') startLocal(wrap); else watchOnline(wrap);
   });
 }
 
-async function watchLocal(wrap, { path = '' } = {}) {
+async function startLocal(wrap) {
+  let item = findItem(wrap.st.id);
+  if (!item.local_folder || item.local_broken) {
+    watchBody(wrap, '<div class="center"><div class="spinner"></div><p class="muted">Choose the folder in the window that just opened…</p></div>');
+    item = await chooseFolder(item);
+    if (!wrap.isConnected) return;
+    if (!item) { watchChoice(wrap); return; }
+  }
+  autoLocal(wrap);
+}
+
+async function watchLocal(wrap, { path = '', choose = false } = {}) {
   let item = findItem(wrap.st.id);
   if (!item.local_folder) {
     watchBody(wrap, '<div class="center"><div class="spinner"></div><p class="muted">Choose the folder in the window that just opened…</p></div>');
@@ -1001,18 +1199,16 @@ async function watchLocal(wrap, { path = '' } = {}) {
   watchBody(wrap, '<div class="center"><div class="spinner"></div><p class="muted">Looking for the file…</p></div>');
   let info;
   try {
-    const q = new URLSearchParams({ season: wrap.st.ep.season, episode: wrap.st.ep.episode, path });
-    info = await api('GET', `/api/items/${item.id}/local?${q}`);
+    info = await fetchLocal(wrap, path);
   } catch (e) { fail(e); watchChoice(wrap); return; }
   if (!wrap.isConnected) return;
-  wrap.st.info = info;
   if (!info.exists) {
     const body = watchBody(wrap, `<h2>Folder not found</h2><p class="sub">${esc(item.local_folder)}<br>It may have been moved, renamed, or be on a drive that isn't plugged in.</p>
       <div class="btns"><button class="btn btn-white" data-w="change">${ICON.folder} Choose the folder again</button><button class="btn btn-ghost" data-w="back">Back</button></div>`);
     body.addEventListener('click', (e) => localAction(wrap, e));
     return;
   }
-  drawLocal(wrap);
+  drawLocal(wrap, { choose });
 }
 
 function videoLabel(v) {
@@ -1020,7 +1216,7 @@ function videoLabel(v) {
   return v.season != null ? `S${v.season} E${v.episodes.join('-')}` : `E${v.episodes.join('-')}`;
 }
 
-function drawLocal(wrap) {
+function drawLocal(wrap, { choose = false } = {}) {
   const item = findItem(wrap.st.id);
   const info = wrap.st.info;
   const target = info.target;
@@ -1029,7 +1225,8 @@ function drawLocal(wrap) {
   const videoList = `<div class="file-list">${info.videos.map((v, i) => `<button data-video="${i}">
       ${videoLabel(v) ? `<span class="tag">${esc(videoLabel(v))}</span>` : ''}<span class="fname">${esc(v.rel)}</span></button>`).join('')}</div>`;
   const footer = `<div class="footer-line">${ICON.folder.replace('<svg', '<svg width="16" height="16"')}<code>${esc(item.local_folder)}</code>
-    <span class="spacer" style="flex:1"></span><button class="btn btn-ghost btn-sm" data-w="change">Change folder</button>
+    <span class="spacer" style="flex:1"></span><button class="btn btn-ghost btn-sm" data-w="browse">Browse for a file…</button>
+    <button class="btn btn-ghost btn-sm" data-w="change">Change folder</button>
     <button class="btn btn-ghost btn-sm" data-w="back">Back</button></div>`;
 
   if (!target) {
@@ -1046,8 +1243,8 @@ function drawLocal(wrap) {
     `<option value="none" ${subs.length ? '' : 'selected'}>${subs.length ? 'No subtitles' : 'No subtitle files found'}</option>`,
     '<option value="pick">Choose a subtitle file…</option>',
   ].join('');
-  const body = watchBody(wrap, `<h2>Ready to play ${esc(what)}</h2>
-    <p class="sub">${esc(item.title)}</p>
+  const body = watchBody(wrap, `<h2>${choose ? 'Choose what to play' : `Ready to play ${esc(what)}`}</h2>
+    <p class="sub">${esc(item.title)}${choose ? ` · picked: ${esc(what)}` : ''}</p>
     <div class="file-card">${ICON.file}<div><b>${esc(target.name)}</b><small>${esc(target.rel)}</small></div></div>
     <label class="field"><span>Subtitles</span>
       <div class="input-row"><select class="select" id="w-sub" style="flex:1">${subOptions}</select>
@@ -1055,7 +1252,7 @@ function drawLocal(wrap) {
       <small>Subtitle files with the same name as the video load automatically. ${series ? 'The next episodes are queued in VLC with their matching subtitles.' : ''}</small></label>
     <div class="btns"><button class="btn btn-red" data-w="play">${ICON.play} Play in VLC</button>
       <button class="btn btn-ghost" data-w="reveal">Show in folder</button></div>
-    ${info.videos.length > 1 ? `<details style="margin-top:16px"><summary>Play a different file</summary>${videoList}</details>` : ''}
+    ${info.videos.length > 1 ? `<details style="margin-top:16px" ${choose ? 'open' : ''}><summary>All files in the folder (${info.videos.length}) - click one to pick it</summary>${videoList}</details>` : ''}
     ${footer}`);
   if (!S.status.vlc) {
     body.insertAdjacentHTML('afterbegin', '<div class="warn" style="margin-bottom:16px">VLC wasn\'t found on this PC. Install it from videolan.org, or set its location in Settings.</div>');
@@ -1084,16 +1281,30 @@ async function localAction(wrap, e) {
     if (isSeries(item) && v.episodes.length) {
       wrap.st.ep = { season: v.season ?? wrap.st.ep.season, episode: v.episodes[0] };
     }
-    watchLocal(wrap, { path: v.path });
+    watchLocal(wrap, { path: v.path, choose: true });
     return;
   }
   const w = e.target.closest('[data-w]')?.dataset.w;
   if (!w) return;
   try {
     if (w === 'back') watchChoice(wrap);
-    else if (w === 'change') {
+    else if (w === 'done') closeModal(wrap);
+    else if (w === 'choose') {
+      if (wrap.st.info?.exists) drawLocal(wrap, { choose: true }); else watchLocal(wrap, { choose: true });
+    } else if (w === 'broken') {
+      upsert(await api('PUT', `/api/items/${item.id}`, { local_broken: true }));
+      render(); refreshOpenTitle();
+      toast('Marked as not working - fix it any time from the title page');
+      watchOnline(wrap, { reason: 'Marked the file as not working. Watch now goes online until you fix it.', fix: true });
+    } else if (w === 'change') {
       const updated = await chooseFolder(item);
-      if (updated && wrap.isConnected) watchLocal(wrap);
+      if (updated && wrap.isConnected) autoLocal(wrap);
+    } else if (w === 'browse') {
+      const { path } = await api('POST', '/api/browse', { kind: 'file', types: 'video', title: `Choose a file for ${item.title}`, initial: item.local_folder });
+      if (!path) return;
+      upsert(await api('PUT', `/api/items/${item.id}`, { local_file: path }));
+      render(); refreshOpenTitle();
+      watchLocal(wrap, { path, choose: true });
     } else if (w === 'reveal') {
       await api('POST', '/api/reveal', { item_id: item.id, path: info.target.path });
     } else if (w === 'reveal-sub') {
@@ -1105,13 +1316,10 @@ async function localAction(wrap, e) {
       const sub = info.subtitles[Number(sel)];
       const btn = e.target.closest('[data-w]');
       btn.disabled = true;
-      const res = await api('POST', `/api/items/${item.id}/play`, {
-        path: info.target.path, subtitle: sub ? sub.path : '',
-        season: wrap.st.ep.season, episode: wrap.st.ep.episode,
-      });
-      toast(`Opening in VLC: ${res.file}${res.queued ? ` (+${res.queued} queued)` : ''}`);
-      closeModal(wrap);
-      await reload();
+      if (findItem(item.id).local_broken) {
+        upsert(await api('PUT', `/api/items/${item.id}`, { local_broken: false }));
+      }
+      await playFile(wrap, info.target, sub);
     }
   } catch (err) {
     fail(err);
@@ -1120,7 +1328,7 @@ async function localAction(wrap, e) {
   }
 }
 
-async function watchOnline(wrap) {
+async function watchOnline(wrap, { reason = '', fix = false } = {}) {
   const item = findItem(wrap.st.id);
   const region = regionName(S.status.region || 'PK');
   watchBody(wrap, `<div class="center"><div class="spinner"></div><h2>Checking Netflix and HBO Max…</h2><p class="muted">Looking up where ${esc(item.title)} streams in ${esc(region)}</p></div>`);
@@ -1132,6 +1340,7 @@ async function watchOnline(wrap) {
     if (!wrap.isConnected) return;
     const found = res.service === 'Netflix' || res.service === 'HBO Max';
     const body = watchBody(wrap, `<div class="center">
+      ${reason ? `<div class="warn" style="margin-bottom:18px;justify-content:center">${esc(reason)}</div>` : ''}
       <div class="result-icon">${found ? '✅' : '🔎'}</div>
       <h2>${found ? `Opening ${esc(res.service)}` : `Not on Netflix or HBO Max in ${esc(region)}`}</h2>
       <p class="sub">${found ? `${esc(item.title)} is on ${esc(res.service)} in ${esc(region)}. It's open in ${browserName()}${isSeries(item) ? ` - you're up to ${epLabel(wrap.st.ep)}` : ''}.`
@@ -1139,11 +1348,13 @@ async function watchOnline(wrap) {
       ${res.services.length ? `<div class="muted small">Streaming in ${esc(region)} on:</div><div class="services" style="justify-content:center">${res.services.map((s) => `<span class="chip">${esc(s)}</span>`).join('')}</div>` : ''}
       ${res.message ? `<p class="note">${esc(res.message)}</p>` : ''}
       <div class="btns" style="justify-content:center;margin-top:16px"><button class="btn btn-white" data-w="done">Done</button>
-      <button class="btn btn-ghost" data-w="again">Open the page again</button></div></div>`);
+      <button class="btn btn-ghost" data-w="again">Open the page again</button>
+      ${fix ? '<button class="btn btn-ghost" data-w="fix">Fix the file on my PC</button>' : ''}</div></div>`);
     body.addEventListener('click', (e) => {
       const w = e.target.closest('[data-w]')?.dataset.w;
       if (w === 'done') closeModal(wrap);
       if (w === 'again') api('POST', '/api/open', { url: res.url }).catch(fail);
+      if (w === 'fix') watchLocal(wrap, { choose: true });
     });
     render(); refreshOpenTitle();
   } catch (e) {

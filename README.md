@@ -6,15 +6,19 @@ A Netflix-style desktop app for the TV shows, anime and movies you plan to watch
   - Movies are ordered by box office, TV shows by TMDB popularity, and anime by MyAnimeList members.
 - **Top bar:** search, **Sort by year** (newest first, oldest first, then back to popular) and a **Genre** filter.
 - **Adding titles:** use **+** in any row. The summary, ratings, cast, seasons and trailer are filled in automatically, from TMDB for movies and TV and from MyAnimeList for anime.
-- **Collections:** your own folders. A title can be in several; right-click a poster (or use **⋯**) to add it to one.
+- **Folders:** on the TV Shows, Anime and Movies pages, click **New folder** to make your own folders. Drag a poster onto a folder to move it there, or right-click a poster (or use **⋯**) → **Move to folder**. A title is in one folder at a time.
+- **Collections:** these can mix TV shows, anime and movies, and a title can be in several. Find them on the **Collections** page.
 - **Title page:** backdrop, summary, ratings and an episode list. The trailer only plays when you click it.
-- **Watch now → On my PC:**
-  - The first time, you pick the folder with the episodes, and it's remembered.
-  - The right episode plays in VLC, with the following episodes queued.
-  - Matching `.srt`/`.ass` subtitle files are found and loaded. You can switch subtitles, pick another subtitle file, or open its folder.
-- **Watch now → Online:**
-  1. The app checks whether the title is on **Netflix**, then **HBO Max**, in your country (Pakistan by default), and opens that service in **Opera GX**.
-  2. If neither has it, **everythingmoe.com** opens.
+- **Watch now:** your file comes first, then online.
+  - **The first time,** it asks **On my PC** or **Online**. Pick On my PC, choose the folder with the episodes, and it's remembered.
+  - **After that,** Watch now just plays the episode you're up to in VLC (episode 1 to start), followed by the next episodes in order. It loads the matching `.srt`/`.ass` subtitles too.
+  - **If the file is missing or won't start,** the app goes online instead:
+    1. **Netflix**, then **HBO Max**, if either has it in your country (Pakistan by default), opened in **Opera GX**.
+    2. Otherwise, **everythingmoe.com**.
+  - **To play a different episode,** click it in the title page's episode list. After pressing Watch now, you can also click **Wrong episode? Choose the file** to see every file in the folder.
+- **When a file doesn't work:** if the app thinks a file is fine but it isn't, press **Not working**. It's in the play window, and in the **On your PC** section of the title page.
+  - Watch now then goes online for that title, and its poster shows **FILE ISSUE**.
+  - Fix it later from the title page with **Choose file…** or **Change folder**, or press **It works now**.
 
 ## Setup (Windows)
 

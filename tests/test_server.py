@@ -104,9 +104,9 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200, res)
         self.assertEqual(res["queued"], 1)
         cmd = self.spawned[-1]
-        self.assertEqual(cmd[0], "C:/VLC/vlc.exe")
-        self.assertEqual(cmd[1:3], [info["target"]["path"], f":sub-file={sub}"])
-        self.assertTrue(cmd[3].endswith("Breaking.Bad.S01E02.mkv"))
+        self.assertEqual(cmd[:3], ["C:/VLC/vlc.exe", "--no-random", "--no-playlist-enqueue"])
+        self.assertEqual(cmd[3:5], [info["target"]["path"], f":sub-file={sub}"])
+        self.assertTrue(cmd[5].endswith("Breaking.Bad.S01E02.mkv"))
 
         # Files outside the title's folder can't be launched.
         outside = touch(self.media, "elsewhere.mkv")
@@ -161,6 +161,40 @@ class ServerTest(unittest.TestCase):
         self.call("POST", "/api/open", {"url": "https://www.youtube.com/watch?v=x"})
         self.assertEqual(self.spawned[-1], [str(opera), "https://www.youtube.com/watch?v=x"])
         self.assertEqual(self.opened, [], "the system default browser isn't used")
+
+    def test_section_folders_hold_a_title_once(self):
+        anime = self.add("anime", "mal", "52991")
+        movie = self.add("movie", "tmdb", "movie/27205")
+        _, shounen = self.call("POST", "/api/collections", {"name": "Shounen", "type": "anime"})
+        _, binge = self.call("POST", "/api/collections", {"name": "To binge", "type": "anime"})
+        _, global_col = self.call("POST", "/api/collections", {"name": "Favourites"})
+        status, _ = self.call("POST", "/api/collections", {"name": "Shounen", "type": "movie"})
+        self.assertEqual(status, 200, "the same name is fine in another section")
+        self.call("PUT", f"/api/items/{anime['id']}/collections", {"collections": [global_col["id"]]})
+        _, item = self.call("PUT", f"/api/items/{anime['id']}/folder", {"folder": shounen["id"]})
+        _, item = self.call("PUT", f"/api/items/{anime['id']}/folder", {"folder": binge["id"]})
+        self.assertEqual(sorted(item["collections"]), sorted([global_col["id"], binge["id"]]))
+        _, item = self.call("PUT", f"/api/items/{anime['id']}/folder", {"folder": ""})
+        self.assertEqual(item["collections"], [global_col["id"]])
+        status, _ = self.call("PUT", f"/api/items/{movie['id']}/folder", {"folder": shounen["id"]})
+        self.assertEqual(status, 404, "an anime folder can't hold a movie")
+        status, _ = self.call("POST", "/api/collections", {"name": "x", "type": "music"})
+        self.assertEqual(status, 400)
+
+    def test_not_working_flag_and_picking_a_file(self):
+        movie = self.add("movie", "tmdb", "movie/27205")
+        f = touch(self.media, "Films/Inception.mkv")
+        _, item = self.call("PUT", f"/api/items/{movie['id']}", {"local_file": str(f)})
+        self.assertEqual(item["local_folder"], str(f.parent), "the file's folder is remembered too")
+        self.assertFalse(item["local_broken"])
+        _, item = self.call("PUT", f"/api/items/{movie['id']}", {"local_broken": True})
+        self.assertTrue(item["local_broken"])
+        other = touch(self.media, "Other/Inception 1080p.mkv")
+        _, item = self.call("PUT", f"/api/items/{movie['id']}", {"local_file": str(other)})
+        self.assertFalse(item["local_broken"], "choosing a new file clears the flag")
+        self.assertEqual(item["local_folder"], str(other.parent))
+        status, _ = self.call("PUT", f"/api/items/{movie['id']}", {"local_file": str(self.media / "nope.mkv")})
+        self.assertEqual(status, 400)
 
     def test_collections(self):
         item = self.add("movie", "tmdb", "movie/27205")

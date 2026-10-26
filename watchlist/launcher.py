@@ -55,7 +55,10 @@ def find_vlc(configured=""):
 
 def vlc_command(vlc, playlist):
     """playlist: [(video_path, subtitle_path_or_None), ...]"""
-    cmd = [vlc]
+    # Always start at the first file and play the rest in order, even if
+    # shuffle was left on in VLC, and replace (not add to) the playlist of a
+    # VLC window that's already open.
+    cmd = [vlc, "--no-random", "--no-playlist-enqueue"]
     for video, subtitle in playlist:
         cmd.append(video)
         if subtitle:
