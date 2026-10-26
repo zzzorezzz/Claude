@@ -19,6 +19,29 @@ def _already_running(port):
         return False
 
 
+def _tell(message):
+    """Print, and also show a message box when running as Watchlist.exe (no console)."""
+    print(message)
+    if getattr(sys, "frozen", False) and sys.platform == "win32":
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, message, "Watchlist", 0x10)
+
+
+def _self_test(path):
+    """Used by the Windows build to check everything made it into Watchlist.exe."""
+    from .server import WEB_DIR
+    report = {"frozen": bool(getattr(sys, "frozen", False)),
+              "web_files": all((WEB_DIR / f).is_file() for f in ("index.html", "app.js", "style.css"))}
+    for module in ("webview", "clr"):
+        try:
+            __import__(module)
+            report[module] = True
+        except Exception as e:  # noqa: BLE001 - report whatever went wrong
+            report[module] = f"{type(e).__name__}: {e}"
+    Path(path).write_text(json.dumps(report), encoding="utf-8")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="watchlist", description=__doc__)
     ap.add_argument("--port", type=int, default=8765)
@@ -26,7 +49,10 @@ def main(argv=None):
     ap.add_argument("--browser", action="store_true",
                     help="open in your browser (Opera GX) instead of an app window")
     ap.add_argument("--no-open", action="store_true", help="don't open any window")
+    ap.add_argument("--self-test", metavar="FILE", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    if args.self_test:
+        return _self_test(args.self_test)
 
     url = f"http://127.0.0.1:{args.port}/"
     data_dir = Path(args.data) if args.data else default_data_dir()
@@ -41,7 +67,8 @@ def main(argv=None):
     try:
         server = make_server(app, args.port)
     except OSError as e:
-        print(f"Couldn't start on port {args.port} ({e}). Try: Watchlist.bat --port 8800")
+        _tell(f"Watchlist couldn't start: port {args.port} is in use by another program ({e}).\n\n"
+              f"Start it with a different port, e.g.: Watchlist.exe --port 8800")
         return 1
     start_background_refresh(app)
     print(f"Watchlist is running at {url}")

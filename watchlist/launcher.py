@@ -9,6 +9,8 @@ import urllib.parse
 import webbrowser
 from pathlib import Path
 
+from . import dialogs
+
 
 class LaunchError(Exception):
     pass
@@ -177,10 +179,15 @@ def open_app_window(url, browser=""):
     except ImportError:
         webview = None
     if webview is not None:
-        webview.create_window("Watchlist", url, width=1440, height=900, min_size=(900, 600),
-                              background_color="#141414")
-        webview.start()
-        return True
+        try:
+            dialogs.window = webview.create_window(
+                "Watchlist", url, width=1440, height=900, min_size=(900, 600),
+                background_color="#141414")
+            webview.start()
+            return True
+        except Exception:
+            # e.g. the WebView2 runtime is missing: use the browser instead.
+            dialogs.window = None
     if browser:
         _spawn([browser, "--new-window", url])
     else:

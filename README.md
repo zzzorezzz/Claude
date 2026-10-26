@@ -18,21 +18,31 @@ A Netflix-style desktop app for the TV shows, anime and movies you plan to watch
 
 ## Setup (Windows)
 
-1. Install **Python 3.10 or newer** from <https://www.python.org/downloads/>. On the first installer screen, tick **"Add python.exe to PATH"**.
-2. Install **VLC** from <https://www.videolan.org/>. The app finds it automatically.
-3. Download this project: on GitHub, use **Code → Download ZIP**, then unzip it anywhere.
-4. Optional, but gives the app its own window: open a terminal in the folder and run
-   ```
-   py -m pip install -r requirements.txt
-   ```
-   Without it, the app opens in an Opera GX window instead, which works just as well.
-5. Double-click **`Watchlist.bat`**.
-   - A small black window stays open while the app runs; close it to quit.
-6. In the app, click the **gear icon (Settings)** and paste:
+1. Install **VLC** from <https://www.videolan.org/>. The app finds it automatically.
+2. Download **Watchlist.exe**:
+   1. On GitHub, open the repo's **Actions** tab and click the latest green **Build Watchlist.exe** run.
+   2. At the bottom, under **Artifacts**, click **Watchlist-exe**. A zip downloads.
+   3. Unzip it and put `Watchlist.exe` wherever you like, such as your Desktop or a `C:\Apps` folder.
+3. Double-click **Watchlist.exe**. It opens in its own window; close the window to quit.
+   - The first time, Windows may say "Windows protected your PC", because the app isn't signed by a paid certificate. Click **More info → Run anyway**.
+4. In the app, click the **gear icon (Settings)** and paste:
    - your **TMDB token**: the long "API Read Access Token" (or the short "API Key") from themoviedb.org → Settings → API;
    - your **MyAnimeList Client ID**: from myanimelist.net/apiconfig.
 
    Click **Save & test keys** to check both.
+
+To get a newer version later, download it the same way and replace the old `Watchlist.exe`. Your list is kept separately, so it isn't lost.
+
+To put it on the taskbar or Start menu, right-click `Watchlist.exe` and choose **Pin to taskbar** or **Pin to Start**.
+
+### Running from source instead
+
+If you'd rather run the Python code directly:
+
+1. Install **Python 3.10 or newer** from <https://www.python.org/downloads/>, ticking **"Add python.exe to PATH"**.
+2. Download the code with **Code → Download ZIP** and unzip it.
+3. Optionally run `py -m pip install -r requirements.txt` for the app window.
+4. Double-click **`Watchlist.bat`**.
 
 ## Browser
 
@@ -43,9 +53,12 @@ If no Opera GX is set, links open in your Windows default browser.
 
 ## Your data
 
-Your list, collections and settings, including your keys, are saved in the `data` folder next to the app.
-That folder is git-ignored, so it never goes into the repository.
-Back it up if you reinstall.
+Your list, collections and settings, including your keys, are saved only on your PC:
+
+- **Watchlist.exe:** in `%APPDATA%\Watchlist`. Paste that into File Explorer's address bar to open it.
+- **Running from source:** in the `data` folder next to the code. That folder is git-ignored, so it never goes into the repository.
+
+Back that folder up if you reinstall Windows.
 
 ## Good to know
 
@@ -67,7 +80,10 @@ Back it up if you reinstall.
 ```
 python -m unittest discover -s tests -t .   # run the tests
 python main.py --browser                     # run in your normal browser
+python main.py --self-test out.json          # check pywebview and the UI files are available
 ```
 
-The app is plain Python (standard library only) plus a vanilla HTML/CSS/JS front end in `watchlist/web/`.
+The app is plain Python (standard library only, plus optional `pywebview`) with a vanilla HTML/CSS/JS front end in `watchlist/web/`.
+`Watchlist.exe` is built with PyInstaller by the GitHub Actions workflow in `.github/workflows/build-exe.yml` on every push.
+That workflow also runs the tests on Windows and smoke-tests the built `.exe`.
 It serves the UI on `http://127.0.0.1:8765` and only accepts requests from this computer.

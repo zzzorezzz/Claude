@@ -8,6 +8,7 @@ import copy
 import json
 import os
 import re
+import sys
 import threading
 from pathlib import Path
 
@@ -41,6 +42,10 @@ def default_data_dir() -> Path:
     env = os.environ.get("WATCHLIST_DATA")
     if env:
         return Path(env).expanduser()
+    if getattr(sys, "frozen", False):
+        # Watchlist.exe: keep your list in %APPDATA%\Watchlist, so it survives
+        # moving or replacing the .exe.
+        return Path(os.environ.get("APPDATA") or Path.home()) / "Watchlist"
     return Path(__file__).resolve().parent.parent / "data"
 
 

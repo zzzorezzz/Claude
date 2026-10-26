@@ -1,0 +1,74 @@
+name: Build Watchlist.exe
+
+on:
+  push:
+    branches: [main, master, "claude/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the tests on Windows
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Install build tools
+        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2
+
+      - name: Build Watchlist.exe
+        run: >
+          pyinstaller main.py --noconfirm --onefile --windowed
+          --name Watchlist
+          --icon packaging/watchlist.ico
+          --add-data "watchlist/web;watchlist/web"
+
+      - name: Check the exe has everything it needs
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "self-test.json"
+          Start-Process -FilePath "dist\Watchlist.exe" -ArgumentList "--self-test", $report -Wait
+          $r = Get-Content $report | ConvertFrom-Json
+          $r | Format-List
+          if (-not $r.frozen) { throw "not running as a packaged exe" }
+          if ($r.web_files -ne $true) { throw "the app's screens (HTML/JS/CSS) are missing from the exe" }
+          if ($r.webview -ne $true) { throw "pywebview is missing: $($r.webview)" }
+          if ($r.clr -ne $true) { throw "pythonnet (needed for the app window) is missing: $($r.clr)" }
+
+      - name: Start the exe and load the app
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP "watchlist-data"
+          $p = Start-Process -FilePath "dist\Watchlist.exe" -ArgumentList "--no-open", "--port", "8791", "--data", $data -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
+            Start-Sleep -Seconds 1
+            try { $ok = (Invoke-RestMethod "http://127.0.0.1:8791/api/ping").app -eq "watchlist" } catch {}
+          }
+          try {
+            if (-not $ok) { throw "Watchlist.exe didn't start its server" }
+            foreach ($page in "/", "/app.js", "/style.css", "/icon.svg") {
+              $res = Invoke-WebRequest "http://127.0.0.1:8791$page" -UseBasicParsing
+              Write-Host "$page -> $($res.StatusCode), $($res.RawContentLength) bytes"
+            }
+            $state = Invoke-RestMethod "http://127.0.0.1:8791/api/state"
+            Write-Host "VLC on this machine: '$($state.status.vlc)'"
+          } finally {
+            Get-Process Watchlist -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
+          if (-not (Test-Path $data)) { throw "the data folder wasn't created" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Watchlist-exe
+          path: dist/Watchlist.exe
+          retention-days: 90

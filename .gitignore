@@ -4,3 +4,8 @@ data/
 __pycache__/
 *.pyc
 .venv/
+
+# PyInstaller output
+build/
+dist/
+*.spec

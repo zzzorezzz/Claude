@@ -1,11 +1,22 @@
 """Native "choose a folder / file" dialogs.
 
-They run in a separate process so they never fight with the app window or the
-web server over the main thread.
+Inside the app window these are pywebview's own Windows dialogs. Otherwise
+they run in a separate process so they never fight with the web server over
+the main thread.
 """
 
+import os
 import subprocess
 import sys
+
+# The pywebview window, when the app runs in one (set by launcher.open_app_window).
+window = None
+
+_WEBVIEW_TYPES = {
+    "video": ("Video files (*.mkv;*.mp4;*.avi;*.mov;*.wmv;*.m4v;*.webm;*.ts)", "All files (*.*)"),
+    "subtitle": ("Subtitles (*.srt;*.ass;*.ssa;*.vtt;*.sub)", "All files (*.*)"),
+    "exe": ("Programs (*.exe)", "All files (*.*)"),
+}
 
 _TK_SCRIPT = r"""
 import sys, tkinter as tk
@@ -58,17 +69,37 @@ class DialogUnavailable(Exception):
     pass
 
 
+def _webview_choose(kind, initial, types):
+    import webview
+    dialog = getattr(webview, "FileDialog", None)
+    if dialog is not None:
+        mode = dialog.FOLDER if kind == "folder" else dialog.OPEN
+    else:  # pywebview < 5
+        mode = webview.FOLDER_DIALOG if kind == "folder" else webview.OPEN_DIALOG
+    file_types = () if kind == "folder" else _WEBVIEW_TYPES.get(types, ())
+    picked = window.create_file_dialog(mode, directory=initial or "", file_types=file_types)
+    if not picked:
+        return ""
+    return picked if isinstance(picked, str) else picked[0]
+
+
 def choose(kind="folder", title="Choose a folder", initial="", types="video"):
     """Returns the chosen path, or "" if the person cancelled."""
-    try:
-        result = subprocess.run([sys.executable, "-c", _TK_SCRIPT, kind, title, initial or "", types],
-                                capture_output=True, text=True, timeout=600)
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    if window is not None:
+        try:
+            return _webview_choose(kind, initial, types)
+        except Exception:  # fall back to the other dialogs below
+            pass
+    # A frozen .exe has no separate Python to run the tkinter dialog with.
+    if not getattr(sys, "frozen", False):
+        try:
+            result = subprocess.run([sys.executable, "-c", _TK_SCRIPT, kind, title, initial or "", types],
+                                    capture_output=True, text=True, timeout=600)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     if sys.platform == "win32":
-        import os
         env = dict(os.environ, WL_TITLE=title, WL_INITIAL=initial or "",
                    WL_FILTER=_PS_FILTERS.get(types, "All files|*.*"))
         script = _PS_FOLDER if kind == "folder" else _PS_FILE
