@@ -595,7 +595,7 @@ function openAdd(type = 'tv', query = '') {
   const setType = (t) => {
     st.type = t;
     $$('.tabs button', wrap).forEach((b) => b.classList.toggle('on', b.dataset.type === t));
-    input.placeholder = t === 'anime' ? 'Search MyAnimeList…' : `Search ${TYPE_PLURAL[t]} on TMDB…`;
+    input.placeholder = t === 'anime' ? 'Search MyAnimeList, or paste a myanimelist.net/anime/… link' : `Search ${TYPE_PLURAL[t]} on TMDB…`;
     run();
   };
   const run = async () => {
@@ -615,7 +615,8 @@ function openAdd(type = 'tv', query = '') {
       const { results } = await api('GET', `/api/search?type=${st.type}&q=${encodeURIComponent(q)}`);
       if (seq !== st.seq) return;
       out.innerHTML = results.length ? `<div class="results">${results.map((r, i) => resultHTML(r, i)).join('')}</div>`
-        : '<p class="muted center" style="margin-top:24px">No results. Try another spelling.</p>';
+        : `<p class="muted center" style="margin-top:24px">No results. Try another spelling${st.type === 'anime'
+          ? ', the Japanese title, or paste the show\'s myanimelist.net link' : ''}.</p>`;
       st.results = results;
     } catch (e) {
       if (seq === st.seq) out.innerHTML = `<div class="warn" style="margin-top:14px">${esc(e.message)}</div>`;

@@ -284,7 +284,7 @@ def service_of(provider):
 # ---------------------------------------------------------- MyAnimeList
 
 MAL_SEARCH_FIELDS = ("id,title,main_picture,alternative_titles,start_date,synopsis,mean,"
-                     "media_type,num_episodes,num_list_users")
+                     "media_type,num_episodes,num_list_users,nsfw")
 MAL_DETAIL_FIELDS = ("id,title,main_picture,alternative_titles,start_date,end_date,synopsis,"
                      "mean,rank,popularity,num_list_users,num_scoring_users,media_type,status,"
                      "genres,num_episodes,average_episode_duration,studios,rating")
@@ -319,25 +319,34 @@ class MAL:
         pic = a.get("main_picture") or {}
         return pic.get("large") or pic.get("medium") or ""
 
+    def _summary(self, a):
+        title, romaji, _ = self._titles(a)
+        return {
+            "source": "mal", "source_id": str(a["id"]), "title": title,
+            "original_title": romaji if romaji != title else "",
+            "year": _year(a.get("start_date")),
+            "overview": _clean_text(a.get("synopsis")),
+            "poster": self._picture(a), "rating": a.get("mean"),
+            "format": "movie" if a.get("media_type") == "movie" else "series",
+            "media_type": (a.get("media_type") or "").upper().replace("_", " "),
+            "episodes_total": a.get("num_episodes") or None,
+        }
+
     def search(self, query):
-        if len(query.strip()) < 3:
+        query = query.strip()
+        # A pasted MyAnimeList link always finds exactly that show.
+        link = re.search(r"myanimelist\.net/anime/(\d+)", query)
+        if link:
+            return [self._summary(self._get(f"/anime/{link.group(1)}", fields=MAL_SEARCH_FIELDS))]
+        if len(query) < 3:
             raise MetadataError("type at least 3 letters to search MyAnimeList")
-        data = self._get("/anime", q=query.strip()[:64], limit=20, fields=MAL_SEARCH_FIELDS)
-        out = []
-        for row in data.get("data", []):
-            a = row.get("node", {})
-            title, romaji, _ = self._titles(a)
-            out.append({
-                "source": "mal", "source_id": str(a["id"]), "title": title,
-                "original_title": romaji if romaji != title else "",
-                "year": _year(a.get("start_date")),
-                "overview": _clean_text(a.get("synopsis")),
-                "poster": self._picture(a), "rating": a.get("mean"),
-                "format": "movie" if a.get("media_type") == "movie" else "series",
-                "media_type": (a.get("media_type") or "").upper().replace("_", " "),
-                "episodes_total": a.get("num_episodes") or None,
-            })
-        return out
+        # Without nsfw=true, MAL's API silently drops every show it marks as
+        # "maybe NSFW" (gray), which includes plenty of ordinary ecchi or
+        # fan-service shows that the website lists normally. Hentai (black)
+        # is still left out.
+        data = self._get("/anime", q=query[:64], limit=50, nsfw="true", fields=MAL_SEARCH_FIELDS)
+        return [self._summary(row["node"]) for row in data.get("data", [])
+                if row.get("node", {}).get("nsfw") != "black"]
 
     def details(self, mal_id):
         if not str(mal_id).isdigit():

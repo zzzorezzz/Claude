@@ -69,6 +69,9 @@ MAL_SEARCH = {"data": [{"node": {
     "start_date": "2023-09-29", "synopsis": "An elf mage outlives her party.\n\n[Written by MAL Rewrite]", "mean": 9.3,
     "media_type": "tv", "num_episodes": 28, "num_list_users": 1100000}}]}
 
+MAL_GRAY = {"node": {"id": 40748, "title": "Gray Show", "nsfw": "gray", "media_type": "tv", "start_date": "2020-01-01"}}
+MAL_BLACK = {"node": {"id": 99999, "title": "Adult Only", "nsfw": "black", "media_type": "ova"}}
+
 MAL_DETAIL = dict(MAL_SEARCH["data"][0]["node"], rank=1, popularity=150, num_scoring_users=600000, status="finished_airing",
                   genres=[{"id": 2, "name": "Adventure"}, {"id": 8, "name": "Drama"}, {"id": 10, "name": "Fantasy"}],
                   average_episode_duration=1440, studios=[{"id": 11, "name": "Madhouse"}])
@@ -100,7 +103,9 @@ def fake_get_json(url, headers=None, service="the server"):
             return PROVIDERS.get(int(m.group(1)), {"results": {}})
     if parts.netloc == "api.myanimelist.net":
         if path == "/v2/anime":
-            return MAL_SEARCH
+            if query.get("nsfw") != "true":
+                return MAL_SEARCH  # what the real API does: gray/black shows are dropped
+            return {"data": MAL_SEARCH["data"] + [MAL_GRAY, MAL_BLACK]}
         if path == "/v2/anime/52991":
             return MAL_DETAIL
     if parts.netloc == "api.jikan.moe":

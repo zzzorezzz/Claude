@@ -56,6 +56,20 @@ class MetadataTest(unittest.TestCase):
         self.assertTrue(item["backdrop"].endswith("/frieren-back.jpg"))
         self.assertEqual(item["studios"], ["Madhouse"])
 
+    def test_mal_search_includes_gray_shows_but_not_hentai(self):
+        results = metadata.MAL("client123").search("show")
+        self.assertEqual([r["title"] for r in results],
+                         ["Frieren: Beyond Journey's End", "Gray Show"])
+        url = self.get.call_args[0][0]
+        self.assertIn("nsfw=true", url)
+        self.assertIn("limit=50", url)
+
+    def test_mal_link_finds_that_exact_show(self):
+        results = metadata.MAL("client123").search("https://myanimelist.net/anime/52991/Sousou_no_Frieren")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["source_id"], "52991")
+        self.assertIn("/v2/anime/52991?", self.get.call_args[0][0])
+
     def test_mal_header(self):
         metadata.MAL("client123").search("frieren")
         self.assertEqual(self.get.call_args[0][1], {"X-MAL-CLIENT-ID": "client123"})
