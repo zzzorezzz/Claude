@@ -7,6 +7,7 @@ knows whether a title is on Netflix or HBO Max in Pakistan.
 import html
 import json
 import re
+import ssl
 import threading
 import time
 import urllib.error
@@ -32,11 +33,30 @@ class MetadataError(Exception):
     pass
 
 
+_ssl_context = None
+
+
+def ssl_context():
+    """Trusted certificates for HTTPS. Windows provides its own; the Python
+    inside a packaged Mac app finds none, so use the bundled certifi list."""
+    global _ssl_context
+    if _ssl_context is None:
+        ctx = ssl.create_default_context()
+        if not ctx.cert_store_stats().get("x509_ca"):
+            try:
+                import certifi
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except (ImportError, OSError):
+                pass
+        _ssl_context = ctx
+    return _ssl_context
+
+
 def _get_json(url, headers=None, service="the server"):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json",
                                                **(headers or {})})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT, context=ssl_context()) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
@@ -48,6 +68,8 @@ def _get_json(url, headers=None, service="the server"):
         raise MetadataError(f"{service} returned an error (HTTP {e.code})") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         reason = getattr(e, "reason", e)
+        if isinstance(reason, ssl.SSLError):
+            raise MetadataError(f"couldn't make a secure connection to {service} ({reason})") from e
         raise MetadataError(f"couldn't reach {service} ({reason}) - are you online?") from e
     except ValueError as e:
         raise MetadataError(f"{service} sent an unreadable reply") from e

@@ -35,7 +35,7 @@ def _tell(message):
 
 
 def _self_test(path):
-    """Used by the Windows build to check everything made it into Watchlist.exe."""
+    """Used by the Windows and Mac builds to check everything made it into the app."""
     from .server import WEB_DIR
     report = {"frozen": bool(getattr(sys, "frozen", False)),
               "web_files": all((WEB_DIR / f).is_file() for f in ("index.html", "app.js", "style.css"))}
@@ -47,6 +47,18 @@ def _self_test(path):
             report[module] = True
         except Exception as e:  # noqa: BLE001 - report whatever went wrong
             report[module] = f"{type(e).__name__}: {e}"
+    # A real HTTPS request: TMDB answers 401 without a key, which still proves
+    # the secure connection (and its certificates) work.
+    from .metadata import ssl_context
+    import urllib.error
+    try:
+        urllib.request.urlopen("https://api.themoviedb.org/3/configuration", timeout=20,
+                               context=ssl_context())
+        report["https"] = True
+    except urllib.error.HTTPError:
+        report["https"] = True
+    except Exception as e:  # noqa: BLE001
+        report["https"] = f"{type(e).__name__}: {e}"
     Path(path).write_text(json.dumps(report), encoding="utf-8")
     return 0
 

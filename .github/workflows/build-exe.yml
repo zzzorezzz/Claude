@@ -23,7 +23,7 @@ jobs:
         run: python -m unittest discover -s tests -t . -v
 
       - name: Install build tools
-        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2
+        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi
 
       - name: Build Watchlist.exe
         run: >
@@ -43,6 +43,7 @@ jobs:
           if ($r.web_files -ne $true) { throw "the app's screens (HTML/JS/CSS) are missing from the exe" }
           if ($r.webview -ne $true) { throw "pywebview is missing: $($r.webview)" }
           if ($r.clr -ne $true) { throw "pythonnet (needed for the app window) is missing: $($r.clr)" }
+          if ($r.https -ne $true) { throw "secure (HTTPS) connections don't work: $($r.https)" }
 
       - name: Start the exe and load the app
         shell: pwsh
@@ -87,7 +88,7 @@ jobs:
         run: python -m unittest discover -s tests -t . -v
 
       - name: Install build tools
-        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2
+        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi
 
       - name: Build Watchlist.app
         run: >

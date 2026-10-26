@@ -1,3 +1,5 @@
 # Optional: gives Watchlist its own window. Without it, the app opens in an
-# Edge/Chrome app window (or your browser). Install with: py -m pip install -r requirements.txt
+# Opera GX window (or your browser). Install with: py -m pip install -r requirements.txt
 pywebview>=5.0
+# Trusted HTTPS certificates for the packaged Mac app.
+certifi
