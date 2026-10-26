@@ -284,7 +284,7 @@ def service_of(provider):
 # ---------------------------------------------------------- MyAnimeList
 
 MAL_SEARCH_FIELDS = ("id,title,main_picture,alternative_titles,start_date,synopsis,mean,"
-                     "media_type,num_episodes,num_list_users,nsfw")
+                     "media_type,num_episodes,num_list_users")
 MAL_DETAIL_FIELDS = ("id,title,main_picture,alternative_titles,start_date,end_date,synopsis,"
                      "mean,rank,popularity,num_list_users,num_scoring_users,media_type,status,"
                      "genres,num_episodes,average_episode_duration,studios,rating")
@@ -341,12 +341,9 @@ class MAL:
         if len(query) < 3:
             raise MetadataError("type at least 3 letters to search MyAnimeList")
         # Without nsfw=true, MAL's API silently drops every show it marks as
-        # "maybe NSFW" (gray), which includes plenty of ordinary ecchi or
-        # fan-service shows that the website lists normally. Hentai (black)
-        # is still left out.
+        # NSFW (ecchi, hentai and more) even though the website lists them.
         data = self._get("/anime", q=query[:64], limit=50, nsfw="true", fields=MAL_SEARCH_FIELDS)
-        return [self._summary(row["node"]) for row in data.get("data", [])
-                if row.get("node", {}).get("nsfw") != "black"]
+        return [self._summary(row["node"]) for row in data.get("data", [])]
 
     def details(self, mal_id):
         if not str(mal_id).isdigit():

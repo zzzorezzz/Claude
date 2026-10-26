@@ -56,10 +56,10 @@ class MetadataTest(unittest.TestCase):
         self.assertTrue(item["backdrop"].endswith("/frieren-back.jpg"))
         self.assertEqual(item["studios"], ["Madhouse"])
 
-    def test_mal_search_includes_gray_shows_but_not_hentai(self):
+    def test_mal_search_includes_every_nsfw_level(self):
         results = metadata.MAL("client123").search("show")
         self.assertEqual([r["title"] for r in results],
-                         ["Frieren: Beyond Journey's End", "Gray Show"])
+                         ["Frieren: Beyond Journey's End", "Gray Show", "Adult Only"])
         url = self.get.call_args[0][0]
         self.assertIn("nsfw=true", url)
         self.assertIn("limit=50", url)
