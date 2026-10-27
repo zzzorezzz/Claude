@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, launcher, library, metadata, player, scanner, sorter
+from . import ai, dialogs, launcher, library, metadata, player, scanner, sorter, syncplay
 from .config import Settings, read_json, write_json
 from .store import TYPES, Store, new_item, next_episode
 
@@ -103,7 +103,8 @@ class App:
                 "sync": {"folder": s["sync_folder"], "file": str(self.store.path),
                          "problem": self.sync_problem},
                 "downloads": s["downloads_folder"], "player": s["player"],
-                "mpv": player.find_mpv(), "gemini": bool(s["gemini_api_key"])}
+                "mpv": player.find_mpv(), "gemini": bool(s["gemini_api_key"]),
+                "syncplay": syncplay.find_syncplay(s["syncplay_path"])}
 
     def open_link(self, url):
         browser = launcher.find_browser(self.settings.get()["browser_path"])
@@ -130,6 +131,63 @@ class App:
         item = new_item(item_type, info)
         item["collections"] = [c for c in collections if isinstance(c, str)]
         return self.store.add(item)
+
+    # ---- watching together
+
+    def _party_launch(self, item, server, room, season, episode, path=""):
+        s = self.settings.get()
+        program = syncplay.find_syncplay(s["syncplay_path"])
+        if not program:
+            raise ApiError("Syncplay isn't installed - get it free from syncplay.pl, then try again")
+        if path and not self.playable(item, path):
+            raise ApiError("that file isn't in this title's folder or your downloads")
+        info = self.local_info(item, season, episode, path)
+        target = info["target"]
+        if not target:
+            what = f"{item['title']} S{season} E{episode}" if episode else item["title"]
+            return {"ok": False, "need_file": True, "item_id": item["id"],
+                    "message": f"You don't have {what} in your downloads."}
+        subs = info["subtitles"]
+        if s["player"] == "vlc" or not player.find_mpv():
+            player_path = launcher.find_vlc(s["vlc_path"])
+        else:
+            player_path = player.find_mpv()
+        cmd = syncplay.command(program, server, s["party_name"], room, player_path, target["path"],
+                               subs[0]["path"] if subs else "")
+        try:
+            launcher._spawn(cmd)
+        except launcher.LaunchError as e:
+            raise ApiError(str(e)) from e
+        return {"ok": True, "file": target["name"], "item_id": item["id"]}
+
+    def party_start(self, item, season, episode, path=""):
+        s = self.settings.get()
+        server = s["party_server"] or syncplay.DEFAULT_SERVER
+        room = syncplay.new_room()
+        series = item["format"] == "series" and not item_kind_is_single(item)
+        out = self._party_launch(item, server, room, season, episode, path)
+        if out["ok"]:
+            out["code"] = syncplay.make_invite(server, room, item, *((season, episode) if series else (None, None)))
+        return out
+
+    def party_join(self, code, path=""):
+        invite = syncplay.read_invite(code)
+        item = self.store.find_source(invite["source"], invite["source_id"]) if invite["source"] else None
+        if not item:
+            want = library.norm(invite["title"])
+            item = next((i for i in self.store.list() if want in {n for n, _ in library.item_names(dict(i))}
+                         and (invite["type"] in ("", i["type"]))), None)
+        if not item and invite["source"] in ("tmdb", "mal") and invite["type"]:
+            try:
+                item = self.add_title(invite["type"], invite["source"], invite["source_id"])
+            except (metadata.MetadataError, ApiError):
+                item = None
+        if not item:
+            raise ApiError(f'add {invite["title"]} to your list first, then join again')
+        out = self._party_launch(item, invite["server"], invite["room"], invite.get("season") or 1,
+                                 invite.get("episode") or 1, path)
+        out["invite"] = invite
+        return out
 
     def undo_sorted(self, key):
         for entry in self.library.undo(key):
@@ -342,6 +400,7 @@ class App:
             if mpv:
                 self.player.play(player.Session(
                     mpv, item["id"], entries, start=start,
+                    extra_args=player.script_args(self.settings.get()["skip_intro"]),
                     audio_langs="jpn,ja,japanese,eng,en" if item["type"] == "anime" else "",
                     on_progress=self._save_position, on_finished=self._finished_entry))
                 self.store.update(item["id"], patch)
@@ -494,6 +553,9 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/items/(\w+)/related", "related"),
         ("POST", r"/api/items/(\w+)/recap", "recap"),
         ("POST", r"/api/settings/gemini", "test_gemini"),
+        ("POST", r"/api/party/start", "party_start"),
+        ("POST", r"/api/party/join", "party_join"),
+        ("POST", r"/api/party/peek", "party_peek"),
         ("GET", r"/api/settings", "get_settings"),
         ("PUT", r"/api/settings", "put_settings"),
         ("POST", r"/api/settings/test", "test_settings"),
@@ -675,6 +737,21 @@ class Handler(BaseHTTPRequestHandler):
             return ai.recap(key, item, int(body.get("season") or 1), int(body.get("episode") or 1))
         except ai.AIError as e:
             raise ApiError(str(e)) from e
+
+    def api_party_start(self, body):
+        item = self.app.item(str(body.get("item_id") or ""))
+        return self.app.party_start(item, int(body.get("season") or 1), int(body.get("episode") or 1),
+                                    str(body.get("path") or ""))
+
+    def api_party_join(self, body):
+        return self.app.party_join(str(body.get("code") or ""), str(body.get("path") or ""))
+
+    def api_party_peek(self, body):
+        """What an invite is for, before joining."""
+        invite = syncplay.read_invite(body.get("code"))
+        mine = self.app.store.find_source(invite["source"], invite["source_id"]) if invite["source"] else None
+        invite["in_list"] = mine["id"] if mine else None
+        return invite
 
     def api_test_gemini(self, body):
         key = str(body.get("key") or self.app.settings.get()["gemini_api_key"]).strip()

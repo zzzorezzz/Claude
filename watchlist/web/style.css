@@ -575,3 +575,27 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 }
 .recap { padding-left: 20px; line-height: 1.6; }
 .recap li { margin-bottom: 8px; animation: rise .4s cubic-bezier(.2,.8,.2,1) both; animation-delay: calc(var(--i, 0) * 60ms); }
+
+/* ---------- watch together ---------- */
+.party-modal h2 { display: flex; align-items: center; gap: 10px; }
+.party-modal h2 svg, .btn svg.people { width: 26px; height: 26px; fill: currentColor; }
+.party-modal .warn { margin-bottom: 16px; }
+.party-paste { width: 100%; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 13px; margin-bottom: 10px; }
+.party-what { padding: 10px 12px; border-radius: 6px; background: var(--panel-2); margin-bottom: 12px; font-weight: 700; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.party-invite { margin-top: 18px; padding: 14px; border-radius: 8px; background: #13263a; border: 1px solid #2c5a88; animation: rise .35s ease both; }
+.party-code-row { display: flex; gap: 10px; align-items: center; margin: 8px 0; }
+.party-code { flex: 1; padding: 10px; border-radius: 6px; background: #0b1622; font-size: 12px; word-break: break-all; user-select: all; }
+#btn-party svg { width: 22px; height: 22px; }
+
+/* ---------- continue watching ---------- */
+.resume-bar { position: absolute; z-index: 4; left: 8px; right: 8px; bottom: 8px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.25); overflow: hidden; }
+.resume-bar i { display: block; height: 100%; background: var(--red); border-radius: 2px; }
+.resume-tag {
+  position: absolute; z-index: 2; left: 8px; bottom: 18px; display: flex; flex-direction: column; gap: 1px;
+  padding: 4px 7px; border-radius: 4px; background: rgba(0,0,0,.78); font-size: 11px; line-height: 1.25;
+}
+.resume-tag b { font-size: 12px; }
+.resume-tag span { color: var(--muted); }
+.card-resume:hover .resume-tag { opacity: 0; }
+.card-resume .card-info { padding-bottom: 20px; }
+.party-invite svg, .party-modal p svg { width: 16px; height: 16px; vertical-align: -3px; fill: currentColor; }

@@ -14,6 +14,7 @@ const TYPE_KIND = { tv: 'SERIES', anime: 'ANIME', movie: 'FILM' };
 const ROW_SIZE = 6;
 
 const ICON = {
+  people: '<svg viewBox="0 0 24 24"><path d="M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm7.5-1a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM9 13c-3.3 0-7 1.6-7 4v3h14v-3c0-2.4-3.7-4-7-4zm7.5-1c-.5 0-1 0-1.6.1 1.3.9 2.1 2.2 2.1 3.9v3h5v-2.6c0-2.3-3.2-4.4-5.5-4.4z"/></svg>',
   play: '<svg viewBox="0 0 24 24"><path d="M6 4l15 8-15 8z"/></svg>',
   info: '<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-6h2zm0-8h-2V7h2z"/></svg>',
   more: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
@@ -282,10 +283,11 @@ $('#search').addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { e.target.value = ''; S.query = ''; render(); }
 });
 $('#btn-settings').addEventListener('click', () => openSettings());
+$('#btn-party').addEventListener('click', () => openJoinParty());
 
 /* ============================================================= cards */
 
-function cardHTML(item) {
+function cardHTML(item, opts = {}) {
   const meta = [];
   if (item.rating) meta.push(`<span class="star">★</span> ${fmtRating(item.rating)}`);
   if (item.year) meta.push(item.year);
@@ -295,7 +297,7 @@ function cardHTML(item) {
     : item.local_broken ? '<span class="badge-pc warn">FILE ISSUE</span>' : `<span class="badge-pc">ON ${pcName().toUpperCase()}</span>`;
   const inner = `<div class="poster-fallback">${esc(item.title)}</div>
     ${item.poster ? `<img class="poster" src="${esc(item.poster)}" alt="" loading="lazy" decoding="async">` : ''}
-    ${badge}
+    ${opts.resume ? resumeBarHTML(item) : badge}
     <div class="card-info">
       <div class="card-buttons">
         <button class="cb play" data-act="watch" title="Watch now">${ICON.play}</button>
@@ -305,7 +307,26 @@ function cardHTML(item) {
       <div class="card-title">${esc(item.title)}</div>
       <div class="card-meta">${meta.join(' · ')}</div>
     </div>`;
-  return `<div class="card" data-id="${esc(item.id)}" data-sig="${hashText(item.id + inner)}" tabindex="0" draggable="true">${inner}</div>`;
+  return `<div class="card${opts.resume ? ' card-resume' : ''}" data-id="${esc(item.id)}" ${opts.resume ? 'data-resume="1"' : ''} data-sig="${hashText(item.id + inner)}" tabindex="0" draggable="true">${inner}</div>`;
+}
+
+// Continue watching: what you were in the middle of, most recent first.
+function continueItems() {
+  const cutoff = Date.now() / 1000 - 90 * 86400;
+  return S.items.filter((i) => i.last_played && i.last_played > cutoff && hasFiles(i)).filter((i) => {
+    if (savedPos(i)) return true;
+    if (!isSeries(i)) return false;
+    const total = i.seasons.filter((s) => s.number > 0).reduce((n, s) => n + (s.episodes || 0), 0) || i.episodes_total || 0;
+    return !total || absoluteIndex(i, i.progress) <= total;
+  }).sort((a, b) => b.last_played - a.last_played).slice(0, 10);
+}
+
+function resumeBarHTML(item) {
+  const pos = savedPos(item);
+  const pct = pos && pos.dur ? Math.min(100, (pos.pos / pos.dur) * 100) : 0;
+  const left = pos && pos.dur ? `${Math.max(1, Math.round((pos.dur - pos.pos) / 60))} min left` : '';
+  return `<div class="resume-tag">${isSeries(item) ? `<b>${esc(epLabel(item.progress))}</b>` : ''}${left ? `<span>${left}</span>` : (isSeries(item) ? '<span>next up</span>' : '')}</div>
+    <div class="resume-bar"><i style="width:${pct.toFixed(1)}%"></i></div>`;
 }
 
 const addTileHTML = (type, folder) => `<button class="tile tile-add" data-add="${type}" ${folder ? `data-col="${esc(folder.id)}"` : ''} title="Add ${TYPE_ONE[type]}">
@@ -336,7 +357,7 @@ $('#view').addEventListener('click', (e) => {
   const item = findItem(card.dataset.id);
   if (!item) return;
   const act = e.target.closest('[data-act]')?.dataset.act;
-  if (act === 'watch') openWatch(item);
+  if (act === 'watch' || (!act && card.dataset.resume)) openWatch(item);
   else if (act === 'menu') { e.stopPropagation(); openItemMenu(item, e.target.closest('[data-act]')); }
   else openTitle(item.id);
 });
@@ -495,9 +516,17 @@ function renderHome(view) {
   view.innerHTML = `${featured ? heroHTML(featured, { resume: featured === recent }) : ''}
     <div class="home-rows ${featured ? '' : 'no-hero'}">${setupBanner()}
     ${S.genre ? `<div class="row">${filterNote()}</div>` : ''}
+    ${continueRowHTML()}
     ${downloadsSectionHTML()}
     <div class="section-head"><h2>Your list</h2><span class="muted small">everything you've added, downloaded or not</span></div>
     ${rows}</div>`;
+}
+
+function continueRowHTML() {
+  const items = continueItems();
+  if (!items.length || S.genre) return '';
+  return `<section class="row row-continue"><div class="row-head"><h2>Continue watching</h2></div>
+    <div class="row-track">${items.map((i) => cardHTML(i, { resume: true })).join('')}</div></section>`;
 }
 
 function questionsBanner() {
@@ -987,6 +1016,108 @@ function ago(t) {
   return `${Math.round(s / 86400)} d ago`;
 }
 
+/* ======================================================== watch together */
+
+const SYNCPLAY_HELP = `<div class="warn">Watching together uses <b>Syncplay</b>, a free app that keeps both players in step.
+  Install it from syncplay.pl on both computers, then try again.
+  <button class="btn btn-sm btn-white" data-p="get-syncplay">Open syncplay.pl</button></div>`;
+const SYNCPLAY_NOTE = '<p class="muted small">Syncplay opens with everything filled in: click <b>Run Syncplay</b> (untick "Always show this dialog" to skip it next time). Pausing or skipping on either side does the same for both of you.</p>';
+
+function partyClicks(wrap) {
+  wrap.addEventListener('click', (e) => {
+    const p = e.target.closest('[data-p]')?.dataset.p;
+    if (p === 'get-syncplay') api('POST', '/api/open', { url: 'https://syncplay.pl/' }).catch(fail);
+    if (p === 'copy') {
+      const code = $('.party-code', wrap).textContent.trim();
+      navigator.clipboard?.writeText(code).then(() => toast('Invite copied - send it to them'), () => {
+        const r = document.createRange(); r.selectNodeContents($('.party-code', wrap));
+        getSelection().removeAllRanges(); getSelection().addRange(r);
+        toast('Press Ctrl+C (Cmd+C) to copy');
+      });
+    }
+  });
+}
+
+function openStartParty(item) {
+  const series = isSeries(item);
+  const avail = series ? (S.library.items?.[item.id]?.episodes || []) : [];
+  const current = `${item.progress.season}:${item.progress.episode}`;
+  const options = avail.map((k) => { const [s, n] = k.split(':').map(Number); return `<option value="${k}" ${k === current ? 'selected' : ''}>${esc(epLabel({ season: s, episode: n }))}</option>`; }).join('');
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>${ICON.people} Watch ${esc(item.title)} together</h2>
+    <p class="sub">You each play your own copy, kept in step over the internet.</p>
+    ${S.status.syncplay ? '' : SYNCPLAY_HELP}
+    ${series && avail.length ? `<label class="field"><span>Episode</span><select class="select" id="party-ep">${options}</select></label>` : ''}
+    <div class="btns"><button class="btn btn-red" data-p="start">Start the watch party</button></div>
+    <div id="party-out"></div>${SYNCPLAY_NOTE}</div>`, 'party-modal');
+  partyClicks(wrap);
+  $('[data-p="start"]', wrap).addEventListener('click', async (e) => {
+    const [season, episode] = ($('#party-ep', wrap)?.value || current).split(':').map(Number);
+    e.target.disabled = true;
+    try {
+      const r = await api('POST', '/api/party/start', { item_id: item.id, season, episode });
+      if (!r.ok) { $('#party-out', wrap).innerHTML = `<div class="warn">${esc(r.message)}</div>`; return; }
+      $('#party-out', wrap).innerHTML = `<div class="party-invite">
+        <p><b>Syncplay is opening ${esc(r.file)}.</b> Send this invite; they paste it into <b>Join a watch party</b> (the ${ICON.people} button at the top of their Watchlist):</p>
+        <div class="party-code-row"><code class="party-code">${esc(r.code)}</code><button class="btn btn-sm btn-white" data-p="copy">Copy</button></div>
+        <p class="muted small">Their app finds the same episode in their downloads and joins your room.</p></div>`;
+    } catch (err) {
+      if (/Syncplay isn't installed/.test(err.message)) $('#party-out', wrap).innerHTML = SYNCPLAY_HELP;
+      else fail(err);
+    } finally { e.target.disabled = false; }
+  });
+}
+
+function openJoinParty() {
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>${ICON.people} Join a watch party</h2>
+    <p class="sub">Paste the invite you were sent. It starts with WLP1.</p>
+    ${S.status.syncplay ? '' : SYNCPLAY_HELP}
+    <textarea class="input party-paste" rows="3" placeholder="WLP1.…"></textarea>
+    <div id="party-peek"></div>
+    <div class="btns"><button class="btn btn-red" data-p="join" disabled>Join</button></div>
+    <div id="party-out"></div>${SYNCPLAY_NOTE}</div>`, 'party-modal');
+  partyClicks(wrap);
+  const box = $('.party-paste', wrap);
+  const join = $('[data-p="join"]', wrap);
+  box.focus();
+  box.addEventListener('input', async () => {
+    const code = box.value.trim();
+    join.disabled = true;
+    $('#party-peek', wrap).innerHTML = '';
+    if (!code) return;
+    try {
+      const inv = await api('POST', '/api/party/peek', { code });
+      $('#party-peek', wrap).innerHTML = `<div class="party-what">${esc(inv.title)}${inv.episode ? ` · ${esc(epLabel({ season: inv.season, episode: inv.episode }))}` : ''}
+        <span class="muted small">${inv.in_list ? 'in your list' : 'not in your list yet - it will be added'}</span></div>`;
+      join.disabled = false;
+    } catch (err) {
+      $('#party-peek', wrap).innerHTML = `<p class="bad small">${esc(err.message)}</p>`;
+    }
+  });
+  const go = async (path = '') => {
+    join.disabled = true;
+    try {
+      const r = await api('POST', '/api/party/join', { code: box.value.trim(), path });
+      if (r.ok) {
+        $('#party-out', wrap).innerHTML = `<p class="ok"><b>✓ Syncplay is opening ${esc(r.file)}.</b> Enjoy!</p>`;
+        await reload();
+        return;
+      }
+      $('#party-out', wrap).innerHTML = `<div class="warn">${esc(r.message)} <button class="btn btn-sm btn-white" data-p="choose">Choose the file…</button></div>`;
+      $('[data-p="choose"]', wrap).addEventListener('click', async () => {
+        const { path: chosen } = await api('POST', '/api/browse', { kind: 'file', title: 'Choose the episode to watch' });
+        if (chosen) go(chosen);
+      });
+      await reload();
+    } catch (err) {
+      if (/Syncplay isn't installed/.test(err.message)) $('#party-out', wrap).innerHTML = SYNCPLAY_HELP;
+      else fail(err);
+    } finally { join.disabled = false; }
+  };
+  join.addEventListener('click', () => go());
+}
+
 /* ======================================================== collections */
 
 async function newCollection(type = null) {
@@ -1204,6 +1335,7 @@ function drawTitle(wrap) {
         <div class="btns">
           <button class="btn btn-white" data-t="watch">${ICON.play} ${esc(watchLabel(item))}</button>
           ${hasFiles(item) ? '<button class="btn btn-grey" data-t="vlc" title="Play the file in VLC instead of the built-in player">Play in VLC</button>' : ''}
+          ${hasFiles(item) ? `<button class="btn btn-grey" data-t="party" title="Watch in sync with someone else, each on your own computer (Syncplay)">${ICON.people} Watch together</button>` : ''}
           <button class="btn btn-grey" data-t="trailer">${ICON.play} ${item.trailer ? 'Trailer' : 'Find trailer'}</button>
           <button class="btn-round" data-t="menu" title="Collections & more">${ICON.plus}</button>
           <button class="btn-round" data-t="remove" title="Remove from list">${ICON.trash}</button>
@@ -1384,6 +1516,7 @@ async function titleClick(wrap, e) {
     else if (t === 'menu') { e.stopPropagation(); openItemMenu(item, e.target.closest('[data-t]'), { inTitle: true }); }
     else if (t === 'remove') removeItem(item.id);
     else if (t === 'recap') showRecap(item);
+    else if (t === 'party') openStartParty(item);
     else if (t === 'watched') {
       const res = await api('POST', `/api/items/${item.id}/watched`);
       upsert(res.item);

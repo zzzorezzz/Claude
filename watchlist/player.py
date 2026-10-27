@@ -46,6 +46,16 @@ def find_mpv():
     return shutil.which("mpv") or ""
 
 
+SKIP_SCRIPT = Path(__file__).resolve().parent / "mpv_scripts" / "watchlist_skip.lua"
+
+
+def script_args(skip_intro):
+    """Loads the opening/ending skipper (Shift+S toggles it while watching)."""
+    if not SKIP_SCRIPT.is_file():
+        return []
+    return [f"--script={SKIP_SCRIPT}", f"--script-opts=watchlist-skip={'yes' if skip_intro else 'no'}"]
+
+
 def finished(pos, dur):
     """Seen enough of it to count as watched: 90% in, or into the last two minutes."""
     return bool(dur) and dur > 0 and pos is not None and (pos / dur >= 0.9 or dur - pos <= 120)

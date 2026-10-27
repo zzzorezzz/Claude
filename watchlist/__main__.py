@@ -82,6 +82,24 @@ def _player_test(path):
         done.wait(90)
         report.update(connected=session.connected, ended=session.ended, error=session.error,
                       last_position=session.pos, finished=finished == ["1:1"])
+        # The opening skipper: a video whose chapters mark an opening from 1 s to 4 s.
+        import tempfile
+        tmp = Path(tempfile.mkdtemp())
+        chapters, log = tmp / "chapters.txt", tmp / "skip.log"
+        chapters.write_text(";FFMETADATA1\n" + "".join(
+            f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={a}\nEND={b}\ntitle={t}\n"
+            for a, b, t in [(0, 1000, "Prologue"), (1000, 4000, "Opening"), (4000, 6000, "Part A")]),
+            encoding="utf-8")
+        done.clear()
+        skip = player.Session(
+            report["mpv"], "test",
+            [{"path": "av://lavfi:testsrc=duration=6:size=160x120:rate=10", "key": "1:2", "label": "skip test"}],
+            extra_args=["--vo=null", "--ao=null", "--force-window=no", f"--chapters-file={chapters}",
+                        *player.script_args(True), f"--script-opts-append=watchlist-skip-log={log}"],
+            on_exit=lambda s: done.set())
+        skip.start()
+        done.wait(60)
+        report["skip_log"] = log.read_text(encoding="utf-8").strip() if log.exists() else ""
     Path(path).write_text(json.dumps(report), encoding="utf-8")
     return 0
 

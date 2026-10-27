@@ -47,6 +47,7 @@ jobs:
           --name Watchlist
           --icon packaging/watchlist.ico
           --add-data "watchlist/web;watchlist/web"
+          --add-data "watchlist/mpv_scripts;watchlist/mpv_scripts"
           --add-binary "packaging/mpv/mpv.exe;mpv"
 
       - name: Check the exe has everything it needs
@@ -72,6 +73,7 @@ jobs:
           if (-not $r.mpv) { throw "mpv isn't inside Watchlist.exe" }
           if ($r.connected -ne $true) { throw "couldn't talk to mpv: $($r.error)" }
           if ($r.finished -ne $true) { throw "playing to the end wasn't noticed (last position $($r.last_position))" }
+          if (-not ($r.skip_log -like "opening*")) { throw "the opening skipper didn't work: '$($r.skip_log)'" }
 
       - name: Start the exe and load the app
         shell: pwsh
@@ -148,7 +150,8 @@ jobs:
             --name Watchlist \
             --icon packaging/watchlist.icns \
             --osx-bundle-identifier app.watchlist.desktop \
-            --add-data "watchlist/web:watchlist/web"
+            --add-data "watchlist/web:watchlist/web" \
+            --add-data "watchlist/mpv_scripts:watchlist/mpv_scripts"
           # The built-in player goes inside the app, then the whole app is signed again.
           ditto packaging/mpv.app dist/Watchlist.app/Contents/Resources/mpv.app
           codesign --force --deep --sign - dist/Watchlist.app
@@ -181,6 +184,8 @@ jobs:
               sys.exit(f"couldn't talk to mpv: {r.get('error')}")
           if r.get("finished") is not True:
               sys.exit(f"playing to the end wasn't noticed: {r}")
+          if not r.get("skip_log", "").startswith("opening"):
+              sys.exit(f"the opening skipper didn't work: {r}")
           PY
 
       - name: Start the app and load it
