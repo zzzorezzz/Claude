@@ -406,6 +406,26 @@ class MAL:
         _related_cache.put(("mal", str(mal_id)), out)
         return out
 
+    def user_list(self, user):
+        """A public MyAnimeList list: [{"mal_id", "title", "status", "watched"}]."""
+        user = (user or "").strip()
+        if not re.fullmatch(r"[\w-]{2,32}", user):
+            raise MetadataError("that doesn't look like a MyAnimeList user name")
+        url = (f"{MAL_API}/users/{urllib.parse.quote(user)}/animelist?"
+               + urllib.parse.urlencode({"fields": "list_status", "limit": 1000, "nsfw": "true"}))
+        out = []
+        for _ in range(20):
+            data = _get_json(url, {"X-MAL-CLIENT-ID": self.client_id}, self.service)
+            for row in data.get("data", []):
+                node, st = row.get("node") or {}, row.get("list_status") or {}
+                if node.get("id"):
+                    out.append({"mal_id": str(node["id"]), "title": node.get("title", ""),
+                                "status": st.get("status", ""), "watched": st.get("num_episodes_watched") or 0})
+            url = (data.get("paging") or {}).get("next")
+            if not url or not url.startswith(MAL_API):
+                break
+        return out
+
     def search(self, query):
         query = query.strip()
         # A pasted MyAnimeList link always finds exactly that show.

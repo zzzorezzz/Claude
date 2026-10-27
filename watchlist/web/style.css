@@ -599,3 +599,6 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 .card-resume:hover .resume-tag { opacity: 0; }
 .card-resume .card-info { padding-bottom: 20px; }
 .party-invite svg, .party-modal p svg { width: 16px; height: 16px; vertical-align: -3px; fill: currentColor; }
+.import-progress .bar { height: 6px; background: #333; border-radius: 3px; overflow: hidden; margin: 12px 0 8px; }
+.import-progress .bar i { display: block; height: 100%; background: var(--red); transition: width .4s ease; }
+.import-modal .linkish { background: none; border: 0; padding: 0; color: #fff; text-decoration: underline; cursor: pointer; font: inherit; }

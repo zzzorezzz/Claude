@@ -1,7 +1,11 @@
 # Watchlist
 
 A Netflix-style desktop app for Windows and Mac, for the TV shows, anime and movies you plan to watch.
-Your list can sync between your computers.
+
+Two things are optional, and everything works without them:
+
+- **A sync folder.** Without one, your list is saved on this computer only. With one (Google Drive, OneDrive...), your list stays the same on your Windows PC and your Mac.
+- **A Gemini key.** Without one, the app's own rules and MyAnimeList / TMDB searches sort your downloads and find related titles. With a free key, Gemini helps with the files those can't place, finds TV spin-offs and writes recaps.
 
 - **Home screen:** three rows (TV Shows, Anime, Movies), each showing your 5–6 most popular titles and a **Show more** tile for the full list.
   - Movies are ordered by box office, TV shows by TMDB popularity, and anime by MyAnimeList members.
@@ -9,10 +13,19 @@ Your list can sync between your computers.
 - **Adding titles:** use **+** in any row. The summary, ratings, cast, seasons and trailer are filled in automatically, from TMDB for movies and TV and from MyAnimeList for anime.
 - **Folders:** on the TV Shows, Anime and Movies pages, click **New folder** to make your own folders. Drag a poster onto a folder to move it there, or right-click a poster (or use **⋯**) → **Move to folder**. A title is in one folder at a time.
 - **Collections:** these can mix TV shows, anime and movies, and a title can be in several. Find them on the **Collections** page.
+- **Continue watching:** the first row on the home screen. Click a poster to carry on where you stopped.
 - **Title page:** backdrop, summary, ratings and an episode list. The trailer only plays when you click it.
+  - **Related**, on the right: the other seasons, sequels, prequels, OVAs, specials, films and spin-offs. Each one shows whether it's in your list, on your computer, or waiting in your downloads. Add them one at a time, or with **Add all**.
+    - Anime come from MyAnimeList, and film series from TMDB.
+    - TV shows list titles that share their name; with a Gemini key, spin-offs with other names too (each one checked on TMDB).
+  - **Extras:** openings, endings, trailers and other bonus videos found with the show's files, kept apart from the episodes.
+- **Import from MyAnimeList:** **Settings → Import my MyAnimeList list…** brings in your list by user name (if it's public) or from MyAnimeList's export file. Your watched episodes set where you're up to.
 - **Downloads:** choose the one folder your downloads go into (**Settings → Your downloads**).
   - The app reads each video's name, and its folder's name if needed, and connects it to the right show, season and episode or movie in your list.
-  - When it isn't sure (a typo, an unnumbered file, a subtitle without a video, a show that isn't in your list), it asks you in **Sort your downloads**. Your answer is remembered, so new episodes of that show are sorted on their own.
+  - It tells episodes, OVAs, specials, films and extras apart, using the file and folder names, the size, and what MyAnimeList says each title is.
+  - **Shows that aren't in your list are found for you.** It searches MyAnimeList and TMDB, and an OVA, special, film or second season of an anime you have is found through that anime's MyAnimeList relations. When it's clear what a file is, the title is added and the file sorted. Everything done this way is listed under **Sorted for you**, where **Undo** puts it back (and removes the title it added).
+    - To decide everything yourself, untick **Sort new downloads for me** in Settings. What was found is then shown as a suggestion.
+  - When it still isn't sure (a typo, an unnumbered file, a subtitle without a video), it asks you in **Sort your downloads**, with what it found. Your answer is remembered, so new episodes of that show are sorted on their own.
   - The home screen starts with **Downloaded**: rows for anime, TV shows and movies you have files for. **Your list** below it still shows everything.
 - **Watch now:** your files come first, then online.
   - **On your computer:** it plays the episode you're up to in the **built-in player** (mpv), followed by the next episodes in order, with matching `.srt`/`.ass` subtitles.
@@ -20,6 +33,7 @@ Your list can sync between your computers.
     - It remembers where you stopped, even on your other computer, and resumes from there. An episode counts as watched once you reach the end credits, and you move on to the next one.
     - **Play in VLC** on the title page, or **Open in VLC instead** while something is playing, switches to VLC at the same spot.
     - Click any episode in the episode list to play it, or use **Choose file…** to pick any file.
+    - **Openings and endings are skipped** when the file marks them as chapters (most anime releases do). Press **Shift+S** while watching to turn this on or off, or change it in Settings.
   - **Online, when you don't have it:**
     1. **Netflix**, then **HBO Max**, if either has it in your country (Pakistan by default).
     2. Otherwise, a search on **your own site**: one for anime and one for movies and TV, set in Settings.
@@ -28,6 +42,29 @@ Your list can sync between your computers.
 - **When a file doesn't work:** press **Not working**. It's in the play window, and in the **On your PC** section of the title page.
   - Watch now then goes online for that title, and its poster shows **FILE ISSUE**.
   - Fix it later from the title page with **Choose file…** or **Use a different folder…**, or press **It works now**.
+
+### Watch together
+
+**Watch together** on a title page plays an episode in sync with someone else, each of you on your own computer with your own copy of the file. When one of you pauses or skips, so does the other. It uses **Syncplay**, a free app: install it on both computers from <https://syncplay.pl/>.
+
+1. You: open the title, click **Watch together**, pick the episode and click **Start the watch party**. Syncplay opens with everything filled in; click **Run Syncplay**. (Untick "Always show this dialog" to skip that step next time.)
+2. Copy the invite code it shows (it starts with `WLP1.`) and send it to the other person.
+3. Them: click the **people** button at the top of Watchlist, paste the code and click **Join**. Their app finds the same episode in their downloads (adding the show to their list if needed) and joins your room.
+
+Both of you need the episode downloaded. If theirs isn't found, they're asked to choose the file. The free public server (`syncplay.pl:8999`) is used unless you change it in Settings.
+
+### Gemini (optional)
+
+1. Go to <https://aistudio.google.com/>, sign in with your Google account and click **Get API key → Create API key**. It's free.
+2. Paste it in **Settings → Gemini** and click **Test**. The newest Flash model is picked for you.
+
+With a key:
+
+- Gemini looks at the downloads that the rules and searches couldn't place. Titles it names are checked on MyAnimeList / TMDB before anything is added, and its decisions are listed under **Sorted for you** like the others.
+- The Related panel also finds TV spin-offs, films and specials with other names.
+- **Previously on…** on a title page gives a short, spoiler-free recap up to the episode you're on.
+
+Only names are sent to Google (file names, folder names and the titles in your list), never the files. On the free tier, Google may use what's sent to improve its products. If the free limit runs out, the app carries on without Gemini and tries again later.
 
 ### Your own sites
 
@@ -76,14 +113,16 @@ To put it on the taskbar or Start menu, right-click `Watchlist.exe` and choose *
 Your list can stay in sync between your computers through a folder that both of them sync.
 That can be **Google Drive**, **OneDrive**, **Dropbox** or **iCloud Drive**; install that app on both computers if you haven't already.
 
+This is optional: without a sync folder, your list is simply saved on that computer.
+
 1. Make a folder for it in the cloud drive, for example `Google Drive/Watchlist`.
-2. On the first computer, open **Settings → Sync between computers**, click **Choose…**, pick that folder and click **Save**.
+2. On the first computer, open **Settings → Sync between computers**, click **Choose…** and pick that folder. It's used straight away.
 3. On the other computer, do the same, picking the same folder. If both computers already had titles, the two lists are merged.
 
 From then on, anything you change on one computer shows up on the other within a few seconds of the cloud drive syncing it, even while the app is open.
 
 - **What syncs:** titles and their info, progress and **Mark watched**, where you stopped in each episode, folders, collections and removed titles.
-- **What stays on each computer:** the downloads folder and each show's own folder (Mac and Windows paths are different), your answers in **Sort your downloads**, "Not working" marks, your keys, your own site links and the VLC/browser locations.
+- **What stays on each computer:** the downloads folder and each show's own folder (Mac and Windows paths are different), your answers in **Sort your downloads**, "Not working" marks, your keys (including Gemini), your own site links, and the VLC, browser and Syncplay locations.
 
   The video files themselves aren't copied. If they're in your cloud drive too, just choose the folder once on each computer.
 - **Editing on both at once is fine.** Changes are merged title by title, including any "conflicted copy" files the cloud app makes.

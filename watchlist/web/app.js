@@ -1016,6 +1016,73 @@ function ago(t) {
   return `${Math.round(s / 86400)} d ago`;
 }
 
+/* ======================================================== MyAnimeList import */
+
+const MAL_STATUS = { watching: 'Watching', plan_to_watch: 'Plan to watch', on_hold: 'On hold', completed: 'Completed', dropped: 'Dropped' };
+
+function openImportMal() {
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Import your MyAnimeList list</h2>
+    <p class="sub">Anime from your list are added with their info, and "episodes watched" sets where you're up to.</p>
+    ${S.status.mal ? '' : '<div class="warn">Add your MyAnimeList Client ID in Settings first.</div>'}
+    <label class="field"><span>Your MyAnimeList user name</span>
+      <div class="input-row"><input class="input" id="mal-user" placeholder="e.g. Ali_123" autocomplete="off">
+      <button class="btn btn-white btn-sm" data-i="look">Look up</button></div>
+      <small>Your list has to be public. Otherwise, export it at myanimelist.net → Profile → Export
+        and <button class="linkish" data-i="file">choose the exported file</button> instead.</small></label>
+    <div id="import-out"></div></div>`, 'import-modal');
+  let source = null;
+  const out = $('#import-out', wrap);
+  const preview = async (src) => {
+    out.innerHTML = '<div class="skeleton"><div class="sk-lines"><i></i><i></i></div></div>';
+    try {
+      const r = await api('POST', '/api/import/mal', { ...src, preview: true });
+      source = src;
+      out.innerHTML = `<p><b>${r.total} anime</b> on that list. Bring in:</p>
+        ${Object.entries(MAL_STATUS).map(([k, label]) => `<label class="check-row"><input type="checkbox" name="${k}" ${['watching', 'plan_to_watch', 'on_hold'].includes(k) && r.counts[k] ? 'checked' : ''} ${r.counts[k] ? '' : 'disabled'}>
+          ${label} <span class="muted">(${r.counts[k]})</span></label>`).join('')}
+        <p class="muted small">Ones already in your list keep their place (and move forward if MyAnimeList says you're further).</p>
+        <div class="btns"><button class="btn btn-red" data-i="go">Import</button></div>`;
+    } catch (e) { out.innerHTML = `<div class="warn">${esc(e.message)}</div>`; }
+  };
+  const follow = async () => {
+    for (;;) {
+      const st = await api('GET', '/api/import/status');
+      const pct = st.total ? (st.done / st.total) * 100 : 100;
+      out.innerHTML = `<div class="import-progress"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
+        <p>${st.running ? `Adding ${esc(st.current)}… (${st.done} of ${st.total})` : `<b>Done:</b> ${st.added} added${st.already ? `, ${st.already} were already in your list` : ''}.`}</p>
+        ${st.failed.length ? `<details><summary class="bad small">${st.failed.length} couldn't be added</summary><div class="small muted">${st.failed.map(esc).join('<br>')}</div></details>` : ''}</div>`;
+      if (!st.running) { await reload(); return; }
+      if (st.done % 5 === 0) reload().catch(() => {});
+      await new Promise((r) => setTimeout(r, 900));
+      if (!wrap.isConnected) return;
+    }
+  };
+  wrap.addEventListener('click', async (e) => {
+    const a = e.target.closest('[data-i]')?.dataset.i;
+    if (!a) return;
+    e.preventDefault();
+    if (a === 'look') {
+      const user = $('#mal-user', wrap).value.trim();
+      if (!user) { toast('Type your user name first', 'error'); return; }
+      preview({ user });
+    } else if (a === 'file') {
+      try {
+        const { path } = await api('POST', '/api/browse', { kind: 'file', types: 'list', title: 'Choose your MyAnimeList export' });
+        if (path) preview({ file: path });
+      } catch (err) { fail(err); }
+    } else if (a === 'go') {
+      const statuses = $$('input[type=checkbox]:checked', out).map((c) => c.name);
+      if (!statuses.length) { toast('Tick at least one', 'error'); return; }
+      try {
+        await api('POST', '/api/import/mal', { ...source, statuses });
+        follow();
+      } catch (err) { fail(err); }
+    }
+  });
+  $('#mal-user', wrap).addEventListener('keydown', (e) => { if (e.key === 'Enter') $('[data-i="look"]', wrap).click(); });
+}
+
 /* ======================================================== watch together */
 
 const SYNCPLAY_HELP = `<div class="warn">Watching together uses <b>Syncplay</b>, a free app that keeps both players in step.
@@ -2078,6 +2145,7 @@ async function openSettings() {
     <label class="field"><span>MyAnimeList Client ID (anime)</span>
       <input class="input" name="mal_client_id" type="password" value="${esc(s.mal_client_id)}" placeholder="Paste your Client ID">
       <small>myanimelist.net/apiconfig → your app → Client ID.</small></label>
+    <div class="btns" style="margin:-4px 0 14px"><button class="btn btn-ghost btn-sm" type="button" data-s="import-mal">Import my MyAnimeList list…</button></div>
     <div class="btns" style="margin-bottom:6px"><button class="btn btn-ghost btn-sm" type="button" data-s="show">Show keys</button>
       <button class="btn btn-ghost btn-sm" type="button" data-s="test">Save & test keys</button><span id="test-out" class="small"></span></div>
     <h4>Sync between computers</h4>
@@ -2219,6 +2287,9 @@ async function openSettings() {
           ? { kind: 'file', types: 'app', title: 'Find Syncplay', initial: '/Applications' }
           : { kind: 'file', types: 'exe', title: 'Find Syncplay.exe', initial: 'C:\\Program Files (x86)\\Syncplay' });
         if (path) form.syncplay_path.value = path;
+      } else if (a === 'import-mal') {
+        closeModal(wrap);
+        openImportMal();
       } else if (a === 'gemini-test') {
         const out = $('#gemini-out', form);
         out.textContent = 'Testing…';

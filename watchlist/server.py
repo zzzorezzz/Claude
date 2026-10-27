@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, launcher, library, metadata, player, scanner, sorter, syncplay
+from . import ai, dialogs, importer, launcher, library, metadata, player, scanner, sorter, syncplay
 from .config import Settings, read_json, write_json
 from .store import TYPES, Store, new_item, next_episode
 
@@ -55,6 +55,7 @@ class App:
         self.store = Store(self._list_path(), self.data_dir / "local.json")
         self.library = library.Library(self)
         self.sorter = sorter.Sorter(self)
+        self.importer = importer.Importer(self)
         self.player = player.Player()
         self._related_path = self.data_dir / "related.json"
         self._related = read_json(self._related_path, {})
@@ -553,6 +554,8 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/items/(\w+)/related", "related"),
         ("POST", r"/api/items/(\w+)/recap", "recap"),
         ("POST", r"/api/settings/gemini", "test_gemini"),
+        ("POST", r"/api/import/mal", "import_mal"),
+        ("GET", r"/api/import/status", "import_status"),
         ("POST", r"/api/party/start", "party_start"),
         ("POST", r"/api/party/join", "party_join"),
         ("POST", r"/api/party/peek", "party_peek"),
@@ -737,6 +740,37 @@ class Handler(BaseHTTPRequestHandler):
             return ai.recap(key, item, int(body.get("season") or 1), int(body.get("episode") or 1))
         except ai.AIError as e:
             raise ApiError(str(e)) from e
+
+    def api_import_mal(self, body):
+        """Bring in a MyAnimeList list, by user name or from an export file."""
+        statuses = [x for x in body.get("statuses") or [] if x in importer.STATUSES]
+        if not statuses and not body.get("preview"):
+            raise ApiError("choose which parts of your list to bring in")
+        if body.get("file"):
+            try:
+                entries = importer.read_export(str(body["file"]))
+            except OSError as e:
+                raise ApiError(f"couldn't open that file ({e})") from e
+        else:
+            s = self.app.settings.get()
+            try:
+                entries = metadata.MAL(s["mal_client_id"]).user_list(str(body.get("user") or ""))
+            except metadata.MetadataError as e:
+                if "doesn't have" in str(e) or "rejected" in str(e):
+                    raise ApiError("couldn't read that list - check the user name, and that the list "
+                                   "is public (or use your exported list file instead)") from e
+                raise
+        if not entries:
+            raise ApiError("that list is empty")
+        counts = {st: sum(1 for e in entries if e["status"] == st) for st in importer.STATUSES}
+        if body.get("preview"):
+            return {"counts": counts, "total": len(entries)}
+        if not self.app.settings.get()["mal_client_id"]:
+            raise ApiError("add your MyAnimeList Client ID in Settings first")
+        return self.app.importer.start(entries, statuses)
+
+    def api_import_status(self, body):
+        return self.app.importer.state()
 
     def api_party_start(self, body):
         item = self.app.item(str(body.get("item_id") or ""))

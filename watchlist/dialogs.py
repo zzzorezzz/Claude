@@ -17,6 +17,7 @@ _WEBVIEW_TYPES = {
     "subtitle": ("Subtitles (*.srt;*.ass;*.ssa;*.vtt;*.sub)", "All files (*.*)"),
     "exe": ("Programs (*.exe)", "All files (*.*)"),
     "app": ("Applications (*.app)",),
+    "list": ("MyAnimeList export (*.xml;*.gz)", "All files (*.*)"),
 }
 
 _TK_SCRIPT = r"""
@@ -31,7 +32,7 @@ if kind == "folder":
 else:
     patterns = {"video": ("Video files", "*.mkv *.mp4 *.avi *.mov *.wmv *.m4v *.webm *.ts"),
                 "subtitle": ("Subtitles", "*.srt *.ass *.ssa *.vtt *.sub"),
-                "exe": ("Programs", "*.exe")}
+                "exe": ("Programs", "*.exe"), "list": ("MyAnimeList export", "*.xml *.gz")}
     filetypes = [patterns[types]] if types in patterns else []
     filetypes.append(("All files", "*.*"))
     path = filedialog.askopenfilename(title=title, initialdir=initial, filetypes=filetypes)
@@ -63,6 +64,7 @@ _PS_FILTERS = {
     "video": "Video files|*.mkv;*.mp4;*.avi;*.mov;*.wmv;*.m4v;*.webm;*.ts|All files|*.*",
     "subtitle": "Subtitles|*.srt;*.ass;*.ssa;*.vtt;*.sub|All files|*.*",
     "exe": "Programs|*.exe|All files|*.*",
+    "list": "MyAnimeList export|*.xml;*.gz|All files|*.*",
 }
 
 
