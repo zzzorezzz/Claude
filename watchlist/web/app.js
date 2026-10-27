@@ -1021,11 +1021,13 @@ function ago(t) {
   return `${Math.round(s / 86400)} d ago`;
 }
 
-function aiKeyRow(s, provider, label, field, help) {
+function aiKeyRow(s, st, provider, label, field, help) {
+  const rest = (st.ai_resting || {})[provider];
   return `<label class="field"><span>${label}</span>
     <div class="input-row"><input class="input" name="${field}" type="password" value="${esc(s[field] || '')}" placeholder="Optional - paste a key to use it">
     <button class="btn btn-ghost btn-sm" type="button" data-s="ai-test" data-p="${provider}" data-field="${field}">Test</button></div>
-    <small id="ai-out-${provider}">${s[field] ? '<span class="ok">✓ Key added.</span> ' : ''}${help}</small></label>`;
+    <small id="ai-out-${provider}">${rest ? `<span class="bad">Resting for ${Math.max(1, Math.round(rest[0] / 60))} min: ${esc(rest[1])}.</span> The others are used meanwhile; Test tries it again now. `
+      : s[field] ? '<span class="ok">✓ Key added.</span> ' : ''}${help}</small></label>`;
 }
 
 // Saves the key and checks it answers. Always ends with a clear result.
@@ -1047,6 +1049,7 @@ async function testAiKey(form, btn) {
         key: ' Check you copied the whole key.',
         credit: '',
         region: '',
+        daily: ' The key is saved; the other helpers are used until it comes back.',
         limit: ' The key is saved; the app tries again later by itself.',
         busy: ' The key is saved; the app tries again later by itself.',
         timeout: ' The key is saved; the app tries again later by itself.',
@@ -1061,7 +1064,7 @@ async function testAiKey(form, btn) {
   }
 }
 
-const AI_NAME = { gemini: 'Gemini', openai: 'ChatGPT', xai: 'Grok' };
+const AI_NAME = { gemini: 'Gemini', groq: 'Groq', openrouter: 'OpenRouter', openai: 'ChatGPT', xai: 'Grok' };
 
 /* ======================================================== MyAnimeList import */
 
@@ -2276,14 +2279,14 @@ async function openSettings() {
     <h4>AI helpers <span class="tag-optional">optional</span></h4>
     <p class="muted small" style="margin-top:-4px">Everything works without them: the app's own rules and MyAnimeList / TMDB searches sort your downloads.
       With a key, the AI also looks at files those couldn't place, finds TV spin-offs for the Related panel and writes "previously on" recaps.
-      The first helper with a key that answers is used: Gemini, then ChatGPT, then Grok.
+      They're asked in this order; when one has run out for the day or is overloaded, the next one answers, and the one that ran out is left alone for a while.
       Only names are sent (file names and the titles in your list), never your files.</p>
-    ${aiKeyRow(s, 'gemini', 'Gemini (Google) - free', 'gemini_api_key',
-      'Free: go to <b>aistudio.google.com</b>, sign in with your Google account, click <b>Get API key</b> → Create API key. Google may use what\'s sent on the free tier to improve its products.')}
-    ${aiKeyRow(s, 'openai', 'ChatGPT (OpenAI)', 'openai_api_key',
-      'From <b>platform.openai.com</b> → API keys. It needs prepaid API credit: ChatGPT\'s free plan only covers the ChatGPT app itself.')}
-    ${aiKeyRow(s, 'xai', 'Grok (xAI)', 'xai_api_key',
-      'From <b>console.x.ai</b> → API keys. It needs API credit: Grok\'s free plan only covers the Grok app itself.')}
+    ${aiKeyRow(s, data.status, 'gemini', 'Gemini (Google) - free', 'gemini_api_key',
+      'Go to <b>aistudio.google.com</b>, sign in with your Google account, click <b>Get API key</b> → Create API key. Google may use what\'s sent on the free tier to improve its products.')}
+    ${aiKeyRow(s, data.status, 'groq', 'Groq - free', 'groq_api_key',
+      'Go to <b>console.groq.com</b>, sign up (no card needed), open <b>API Keys</b> → Create API Key. Fast open models such as gpt-oss and Llama.')}
+    ${aiKeyRow(s, data.status, 'openrouter', 'OpenRouter - free models', 'openrouter_api_key',
+      'Go to <b>openrouter.ai</b>, sign up, open <b>Keys</b> → Create Key. Only its free models are used (about 50 requests a day, shared between them).')}
     <h4>Watching on your ${pcName()}</h4>
     <label class="field"><span>Player</span>
       <select class="select" name="player">
@@ -2315,7 +2318,7 @@ async function openSettings() {
       vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), sync_folder: f.get('sync_folder'),
       anime_site_url: f.get('anime_site_url'), movie_tv_site_url: f.get('movie_tv_site_url'),
       downloads_folder: f.get('downloads_folder'), player: f.get('player'), queue_next_episodes: form.queue_next_episodes.checked,
-      gemini_api_key: f.get('gemini_api_key'), openai_api_key: f.get('openai_api_key'), xai_api_key: f.get('xai_api_key'),
+      gemini_api_key: f.get('gemini_api_key'), groq_api_key: f.get('groq_api_key'), openrouter_api_key: f.get('openrouter_api_key'),
       auto_sort: form.auto_sort.checked, skip_intro: form.skip_intro.checked,
       party_name: f.get('party_name'), party_server: f.get('party_server'),
     };

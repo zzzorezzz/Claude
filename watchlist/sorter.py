@@ -4,7 +4,7 @@ their names alone, before you're asked about them.
 1. An OVA, special, film or later season of an anime in your list: its
    MyAnimeList relations are checked for that exact entry.
 2. MyAnimeList and TMDB are searched for the guessed title.
-3. With an AI key (Gemini, ChatGPT or Grok), the AI looks at whatever is still left.
+3. With an AI key (Gemini, Groq or OpenRouter), the AI looks at whatever is still left.
 
 A confident answer is applied straight away (adding the title to your list if
 needed) and shown under "Sorted for you", where it can be undone. Anything

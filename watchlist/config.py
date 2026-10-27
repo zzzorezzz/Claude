@@ -46,10 +46,10 @@ DEFAULT_SETTINGS = {
     # Optional: a free Google Gemini API key (aistudio.google.com). Without
     # one, the app's own rules and searches do all the sorting.
     "gemini_api_key": "",
-    # Optional too: OpenAI (ChatGPT) and xAI (Grok) API keys. Their APIs need
-    # prepaid credit; the first helper that answers is used.
-    "openai_api_key": "",
-    "xai_api_key": "",
+    # Optional too, and free: Groq and OpenRouter keys. When one helper has
+    # run out or can't be reached, the next one is used.
+    "groq_api_key": "",
+    "openrouter_api_key": "",
     # Search MyAnimeList / TMDB for downloads that aren't in your list, and
     # add them when it's clear what they are.
     "auto_sort": True,
@@ -63,7 +63,7 @@ DEFAULT_SETTINGS = {
 URL_KEYS = ("netflix_url", "hbomax_url", "fallback_url")
 OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
 TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "sync_folder",
-             "downloads_folder", "last_folder", "gemini_api_key", "openai_api_key", "xai_api_key",
+             "downloads_folder", "last_folder", "gemini_api_key", "groq_api_key", "openrouter_api_key",
              "party_name", "party_server")
 BOOL_KEYS = ("queue_next_episodes", "auto_sort", "skip_intro")
 

@@ -109,6 +109,7 @@ class App:
                          "problem": self.sync_problem},
                 "downloads": s["downloads_folder"], "player": s["player"],
                 "mpv": player.find_mpv(), "ai": [ai.NAMES[p] for p in ai.available(s)],
+                "ai_resting": ai.resting(s),
                 "party": bool(self.party and self.party.active)}
 
     def open_link(self, url):
@@ -883,7 +884,7 @@ class Handler(BaseHTTPRequestHandler):
         item = self.app.item(item_id)
         s = self.app.settings.get()
         if not ai.available(s):
-            raise ApiError("add an AI key (Gemini, ChatGPT or Grok) in Settings for recaps")
+            raise ApiError("add an AI key (Gemini, Groq or OpenRouter) in Settings for recaps")
         try:
             return ai.recap(s, item, int(body.get("season") or 1), int(body.get("episode") or 1))
         except ai.AIError as e:

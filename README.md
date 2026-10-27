@@ -5,7 +5,7 @@ A Netflix-style desktop app for Windows and Mac, for the TV shows, anime and mov
 Two things are optional, and everything works without them:
 
 - **A sync folder.** Without one, your list is saved on this computer only. With one (Google Drive, OneDrive...), your list stays the same on your Windows PC and your Mac.
-- **An AI key** (Gemini for free, or ChatGPT / Grok). Without one, the app's own rules and MyAnimeList / TMDB searches sort your downloads and find related titles. With one, the AI helps with the files those can't place, finds TV spin-offs and writes recaps.
+- **An AI key** (Gemini, Groq or OpenRouter, all free). Without one, the app's own rules and MyAnimeList / TMDB searches sort your downloads and find related titles. With one, the AI helps with the files those can't place, finds TV spin-offs and writes recaps.
 
 - **Home screen:** three rows (TV Shows, Anime, Movies), each showing your 5–6 most popular titles and a **Show more** tile for the full list.
   - Movies are ordered by box office, TV shows by TMDB popularity, and anime by MyAnimeList members.
@@ -65,10 +65,17 @@ The free public server (`syncplay.pl:8999`) is used unless you change it in **Se
 
 ### AI helpers (optional)
 
-The app can use **Gemini**, **ChatGPT** or **Grok** to help. Add a key for any of them in **Settings → AI helpers** and click **Test**. If you add more than one, the first that answers is used, in that order.
+The app can use three free AI helpers: **Gemini**, **Groq** and **OpenRouter**. Add a key for any of them in **Settings → AI helpers** and click **Test**.
 
-- **Gemini is free.** Go to <https://aistudio.google.com/>, sign in with your Google account and click **Get API key → Create API key**. Google may use what's sent on the free tier to improve its products.
-- **ChatGPT and Grok need API credit.** Their free plans only cover their own apps; using them from another app needs an API key with credit, from <https://platform.openai.com/> or <https://console.x.ai/>.
+- **Gemini:** go to <https://aistudio.google.com/>, sign in with your Google account and click **Get API key → Create API key**. Google may use what's sent on the free tier to improve its products.
+- **Groq:** go to <https://console.groq.com/>, sign up (no card needed), open **API Keys → Create API Key**.
+- **OpenRouter:** go to <https://openrouter.ai/>, sign up, open **Keys → Create Key**. Only its free models are used: about 50 requests a day, shared between them.
+
+You can add one, two or all three. They're asked in that order:
+
+- If a model is overloaded, slow or over its limit, the helper tries its next model. Gemini also falls back to its Lite and Gemma models, which are free on the same key and usually less busy.
+- If a whole helper has run out for the day, is overloaded or can't be reached, the next helper answers instead. The one that failed is left alone for a while (from 5 minutes up to a few hours, depending on why), and Settings shows that.
+- **Test** asks several models at once, keeps the one that answers first and uses it from then on. It shows what it tried, and the key is saved either way.
 
 With a key:
 
@@ -76,9 +83,7 @@ With a key:
 - The Related panel also finds TV spin-offs, films and specials with other names.
 - **Previously on…** on a title page gives a short, spoiler-free recap up to the episode you're on.
 
-The app picks a quick model for you and moves on to the next one if a model is over its free limit, busy or slow. **Test** says which model worked, or what went wrong (a wrong key, no credit, no connection), and the key is saved either way.
-
-Only names are sent (file names, folder names and the titles in your list), never the files.
+Only names are sent (file names, folder names and the titles in your list that could match), never the files.
 
 ### Your own sites
 
