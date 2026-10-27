@@ -55,6 +55,8 @@ def _blank_item() -> dict:
         # Things you control.
         "collections": [],
         "progress": {"season": 1, "episode": 1},
+        # Where you stopped in each episode ("1:3") or film ("movie"): {"pos", "dur", "at"}.
+        "positions": {},
         "added": now,
         "last_played": None,
         "updated": now,      # when the online info was last fetched

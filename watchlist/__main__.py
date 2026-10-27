@@ -63,6 +63,29 @@ def _self_test(path):
     return 0
 
 
+def _player_test(path):
+    """Used by the builds: play a 3-second test video in the bundled mpv, following
+    it the same way as a real episode, and report what happened."""
+    import threading
+    from . import player
+    report = {"mpv": player.find_mpv()}
+    if report["mpv"]:
+        done = threading.Event()
+        finished = []
+        session = player.Session(
+            report["mpv"], "test",
+            [{"path": "av://lavfi:testsrc=duration=3:size=160x120:rate=10", "key": "1:1", "label": "test"}],
+            extra_args=["--vo=null", "--ao=null", "--force-window=no"],
+            on_finished=lambda item, entry: finished.append(entry["key"]),
+            on_exit=lambda s: done.set())
+        session.start()
+        done.wait(90)
+        report.update(connected=session.connected, ended=session.ended, error=session.error,
+                      last_position=session.pos, finished=finished == ["1:1"])
+    Path(path).write_text(json.dumps(report), encoding="utf-8")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="watchlist", description=__doc__)
     ap.add_argument("--port", type=int, default=8765)
@@ -71,9 +94,12 @@ def main(argv=None):
                     help="open in your browser (Opera GX) instead of an app window")
     ap.add_argument("--no-open", action="store_true", help="don't open any window")
     ap.add_argument("--self-test", metavar="FILE", help=argparse.SUPPRESS)
+    ap.add_argument("--player-test", metavar="FILE", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.self_test:
         return _self_test(args.self_test)
+    if args.player_test:
+        return _player_test(args.player_test)
 
     url = f"http://127.0.0.1:{args.port}/"
     data_dir = Path(args.data) if args.data else default_data_dir()

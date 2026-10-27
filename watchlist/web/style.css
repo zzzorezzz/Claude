@@ -414,3 +414,32 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
   .ep { grid-template-columns: 30px 1fr auto; }
   .ep-thumb { display: none; }
 }
+
+/* downloads */
+.section-head { display: flex; align-items: baseline; gap: 14px; padding: 0 var(--side); margin: 10px 0 14px; }
+.section-head h2 { margin: 0; font-size: clamp(22px, 2vw, 30px); }
+.section-gap { height: 18px; border-bottom: 1px solid #262626; margin: 0 var(--side) 26px; }
+.dl-setup {
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap; justify-content: space-between;
+  margin: 0 var(--side) 30px; padding: 20px 24px; border-radius: 8px; background: var(--panel-2); border: 1px dashed #444;
+}
+.dl-setup h2 { margin: 0 0 4px; }
+.dl-setup p { margin: 0; max-width: 640px; }
+.help-banner {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 0 var(--side) 18px; padding: 12px 16px;
+  border-radius: 6px; background: #13263a; border: 1px solid #2c5a88; color: #cfe3ff;
+}
+.help-banner .spacer { flex: 1; }
+.page .help-banner { margin: 0 0 18px; }
+.questions-modal { width: min(820px, 100%); }
+.questions-modal h4 { margin: 22px 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); }
+.questions-modal details summary { margin: 18px 0 10px; font-size: 15px; }
+.q-card { background: var(--panel-2); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }
+.q-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
+.q-files { font-size: 12px; color: #aaa; font-family: ui-monospace, Consolas, monospace; word-break: break-all; margin-bottom: 10px; }
+.q-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.q-actions .select { font-size: 13px; padding: 6px 8px; max-width: 260px; }
+.q-num { width: 70px; padding: 6px 8px; font-size: 14px; }
+.ep-bar { height: 3px; background: #4d4d4d; border-radius: 2px; margin-top: 8px; max-width: 320px; overflow: hidden; }
+.ep-bar i { display: block; height: 100%; background: var(--red); }
+.live { margin: -6px 0 14px; }

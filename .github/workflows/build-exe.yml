@@ -25,12 +25,29 @@ jobs:
       - name: Install build tools
         run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi
 
+      - name: Get mpv (the built-in player)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = "shinchiro/mpv-winbuild-cmake"
+          $assets = gh release view --repo $repo --json assets --jq '.assets[].name'
+          $name = $assets | Where-Object { $_ -match '^mpv-x86_64-\d{8}-git-[0-9a-f]+\.7z$' } | Select-Object -First 1
+          if (-not $name) { $assets; throw "no Windows mpv build found in $repo" }
+          Write-Host "Using $name"
+          gh release download --repo $repo --pattern $name --dir mpv-dl
+          7z x "mpv-dl/$name" -ompv-dl/x -y | Out-Null
+          New-Item -ItemType Directory -Force packaging/mpv | Out-Null
+          Copy-Item mpv-dl/x/mpv.exe packaging/mpv/
+          Get-ChildItem packaging/mpv | Format-Table Name, Length
+
       - name: Build Watchlist.exe
         run: >
           pyinstaller main.py --noconfirm --onefile --windowed
           --name Watchlist
           --icon packaging/watchlist.ico
           --add-data "watchlist/web;watchlist/web"
+          --add-binary "packaging/mpv/mpv.exe;mpv"
 
       - name: Check the exe has everything it needs
         shell: pwsh
@@ -44,6 +61,17 @@ jobs:
           if ($r.webview -ne $true) { throw "pywebview is missing: $($r.webview)" }
           if ($r.clr -ne $true) { throw "pythonnet (needed for the app window) is missing: $($r.clr)" }
           if ($r.https -ne $true) { throw "secure (HTTPS) connections don't work: $($r.https)" }
+
+      - name: Check the built-in player plays and is followed
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "player-test.json"
+          Start-Process -FilePath "dist\Watchlist.exe" -ArgumentList "--player-test", $report -Wait
+          $r = Get-Content $report | ConvertFrom-Json
+          $r | Format-List
+          if (-not $r.mpv) { throw "mpv isn't inside Watchlist.exe" }
+          if ($r.connected -ne $true) { throw "couldn't talk to mpv: $($r.error)" }
+          if ($r.finished -ne $true) { throw "playing to the end wasn't noticed (last position $($r.last_position))" }
 
       - name: Start the exe and load the app
         shell: pwsh
@@ -90,13 +118,41 @@ jobs:
       - name: Install build tools
         run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi
 
+      - name: Get mpv (the built-in player)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          repo=mpv-player/mpv
+          name=""
+          for tag in $(gh release list --repo $repo --limit 6 --json tagName --jq '.[].tagName'); do
+            echo "== $tag"; gh release view "$tag" --repo $repo --json assets --jq '.assets[].name' | tee assets.txt
+            name=$(grep -iE 'mac.*(arm|arm64|apple).*\.(zip|tar\.gz)$' assets.txt | head -1)
+            if [ -n "$name" ]; then break; fi
+          done
+          if [ -z "$name" ]; then echo "no Apple Silicon mpv build found in $repo releases"; exit 1; fi
+          echo "Using $tag / $name"
+          gh release download "$tag" --repo $repo --pattern "$name" --dir mpv-dl
+          cd mpv-dl
+          case "$name" in *.zip) ditto -x -k "$name" x ;; *) mkdir x && tar -xzf "$name" -C x ;; esac
+          # Some builds wrap the app in another archive.
+          find x -name "*.tar.gz" -exec tar -xzf {} -C x \;
+          find x -name "*.zip" -exec ditto -x -k {} x \;
+          app=$(find x -name "mpv.app" -type d -prune | head -1)
+          if [ -z "$app" ]; then find x -maxdepth 4; echo "no mpv.app inside $name"; exit 1; fi
+          ditto "$app" ../packaging/mpv.app
+          ls -la ../packaging/mpv.app/Contents/MacOS
+
       - name: Build Watchlist.app
-        run: >
-          pyinstaller main.py --noconfirm --windowed
-          --name Watchlist
-          --icon packaging/watchlist.icns
-          --osx-bundle-identifier app.watchlist.desktop
-          --add-data "watchlist/web:watchlist/web"
+        run: |
+          pyinstaller main.py --noconfirm --windowed \
+            --name Watchlist \
+            --icon packaging/watchlist.icns \
+            --osx-bundle-identifier app.watchlist.desktop \
+            --add-data "watchlist/web:watchlist/web"
+          # The built-in player goes inside the app, then the whole app is signed again.
+          ditto packaging/mpv.app dist/Watchlist.app/Contents/Resources/mpv.app
+          codesign --force --deep --sign - dist/Watchlist.app
+          codesign --verify --deep --strict dist/Watchlist.app && echo "signature ok"
 
       - name: Check the app has everything it needs
         run: |
@@ -109,6 +165,22 @@ jobs:
           missing = {k: v for k, v in report.items() if v is not True}
           if missing:
               sys.exit(f"missing from Watchlist.app: {missing}")
+          PY
+
+      - name: Check the built-in player plays and is followed
+        run: |
+          report="$RUNNER_TEMP/player-test.json"
+          dist/Watchlist.app/Contents/MacOS/Watchlist --player-test "$report"
+          cat "$report"; echo
+          python3 - "$report" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          if not r.get("mpv"):
+              sys.exit("mpv isn't inside Watchlist.app")
+          if r.get("connected") is not True:
+              sys.exit(f"couldn't talk to mpv: {r.get('error')}")
+          if r.get("finished") is not True:
+              sys.exit(f"playing to the end wasn't noticed: {r}")
           PY
 
       - name: Start the app and load it

@@ -30,6 +30,14 @@ DEFAULT_SETTINGS = {
     "netflix_url": "https://www.netflix.com/search?q={title}",
     "hbomax_url": "https://play.hbomax.com/search?q={title}",
     "fallback_url": "https://everythingmoe.com",
+    # Your own sites, searched when Netflix and HBO Max don't have a title.
+    # {title} is replaced with the title. Empty means use fallback_url.
+    "anime_site_url": "",
+    "movie_tv_site_url": "",
+    # One folder holding all your downloads, sorted into titles automatically.
+    "downloads_folder": "",
+    # "mpv" (the built-in player) or "vlc".
+    "player": "mpv",
     # A folder both computers sync (Google Drive, OneDrive, Dropbox, iCloud
     # Drive...). When set, the list lives there instead of the data folder.
     "sync_folder": "",
@@ -38,8 +46,9 @@ DEFAULT_SETTINGS = {
 }
 
 URL_KEYS = ("netflix_url", "hbomax_url", "fallback_url")
+OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
 TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "sync_folder",
-             "last_folder")
+             "downloads_folder", "last_folder")
 
 
 def default_data_dir() -> Path:
@@ -110,6 +119,16 @@ class Settings:
                     if not value.lower().startswith(("http://", "https://")):
                         raise ValueError("links must start with http:// or https://")
                     data[key] = value
+            for key in OPTIONAL_URL_KEYS:
+                if key in patch:
+                    value = str(patch[key] or "").strip()
+                    if value and not value.lower().startswith(("http://", "https://")):
+                        raise ValueError("website links must start with http:// or https://")
+                    data[key] = value
+            if "player" in patch:
+                if patch["player"] not in ("mpv", "vlc"):
+                    raise ValueError("player must be mpv or vlc")
+                data["player"] = patch["player"]
             if "region" in patch:
                 region = str(patch["region"]).strip().upper()
                 if not re.fullmatch(r"[A-Z]{2}", region):

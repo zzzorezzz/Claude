@@ -33,6 +33,20 @@ const S = {
   query: '',
   featured: null,
   folderSel: {},       // per section: '' (all), 'none' (not in a folder) or a folder id
+  library: {},         // what was found in the downloads folder
+};
+
+const DL_ORDER = ['anime', 'tv', 'movie'];
+const hasFiles = (item) => !!item.local_folder || !!(S.library.items || {})[item.id];
+const fmtTime = (sec) => {
+  sec = Math.max(0, Math.round(sec || 0));
+  const h = Math.floor(sec / 3600); const m = Math.floor((sec % 3600) / 60); const x = String(sec % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`;
+};
+const posKey = (item, ep) => (isSeries(item) ? `${ep.season}:${ep.episode}` : 'movie');
+const savedPos = (item, ep) => {
+  const p = (item.positions || {})[posKey(item, ep || item.progress)];
+  return p && p.pos >= 30 && !(p.dur && (p.pos / p.dur >= 0.9 || p.dur - p.pos <= 120)) ? p : null;
 };
 
 const sectionFolders = (type) => S.collections.filter((c) => c.type === type);
@@ -87,9 +101,11 @@ async function reload() {
   S.items = data.items;
   S.collections = data.collections;
   S.status = data.status;
+  S.library = data.library || {};
   S.version = data.version;
   render();
   refreshOpenTitle();
+  maybeAskQuestions();
 }
 
 // With sync on, the other computer can change the list at any time: check
@@ -144,6 +160,7 @@ function route() {
   if (!parts.length) return { name: 'home' };
   if (TYPES.includes(parts[0])) return { name: parts[0] };
   if (parts[0] === 'collections') return { name: 'collections', id: parts[1] };
+  if (parts[0] === 'downloads' && TYPES.includes(parts[1])) return { name: 'downloads', type: parts[1] };
   return { name: 'home' };
 }
 
@@ -155,6 +172,7 @@ function render() {
   if (S.query.trim()) renderSearch(view);
   else if (r.name === 'home') renderHome(view);
   else if (TYPES.includes(r.name)) renderCategory(view, r.name);
+  else if (r.name === 'downloads') renderDownloads(view, r.type);
   else if (r.id) renderCollection(view, r.id);
   else renderCollections(view);
 }
@@ -223,7 +241,7 @@ function cardHTML(item) {
   if (item.year) meta.push(item.year);
   if (isSeries(item)) meta.push(epLabel(item.progress));
   else if (item.runtime) meta.push(fmtRuntime(item.runtime));
-  const badge = !item.local_folder ? ''
+  const badge = !hasFiles(item) ? ''
     : item.local_broken ? '<span class="badge-pc warn">FILE ISSUE</span>' : `<span class="badge-pc">ON ${pcName().toUpperCase()}</span>`;
   return `<div class="card" data-id="${esc(item.id)}" tabindex="0" draggable="true">
     <div class="poster-fallback">${esc(item.title)}</div>
@@ -338,6 +356,12 @@ function viewAction(name, data) {
   else if (name === 'rename-collection') renameCollection(data.id);
   else if (name === 'delete-collection') deleteCollection(data.id);
   else if (name === 'search-online') openAdd(data.type, S.query.trim());
+  else if (name === 'set-downloads') chooseDownloadsFolder();
+  else if (name === 'questions') openQuestions();
+  else if (name === 'rescan') {
+    toast('Looking through your downloads…');
+    api('POST', '/api/library/rescan').then(() => reload()).then(() => toast('Downloads updated')).catch(fail);
+  }
   else if (name === 'clear-genre') { S.genre = ''; render(); }
 }
 
@@ -374,7 +398,7 @@ function pickFeatured() {
   return pick;
 }
 
-function heroHTML(item) {
+function heroHTML(item, { resume = false } = {}) {
   const meta = [];
   if (item.rating) meta.push(`<span class="star">★</span> ${fmtRating(item.rating)} ${esc(item.rating_source)}`);
   if (item.year) meta.push(item.year);
@@ -387,12 +411,12 @@ function heroHTML(item) {
     : item.poster ? `<img class="hero-img poster-blur" src="${esc(item.poster)}" alt="">` : '';
   return `<section class="hero">${img}
     <div class="hero-content">
-      <div class="hero-kind">${TYPE_KIND[item.type]}</div>
+      <div class="hero-kind">${resume ? 'CONTINUE WATCHING' : TYPE_KIND[item.type]}</div>
       <h1>${esc(item.title)}</h1>
       <div class="hero-meta">${meta.join('<span>·</span>')}</div>
       <p>${esc(item.overview)}</p>
       <div class="btns">
-        <button class="btn btn-white" data-do="watch" data-id="${esc(item.id)}">${ICON.play} Watch now</button>
+        <button class="btn btn-white" data-do="watch" data-id="${esc(item.id)}">${ICON.play} ${watchLabel(item)}</button>
         <button class="btn btn-grey" data-do="info" data-id="${esc(item.id)}">${ICON.info} More info</button>
       </div>
     </div></section>`;
@@ -411,14 +435,61 @@ function renderHome(view) {
       </div></div></section>${setupBanner()}`;
     return;
   }
-  const featured = pickFeatured();
+  const downloaded = S.items.filter(hasFiles);
+  // Top of the screen: what you were last watching from your downloads.
+  const recent = downloaded.filter((i) => i.last_played).sort((a, b) => b.last_played - a.last_played)[0];
+  const featured = recent || pickFeatured();
   const rows = TYPES.map((t) => rowHTML({
     title: TYPE_PLURAL[t], link: `#/${t}`, items: ofType(t), addType: t,
     emptyText: S.genre ? `No ${S.genre} ${TYPE_PLURAL[t].toLowerCase()} in your list.` : `Nothing here yet - add your first ${TYPE_ONE[t]}.`,
   })).join('');
-  view.innerHTML = `${featured ? heroHTML(featured) : ''}
+  view.innerHTML = `${featured ? heroHTML(featured, { resume: featured === recent }) : ''}
     <div class="home-rows ${featured ? '' : 'no-hero'}">${setupBanner()}
-    ${S.genre ? `<div class="row">${filterNote()}</div>` : ''}${rows}</div>`;
+    ${S.genre ? `<div class="row">${filterNote()}</div>` : ''}
+    ${downloadsSectionHTML()}
+    <div class="section-head"><h2>Your list</h2><span class="muted small">everything you've added, downloaded or not</span></div>
+    ${rows}</div>`;
+}
+
+function questionsBanner() {
+  const q = (S.library.questions || []).filter((x) => x.reason !== 'unknown');
+  const unknown = (S.library.questions || []).filter((x) => x.reason === 'unknown');
+  if (!q.length && !unknown.length) return '';
+  const parts = [];
+  if (q.length) parts.push(`<b>${q.length} download${q.length === 1 ? '' : 's'} need${q.length === 1 ? 's' : ''} your help</b> to be sorted`);
+  if (unknown.length) parts.push(`${unknown.length} show${unknown.length === 1 ? '' : 's'} in your downloads ${unknown.length === 1 ? "isn't" : "aren't"} in your list`);
+  return `<div class="help-banner">${parts.join(' · ')}<span class="spacer"></span>
+    <button class="btn btn-sm btn-white" data-do="questions">Sort them</button></div>`;
+}
+
+function downloadsSectionHTML() {
+  if (!S.status.downloads) {
+    return `<section class="dl-setup"><div><h2>Downloads</h2>
+      <p class="muted">Choose the one folder your downloads go into. The app recognises which show or movie each file is from its name, and asks you about any it isn't sure of.</p></div>
+      <button class="btn btn-white" data-do="set-downloads">${ICON.folder} Choose downloads folder</button></section>`;
+  }
+  const lib = S.library;
+  const rows = DL_ORDER.map((t) => {
+    const items = sortItems(applyGenre(S.items.filter((i) => i.type === t && hasFiles(i))));
+    return items.length ? rowHTML({ title: TYPE_PLURAL[t], link: `#/downloads/${t}`, items, emptyText: '' }) : '';
+  }).join('');
+  return `<div class="section-head"><h2>Downloaded</h2>
+      <span class="muted small">${lib.error ? esc(lib.error) : `${lib.videos || 0} video${lib.videos === 1 ? '' : 's'} in your downloads folder`}</span>
+      <button class="btn btn-ghost btn-sm" data-do="rescan">Rescan</button></div>
+    ${questionsBanner()}
+    ${rows || '<div class="row"><p class="muted">Nothing in your downloads matches a title in your list yet. Add the shows you have, or press "Sort them" above.</p></div>'}
+    <div class="section-gap"></div>`;
+}
+
+function renderDownloads(view, type) {
+  const items = sortItems(applyGenre(S.items.filter((i) => i.type === type && hasFiles(i))));
+  view.innerHTML = `<div class="page">
+    <div class="page-head"><h1>Downloaded ${TYPE_PLURAL[type]}</h1>
+      <span class="count">${items.length} title${items.length === 1 ? '' : 's'}</span>${filterNote()}
+      <span class="spacer"></span><button class="btn btn-ghost btn-sm" data-do="rescan">Rescan</button></div>
+    ${questionsBanner()}
+    ${items.length ? `<div class="grid">${items.map(cardHTML).join('')}</div>` : '<p class="muted">Nothing downloaded here yet.</p>'}
+  </div>`;
 }
 
 function sortLabel() {
@@ -656,6 +727,140 @@ function confirmModal(title, text, ok = 'OK') {
   });
 }
 
+/* ==================================================== downloads folder */
+
+function watchLabel(item) {
+  const pos = savedPos(item);
+  if (isSeries(item)) return pos ? `Resume ${epLabel(item.progress)} · ${fmtTime(pos.pos)}` : `Watch ${epLabel(item.progress)}`;
+  return pos ? `Resume · ${fmtTime(pos.pos)}` : 'Watch now';
+}
+
+async function chooseDownloadsFolder() {
+  try {
+    const { path } = await api('POST', '/api/browse', { kind: 'folder', title: 'Choose your downloads folder', initial: S.status.downloads || '' });
+    if (!path) return;
+    await api('PUT', '/api/settings', { downloads_folder: path });
+    await reload();
+    const n = Object.keys(S.library.items || {}).length;
+    toast(`Downloads folder set - matched files to ${n} title${n === 1 ? '' : 's'}`);
+    if ((S.library.questions || []).length) openQuestions();
+  } catch (e) { fail(e); }
+}
+
+// New files the app isn't sure about: ask once, without nagging about the same ones.
+function maybeAskQuestions() {
+  const keys = (S.library.questions || []).filter((q) => q.reason !== 'unknown').map((q) => q.key);
+  let seen = [];
+  try { seen = JSON.parse(localStorage.getItem('wl-asked') || '[]'); } catch { /* private mode */ }
+  const fresh = keys.filter((k) => !seen.includes(k));
+  if (!fresh.length || $('#modal-root').children.length) return;
+  try { localStorage.setItem('wl-asked', JSON.stringify([...seen, ...fresh].slice(-2000))); } catch { /* ignore */ }
+  openQuestions();
+}
+
+function questionGuessType(q) {
+  if (q.files.some((f) => /^\[|\s-\s\d/.test(f.split(/[\\/]/).pop()))) return 'anime';
+  return q.files.some((f) => /s\d{1,2}e\d|episode|\bep\s?\d/i.test(f)) ? 'tv' : 'movie';
+}
+
+function openQuestions() {
+  if ($$('#modal-root .questions-modal').length) return;
+  const wrap = openModal('', 'questions-modal');
+  const draw = () => {
+    const qs = S.library.questions || [];
+    const titleOpts = [...S.items].sort((a, b) => a.title.localeCompare(b.title))
+      .map((i) => `<option value="${esc(i.id)}">${esc(i.title)} (${TYPE_ONE[i.type]})</option>`).join('');
+    const fileList = (files) => `<div class="q-files">${files.slice(0, 3).map((f) => `<div>${esc(f)}</div>`).join('')}
+      ${files.length > 3 ? `<div class="muted">…and ${files.length - 3} more</div>` : ''}</div>`;
+    const card = (q, i) => {
+      if (q.kind === 'title') {
+        const cands = q.candidates.map(findItem).filter(Boolean);
+        return `<div class="q-card" data-q="${i}">
+          <div class="q-head"><b>"${esc(q.guess || 'no name')}"${q.season ? ` · season ${q.season}` : ''}</b>
+            <span class="muted small">${q.files.length} file${q.files.length === 1 ? '' : 's'}</span></div>
+          ${fileList(q.files)}
+          <div class="q-actions">
+            ${cands.map((c) => `<button class="btn btn-sm btn-white" data-a="item" data-item="${esc(c.id)}">It's ${esc(c.title)}</button>`).join('')}
+            <select class="select q-pick"><option value="">${cands.length ? 'Another title…' : 'It\'s a title in my list…'}</option>${titleOpts}</select>
+            <button class="btn btn-sm btn-ghost" data-a="add">+ Add it to my list</button>
+            <button class="btn btn-sm btn-ghost" data-a="ignore">Ignore</button>
+          </div></div>`;
+      }
+      if (q.kind === 'episode') {
+        const item = findItem(q.item);
+        return `<div class="q-card" data-q="${i}">
+          <div class="q-head"><b>Which episode of ${esc(item ? item.title : 'this show')} is this?</b></div>
+          ${fileList(q.files)}
+          <div class="q-actions"><span class="muted small">Season</span><input class="input q-num q-season" type="number" min="1" value="1">
+            <span class="muted small">Episode</span><input class="input q-num q-episode" type="number" min="1" placeholder="#">
+            <button class="btn btn-sm btn-white" data-a="episode">Save</button>
+            <button class="btn btn-sm btn-ghost" data-a="ignore-file">It's an extra - ignore it</button></div></div>`;
+      }
+      return `<div class="q-card" data-q="${i}">
+        <div class="q-head"><b>Which video is this subtitle for?</b></div>
+        ${fileList(q.files)}
+        <div class="q-actions"><select class="select q-video"><option value="">Choose the video…</option>
+          ${(q.choices || []).map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select>
+          <button class="btn btn-sm btn-white" data-a="subtitle">Save</button>
+          <button class="btn btn-sm btn-ghost" data-a="ignore-sub">Ignore</button></div></div>`;
+    };
+    const indexed = qs.map((q, i) => [q, i]);
+    const unsure = indexed.filter(([q]) => q.kind === 'title' && q.reason === 'unsure');
+    const episodes = indexed.filter(([q]) => q.kind === 'episode');
+    const subs = indexed.filter(([q]) => q.kind === 'subtitle');
+    const unknown = indexed.filter(([q]) => q.reason === 'unknown');
+    const section = (title, list) => (list.length ? `<h4>${title}</h4>${list.map(([q, i]) => card(q, i)).join('')}` : '');
+    $('.modal', wrap).innerHTML = `<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+      <h2>Sort your downloads</h2>
+      <p class="sub">Tell me where these belong. Answers are remembered, so new episodes of the same show are sorted automatically.</p>
+      ${!qs.length ? '<div class="empty-state">All sorted - nothing needs your help. 🎉</div>' : ''}
+      ${section('Not sure which title these are', unsure)}
+      ${section('Which episode?', episodes)}
+      ${section('Subtitles without a video', subs)}
+      ${unknown.length ? `<details ${unsure.length + episodes.length + subs.length ? '' : 'open'}><summary><b>Not in your list (${unknown.length})</b> - add them, point them at a title, or ignore them</summary>
+        ${unknown.map(([q, i]) => card(q, i)).join('')}</details>` : ''}
+    </div>`;
+  };
+  const answer = async (body) => {
+    S.library = await api('POST', '/api/library/answer', body);
+    await reload();
+    if (wrap.isConnected) draw();
+  };
+  wrap.addEventListener('change', (e) => {
+    const pick = e.target.closest('.q-pick');
+    if (!pick || !pick.value) return;
+    const q = S.library.questions[Number(pick.closest('[data-q]').dataset.q)];
+    answer({ kind: 'title', key: q.key, item: pick.value }).catch(fail);
+  });
+  wrap.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-a]');
+    if (!btn) return;
+    const box = btn.closest('[data-q]');
+    const q = S.library.questions[Number(box.dataset.q)];
+    const a = btn.dataset.a;
+    try {
+      if (a === 'item') await answer({ kind: 'title', key: q.key, item: btn.dataset.item });
+      else if (a === 'ignore') await answer({ kind: 'title', key: q.key, item: 'ignore' });
+      else if (a === 'ignore-file') await answer({ kind: 'file', key: q.key, item: 'ignore' });
+      else if (a === 'ignore-sub') await answer({ kind: 'subtitle', key: q.key, video: 'ignore' });
+      else if (a === 'episode') {
+        const episode = Number($('.q-episode', box).value);
+        if (!episode) { toast('Type the episode number first', 'error'); return; }
+        await answer({ kind: 'episode', key: q.key, item: q.item, season: Number($('.q-season', box).value) || 1, episode });
+      } else if (a === 'subtitle') {
+        const video = $('.q-video', box).value;
+        if (!video) { toast('Choose the video first', 'error'); return; }
+        await answer({ kind: 'subtitle', key: q.key, video });
+      } else if (a === 'add') {
+        openAdd(questionGuessType(q), q.guess, '', (item) => {
+          answer({ kind: 'title', key: q.key, item: item.id }).catch(fail);
+        });
+      }
+    } catch (err) { fail(err); }
+  });
+  draw();
+}
+
 /* ======================================================== collections */
 
 async function newCollection(type = null) {
@@ -696,7 +901,7 @@ async function deleteCollection(id) {
 
 /* ============================================================ add flow */
 
-function openAdd(type = 'tv', query = '', preCol = '') {
+function openAdd(type = 'tv', query = '', preCol = '', onAdded = null) {
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>Add to your list</h2><p class="sub">Search online - the summary, ratings and trailer are added automatically.</p>
     <div class="tabs">${TYPES.map((t) => `<button data-type="${t}">${TYPE_ONE[t] === 'anime' ? 'Anime' : TYPE_ONE[t][0].toUpperCase() + TYPE_ONE[t].slice(1)}</button>`).join('')}</div>
@@ -762,6 +967,7 @@ function openAdd(type = 'tv', query = '', preCol = '') {
       const item = await api('POST', '/api/items', { type: st.type, source: r.source, source_id: r.source_id, collections: col ? [col] : [] });
       upsert(item);
       r.in_list = item.id;
+      if (onAdded) { closeModal(wrap); onAdded(item); toast(`Added ${item.title} and sorted its files`); return; }
       btn.disabled = false;
       btn.className = 'btn btn-ghost btn-sm';
       btn.textContent = '✓ In your list';
@@ -860,7 +1066,8 @@ function drawTitle(wrap) {
       <div class="tm-hero-content">
         <h1>${esc(item.title)}</h1>
         <div class="btns">
-          <button class="btn btn-white" data-t="watch">${ICON.play} ${series ? `Watch ${epLabel(item.progress)}` : 'Watch now'}</button>
+          <button class="btn btn-white" data-t="watch">${ICON.play} ${esc(watchLabel(item))}</button>
+          ${hasFiles(item) ? '<button class="btn btn-grey" data-t="vlc" title="Play the file in VLC instead of the built-in player">Play in VLC</button>' : ''}
           <button class="btn btn-grey" data-t="trailer">${ICON.play} ${item.trailer ? 'Trailer' : 'Find trailer'}</button>
           <button class="btn-round" data-t="menu" title="Collections & more">${ICON.plus}</button>
           <button class="btn-round" data-t="remove" title="Remove from list">${ICON.trash}</button>
@@ -913,6 +1120,7 @@ async function titleClick(wrap, e) {
   const t = e.target.closest('[data-t]')?.dataset.t;
   try {
     if (t === 'watch') openWatch(item);
+    else if (t === 'vlc') openWatch(item, null, { player: 'vlc' });
     else if (t === 'trailer') playTrailer(wrap, item);
     else if (t === 'close-trailer') { $('.tm-trailer', wrap)?.remove(); }
     else if (t === 'youtube') api('POST', '/api/open', { url: `https://www.youtube.com/watch?v=${item.trailer}` }).catch(fail);
@@ -929,6 +1137,8 @@ async function titleClick(wrap, e) {
       if (await chooseFolder(item)) loadLocal(wrap);
     } else if (t === 'open-folder') {
       await api('POST', '/api/reveal', { item_id: item.id });
+    } else if (t === 'set-downloads') {
+      chooseDownloadsFolder();
     } else if (t === 'choose-file') {
       openChooseFile(item);
     } else if (t === 'mark-broken' || t === 'mark-ok') {
@@ -967,9 +1177,24 @@ function drawFolderLine(wrap) {
   const line = $('#folder-line', wrap);
   if (!line) return;
   const local = wrap.st.local;
+  const dl = (S.library.items || {})[item.id];
+  const playerName = S.status.player === 'vlc' || !S.status.mpv ? 'VLC' : 'the built-in player';
+  const brokenButtons = item.local_broken ? '<button class="btn btn-white btn-sm" data-t="mark-ok">It works now</button>'
+    : '<button class="btn btn-ghost btn-sm" data-t="mark-broken">Not working</button>';
+  const statusLine = item.local_broken
+    ? `<div class="local-status bad">⚠ Marked as not working - Watch now goes online until you fix it.
+        Choose the right file or folder, or press "It works now".</div>`
+    : `<div class="local-status ok">✓ Watch now plays from here in ${playerName}. If the wrong file plays or it won't play, press "Not working".</div>`;
   if (!item.local_folder) {
-    line.innerHTML = `<span>No folder chosen yet. Pick the folder with ${isSeries(item) ? 'the episodes' : 'the movie'} and it'll be remembered.</span>
-      <button class="btn btn-white btn-sm" data-t="choose-folder">${ICON.folder} Choose folder</button>`;
+    if (dl) {
+      line.innerHTML = `${statusLine}<span>${dl.files} file${dl.files === 1 ? '' : 's'} in your downloads${isSeries(item) ? `, ${dl.episodes.length} episode${dl.episodes.length === 1 ? '' : 's'} recognised` : ''}</span>
+        <button class="btn btn-ghost btn-sm" data-t="choose-file">Choose file…</button>
+        <button class="btn btn-ghost btn-sm" data-t="choose-folder">Use a different folder…</button>${brokenButtons}`;
+      return;
+    }
+    line.innerHTML = `<span>Not in your downloads${S.status.downloads ? '' : ' (no downloads folder set yet)'}. You can also pick a folder just for this title.</span>
+      ${S.status.downloads ? '' : `<button class="btn btn-white btn-sm" data-t="set-downloads">${ICON.folder} Set downloads folder</button>`}
+      <button class="btn btn-ghost btn-sm" data-t="choose-folder">${ICON.folder} Choose a folder</button>`;
     return;
   }
   let found = '';
@@ -978,22 +1203,17 @@ function drawFolderLine(wrap) {
     const nVid = local.videos.length;
     found = `<span>${nVid} video file${nVid === 1 ? '' : 's'}${isSeries(item) ? `, ${local.available.length} episode${local.available.length === 1 ? '' : 's'} recognised` : ''}</span>`;
   }
-  const status = item.local_broken
-    ? `<div class="local-status bad">⚠ Marked as not working - Watch now goes online until you fix it.
-        Choose the right file or folder, or press "It works now".</div>`
-    : '<div class="local-status ok">✓ Watch now plays from here in VLC. If the wrong file plays or it won\'t play, press "Not working".</div>';
-  line.innerHTML = `${status}<code>${esc(item.local_folder)}</code>${found}
+  line.innerHTML = `${statusLine}<code>${esc(item.local_folder)}</code>${found}${dl ? `<span>+ ${dl.files} in your downloads</span>` : ''}
     <button class="btn btn-ghost btn-sm" data-t="choose-file">Choose file…</button>
     <button class="btn btn-ghost btn-sm" data-t="open-folder">Open folder</button>
     <button class="btn btn-ghost btn-sm" data-t="choose-folder">Change folder</button>
-    ${item.local_broken ? '<button class="btn btn-white btn-sm" data-t="mark-ok">It works now</button>'
-      : '<button class="btn btn-ghost btn-sm" data-t="mark-broken">Not working</button>'}
+    ${brokenButtons}
     <button class="btn btn-ghost btn-sm" data-t="forget-folder">Forget</button>`;
 }
 
 async function loadLocal(wrap) {
   const item = findItem(wrap.dataset.itemId);
-  if (!item || !item.local_folder) return;
+  if (!item || !hasFiles(item)) return;
   try {
     wrap.st.local = await api('GET', `/api/items/${item.id}/local`);
   } catch { wrap.st.local = null; }
@@ -1053,16 +1273,20 @@ async function drawEpisodes(wrap) {
       watched ? '<span class="tag tag-done">✓ Watched</span>' : '',
       current ? '' : '<button class="ep-set" title="Make this the next episode">Set as next</button>',
     ].join('');
+    // Where you stopped, if you're partway through it.
+    const at = savedPos(item, { season: st.season, episode: n });
+    const bar = at ? `<div class="ep-bar" title="Stopped at ${fmtTime(at.pos)}"><i style="width:${at.dur ? Math.min(100, (at.pos / at.dur) * 100).toFixed(1) : 0}%"></i></div>
+      <div class="small muted">Stopped at ${fmtTime(at.pos)}${at.dur ? ` of ${fmtTime(at.dur)}` : ''}</div>` : '';
     if (d) {
       rows.push(`<div class="ep ${current ? 'current' : ''} ${watched ? 'watched' : ''}" data-ep="${key}">
         <div class="ep-num">${n}</div>
         ${d.still ? `<img class="ep-thumb" src="${esc(d.still)}" alt="" loading="lazy">` : `<div class="ep-thumb">${ICON.play}</div>`}
         <div><div class="ep-title">${esc(d.name || `Episode ${n}`)}${d.runtime ? `<small>${d.runtime}m</small>` : ''}</div>
-          <div class="ep-desc">${esc(d.overview)}</div></div>
+          <div class="ep-desc">${esc(d.overview)}</div>${bar}</div>
         <div class="ep-tags">${tags}</div></div>`);
     } else {
       rows.push(`<div class="ep compact ${current ? 'current' : ''} ${watched ? 'watched' : ''}" data-ep="${key}">
-        <div class="ep-num">${n}</div><div class="ep-title">Episode ${n}</div><div class="ep-tags">${tags}</div></div>`);
+        <div class="ep-num">${n}</div><div><div class="ep-title">Episode ${n}</div>${bar}</div><div class="ep-tags">${tags}</div></div>`);
     }
   }
   list.innerHTML = rows.join('');
@@ -1092,11 +1316,11 @@ async function chooseFolder(item) {
 
 // Watch now: a title with a working folder plays straight away; one marked
 // "not working" goes online; anything else asks On my PC / Online.
-function openWatch(item, ep) {
+function openWatch(item, ep, { player = '' } = {}) {
   const wrap = openModal('', 'watch-modal');
-  wrap.st = { id: item.id, ep: ep ? { ...ep } : { ...item.progress } };
-  if (item.local_folder && !item.local_broken) autoLocal(wrap);
-  else if (item.local_folder) watchOnline(wrap, { reason: 'Its file is marked as not working, so going online instead.', fix: true });
+  wrap.st = { id: item.id, ep: ep ? { ...ep } : { ...item.progress }, player };
+  if (hasFiles(item) && !item.local_broken) autoLocal(wrap);
+  else if (hasFiles(item)) watchOnline(wrap, { reason: 'Its file is marked as not working, so going online instead.', fix: true });
   else watchChoice(wrap);
 }
 
@@ -1130,23 +1354,24 @@ async function autoLocal(wrap) {
   }
   if (!wrap.isConnected) return;
   if (!info.exists) {
-    return watchOnline(wrap, { reason: `${item.title}'s folder wasn't found (moved, renamed or the drive isn't plugged in), so going online.`, fix: true });
+    return watchOnline(wrap, { reason: `${item.title}'s files weren't found (moved, renamed or the drive isn't plugged in), so going online.`, fix: true });
   }
   if (!info.target) {
-    return watchOnline(wrap, { reason: `${what} isn't in ${item.title}'s folder, so going online.`, fix: true });
+    return watchOnline(wrap, { reason: `${what} isn't in your downloads, so going online.`, fix: true });
   }
   try {
-    await playFile(wrap, info.target, info.subtitles[0]);
+    await playFile(wrap, info.target, info.subtitles[0], wrap.st.player);
   } catch (e) {
     if (wrap.isConnected) watchOnline(wrap, { reason: `The file couldn't be played (${e.message}), so going online.`, fix: true });
   }
 }
 
-async function playFile(wrap, video, sub) {
+async function playFile(wrap, video, sub, player = '', fromStart = false) {
   const item = findItem(wrap.st.id);
   const res = await api('POST', `/api/items/${item.id}/play`, {
     path: video.path, subtitle: sub ? sub.path : '',
     season: wrap.st.ep.season, episode: wrap.st.ep.episode,
+    player: player || undefined, from_start: fromStart,
   });
   await reload();
   if (wrap.isConnected) drawPlaying(wrap, res, video, sub);
@@ -1154,18 +1379,39 @@ async function playFile(wrap, video, sub) {
 
 function drawPlaying(wrap, res, video, sub) {
   const item = findItem(wrap.st.id);
+  const mpv = res.player === 'mpv';
   const body = watchBody(wrap, `<div class="center">
     <div class="result-icon">▶️</div>
-    <h2>Playing ${esc(whatLabel(wrap))} in VLC</h2>
+    <h2>Playing ${esc(whatLabel(wrap))}${mpv ? '' : ' in VLC'}</h2>
+    ${res.note ? `<div class="warn" style="justify-content:center;margin-bottom:12px">${esc(res.note)}</div>` : ''}
     <p class="sub">${esc(video.name)}<br>
-      <span class="small">Subtitles: ${sub ? esc(sub.name) : 'none found'}${res.queued ? ` · the next ${res.queued} episode${res.queued === 1 ? '' : 's'} play after it, in order` : ''}</span></p>
+      <span class="small">${res.resumed_at ? `Resumed at ${fmtTime(res.resumed_at)} · ` : ''}Subtitles: ${sub ? esc(sub.name) : 'none found'}${res.queued ? ` · the next ${res.queued} episode${res.queued === 1 ? '' : 's'} play after it, in order` : ''}</span></p>
+    ${mpv ? '<div class="live muted small" id="live">Opening the player…</div>' : ''}
     <div class="btns" style="justify-content:center"><button class="btn btn-white" data-w="done">Done</button>
+      ${mpv ? '<button class="btn btn-ghost" data-w="to-vlc">Open in VLC instead</button>' : ''}
       <button class="btn btn-ghost" data-w="choose">Wrong episode? Choose the file</button></div>
     <div class="btns" style="justify-content:center;margin-top:10px">
       <button class="btn btn-ghost btn-sm" data-w="broken">File not working - watch online instead</button></div>
   </div>`);
   body.addEventListener('click', (e) => localAction(wrap, e));
   if (item.format === 'movie') $('[data-w="choose"]', body).textContent = 'Wrong file? Choose another';
+  if (mpv) followPlayer(wrap);
+}
+
+// While the play window is open, show where the built-in player is.
+async function followPlayer(wrap) {
+  clearTimeout(wrap.followTimer);
+  const live = $('#live', wrap);
+  if (!live || !wrap.isConnected) return;
+  try {
+    const st = await api('GET', '/api/player');
+    if (!st.active) { live.textContent = 'The player was closed - your place is saved.'; return; }
+    if (st.error) { live.textContent = st.error; return; }
+    if (st.pos != null) {
+      live.innerHTML = `${esc(st.label || st.file)} · ${st.paused ? 'paused at' : 'at'} <b>${fmtTime(st.pos)}</b>${st.dur ? ` of ${fmtTime(st.dur)}` : ''}`;
+    }
+  } catch { /* try again */ }
+  wrap.followTimer = setTimeout(() => followPlayer(wrap), 2000);
 }
 
 function watchBody(wrap, html) {
@@ -1185,7 +1431,7 @@ function watchChoice(wrap) {
     <p class="sub">${esc(item.title)}${picker ? ' · ' : ''}${picker}</p>
     <div class="choices">
       <button class="choice" data-choice="local">${ICON.pc}<b>On my ${pcName()}</b><span>${item.local_folder ? 'Play from your saved folder in VLC' : 'Pick the folder once, then it plays in VLC'}</span></button>
-      <button class="choice" data-choice="online">${ICON.globe}<b>Online</b><span>Netflix → HBO Max (${esc(region)}) → everythingmoe</span></button>
+      <button class="choice" data-choice="online">${ICON.globe}<b>Online</b><span>Netflix → HBO Max (${esc(region)}) → your ${item.type === 'anime' ? 'anime' : 'movie & TV'} site</span></button>
     </div>`);
   const readEp = () => {
     const s = $('#w-season', body);
@@ -1203,7 +1449,7 @@ function watchChoice(wrap) {
 
 async function startLocal(wrap) {
   let item = findItem(wrap.st.id);
-  if (!item.local_folder || item.local_broken) {
+  if (!hasFiles(item) || item.local_broken) {
     watchBody(wrap, '<div class="center"><div class="spinner"></div><p class="muted">Choose the folder in the window that just opened…</p></div>');
     item = await chooseFolder(item);
     if (!wrap.isConnected) return;
@@ -1214,7 +1460,7 @@ async function startLocal(wrap) {
 
 async function watchLocal(wrap, { path = '', choose = false } = {}) {
   let item = findItem(wrap.st.id);
-  if (!item.local_folder) {
+  if (!hasFiles(item)) {
     watchBody(wrap, '<div class="center"><div class="spinner"></div><p class="muted">Choose the folder in the window that just opened…</p></div>');
     item = await chooseFolder(item);
     if (!wrap.isConnected) return;
@@ -1248,7 +1494,7 @@ function drawLocal(wrap, { choose = false } = {}) {
   const what = series ? epLabel(wrap.st.ep) : item.title;
   const videoList = `<div class="file-list">${info.videos.map((v, i) => `<button data-video="${i}">
       ${videoLabel(v) ? `<span class="tag">${esc(videoLabel(v))}</span>` : ''}<span class="fname">${esc(v.rel)}</span></button>`).join('')}</div>`;
-  const footer = `<div class="footer-line">${ICON.folder.replace('<svg', '<svg width="16" height="16"')}<code>${esc(item.local_folder)}</code>
+  const footer = `<div class="footer-line">${ICON.folder.replace('<svg', '<svg width="16" height="16"')}<code>${esc(item.local_folder || S.status.downloads || '')}</code>
     <span class="spacer" style="flex:1"></span><button class="btn btn-ghost btn-sm" data-w="browse">Browse for a file…</button>
     <button class="btn btn-ghost btn-sm" data-w="change">Change folder</button>
     <button class="btn btn-ghost btn-sm" data-w="back">Back</button></div>`;
@@ -1262,6 +1508,7 @@ function drawLocal(wrap, { choose = false } = {}) {
   }
 
   const subs = info.subtitles;
+  const resumeAt = savedPos(item, wrap.st.ep);
   const subOptions = [
     ...subs.map((s, i) => `<option value="${i}" ${i === 0 ? 'selected' : ''}>${esc(s.rel)}${s.english ? ' (English)' : ''}</option>`),
     `<option value="none" ${subs.length ? '' : 'selected'}>${subs.length ? 'No subtitles' : 'No subtitle files found'}</option>`,
@@ -1274,12 +1521,14 @@ function drawLocal(wrap, { choose = false } = {}) {
       <div class="input-row"><select class="select" id="w-sub" style="flex:1">${subOptions}</select>
       <button class="btn btn-ghost btn-sm" data-w="reveal-sub" title="Show the subtitle file in its folder" ${subs.length ? '' : 'disabled'}>Show file</button></div>
       <small>Subtitle files with the same name as the video load automatically. ${series ? 'The next episodes are queued in VLC with their matching subtitles.' : ''}</small></label>
-    <div class="btns"><button class="btn btn-red" data-w="play">${ICON.play} Play in VLC</button>
+    ${resumeAt ? `<label class="check-row"><input type="checkbox" id="w-start-over"> Start from the beginning (you stopped at ${fmtTime(resumeAt.pos)})</label>` : ''}
+    <div class="btns"><button class="btn btn-red" data-w="play">${ICON.play} ${resumeAt ? `Resume at ${fmtTime(resumeAt.pos)}` : 'Play'}</button>
+      <button class="btn btn-ghost" data-w="play-vlc">Play in VLC</button>
       <button class="btn btn-ghost" data-w="reveal">Show in folder</button></div>
     ${info.videos.length > 1 ? `<details style="margin-top:16px" ${choose ? 'open' : ''}><summary>All files in the folder (${info.videos.length}) - click one to pick it</summary>${videoList}</details>` : ''}
     ${footer}`);
-  if (!S.status.vlc) {
-    body.insertAdjacentHTML('afterbegin', `<div class="warn" style="margin-bottom:16px">VLC wasn't found on this ${pcName()}. Install it from videolan.org, or set its location in Settings.</div>`);
+  if (!S.status.mpv && !S.status.vlc) {
+    body.insertAdjacentHTML('afterbegin', `<div class="warn" style="margin-bottom:16px">No player was found on this ${pcName()}. Install VLC from videolan.org, or set its location in Settings.</div>`);
   }
   body.addEventListener('click', (e) => localAction(wrap, e));
   $('#w-sub', body).addEventListener('change', async (e) => {
@@ -1335,7 +1584,7 @@ async function localAction(wrap, e) {
       const sel = $('#w-sub', wrap).value;
       const sub = info.subtitles[Number(sel)];
       if (sub) await api('POST', '/api/reveal', { item_id: item.id, path: sub.path });
-    } else if (w === 'play') {
+    } else if (w === 'play' || w === 'play-vlc') {
       const sel = $('#w-sub', wrap).value;
       const sub = info.subtitles[Number(sel)];
       const btn = e.target.closest('[data-w]');
@@ -1343,7 +1592,11 @@ async function localAction(wrap, e) {
       if (findItem(item.id).local_broken) {
         upsert(await api('PUT', `/api/items/${item.id}`, { local_broken: false }));
       }
-      await playFile(wrap, info.target, sub);
+      await playFile(wrap, info.target, sub, w === 'play-vlc' ? 'vlc' : '', !!$('#w-start-over', wrap)?.checked);
+    } else if (w === 'to-vlc') {
+      const res = await api('POST', '/api/player/vlc');
+      toast(`Continuing ${res.file} in VLC`);
+      closeModal(wrap);
     }
   } catch (err) {
     fail(err);
@@ -1368,7 +1621,8 @@ async function watchOnline(wrap, { reason = '', fix = false } = {}) {
       <div class="result-icon">${found ? '✅' : '🔎'}</div>
       <h2>${found ? `Opening ${esc(res.service)}` : `Not on Netflix or HBO Max in ${esc(region)}`}</h2>
       <p class="sub">${found ? `${esc(item.title)} is on ${esc(res.service)} in ${esc(region)}. It's open in ${browserName()}${isSeries(item) ? ` - you're up to ${epLabel(wrap.st.ep)}` : ''}.`
-        : `everythingmoe.com is open in ${browserName()} so you can pick a site from there.`}</p>
+        : res.own_site ? `Opened a search for ${esc(item.title)} on ${esc(res.service)} in ${browserName()}.`
+        : `${esc(res.service)} is open in ${browserName()}. Add your own ${item.type === 'anime' ? 'anime' : 'movie & TV'} site in Settings to search it directly.`}</p>
       ${res.services.length ? `<div class="muted small">Streaming in ${esc(region)} on:</div><div class="services" style="justify-content:center">${res.services.map((s) => `<span class="chip">${esc(s)}</span>`).join('')}</div>` : ''}
       ${res.message ? `<p class="note">${esc(res.message)}</p>` : ''}
       <div class="btns" style="justify-content:center;margin-top:16px"><button class="btn btn-white" data-w="done">Done</button>
@@ -1429,12 +1683,33 @@ async function openSettings() {
       <button class="btn btn-ghost btn-sm" type="button" data-s="browser">Browse</button></div>
       <small>${data.status.browser ? `<span class="ok">✓ Using:</span> ${esc(data.status.browser)}. Leave empty to keep this.`
         : `<span class="bad">Opera GX wasn't found</span> - links open in your default browser. ${mac ? 'Browse to Opera GX in Applications' : "Browse to Opera GX's launcher.exe"} to use it.`}
-        Netflix, HBO Max, everythingmoe and trailers open here.</small></label>
+        Netflix, HBO Max, your own sites and trailers open here.</small></label>
     <label class="field"><span>Netflix link</span><input class="input" name="netflix_url" value="${esc(s.netflix_url)}"></label>
     <label class="field"><span>HBO Max link</span><input class="input" name="hbomax_url" value="${esc(s.hbomax_url)}"></label>
-    <label class="field"><span>If neither has it, open</span><input class="input" name="fallback_url" value="${esc(s.fallback_url)}">
-      <small>{title} in a link is replaced with the title's name.</small></label>
+    <label class="field"><span>Your anime site - search link</span>
+      <div class="input-row"><input class="input" name="anime_site_url" value="${esc(s.anime_site_url)}" placeholder="https://your-anime-site/search?keyword={title}">
+      <button class="btn btn-ghost btn-sm" type="button" data-s="try-anime">Try it</button></div></label>
+    <label class="field"><span>Your movie & TV site - search link</span>
+      <div class="input-row"><input class="input" name="movie_tv_site_url" value="${esc(s.movie_tv_site_url)}" placeholder="https://your-movie-site/search/{title}">
+      <button class="btn btn-ghost btn-sm" type="button" data-s="try-movie">Try it</button></div>
+      <small>Used when Netflix and HBO Max don't have it. To get the link, search for any title on the site, copy the address
+        of the results page, and replace the title you searched with <b>{title}</b>. The app only opens that search in your browser.</small></label>
+    <label class="field"><span>If you haven't set your own site, open</span><input class="input" name="fallback_url" value="${esc(s.fallback_url)}"></label>
+    <h4>Your downloads</h4>
+    <label class="field"><span>Downloads folder</span>
+      <div class="input-row"><input class="input" name="downloads_folder" value="${esc(s.downloads_folder)}" placeholder="The one folder all your downloads go into">
+      <button class="btn btn-ghost btn-sm" type="button" data-s="dl-browse">Choose…</button></div>
+      <small>${S.library.error ? `<span class="bad">${esc(S.library.error)}</span>`
+        : s.downloads_folder ? `<span class="ok">✓</span> ${S.library.videos || 0} videos found, ${Object.keys(S.library.items || {}).length} titles matched${(S.library.questions || []).length ? `, ${S.library.questions.length} to sort` : ''}.`
+        : 'Files are matched to your titles by their names; the app asks about any it isn\'t sure of.'}
+        Each computer has its own downloads folder.</small></label>
     <h4>Watching on your ${pcName()}</h4>
+    <label class="field"><span>Player</span>
+      <select class="select" name="player">
+        <option value="mpv" ${s.player === 'mpv' ? 'selected' : ''}>Built-in player (mpv) - remembers where you stopped</option>
+        <option value="vlc" ${s.player === 'vlc' ? 'selected' : ''}>VLC</option></select>
+      <small>${data.status.mpv ? '<span class="ok">✓ Built-in player ready.</span>' : '<span class="bad">The built-in player is missing</span> - VLC is used instead.'}
+        You can always pick "Play in VLC" for a single episode.</small></label>
     <label class="field"><span>VLC location</span>
       <div class="input-row"><input class="input" name="vlc_path" value="${esc(s.vlc_path)}" placeholder="${esc(data.status.vlc || (mac ? '/Applications/VLC.app' : 'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe'))}">
       <button class="btn btn-ghost btn-sm" type="button" data-s="vlc">Browse</button></div>
@@ -1449,7 +1724,9 @@ async function openSettings() {
     return {
       tmdb_api_key: f.get('tmdb_api_key'), mal_client_id: f.get('mal_client_id'), region: f.get('region'),
       netflix_url: f.get('netflix_url'), hbomax_url: f.get('hbomax_url'), fallback_url: f.get('fallback_url'),
-      vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), sync_folder: f.get('sync_folder'), queue_next_episodes: form.queue_next_episodes.checked,
+      vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), sync_folder: f.get('sync_folder'),
+      anime_site_url: f.get('anime_site_url'), movie_tv_site_url: f.get('movie_tv_site_url'),
+      downloads_folder: f.get('downloads_folder'), player: f.get('player'), queue_next_episodes: form.queue_next_episodes.checked,
     };
   };
   const save = async () => {
@@ -1481,6 +1758,15 @@ async function openSettings() {
           ? { kind: 'file', types: 'app', title: 'Find Opera GX', initial: '/Applications' }
           : { kind: 'file', types: 'exe', title: "Find Opera GX's launcher.exe" });
         if (path) form.browser_path.value = path;
+      } else if (a === 'try-anime' || a === 'try-movie') {
+        const link = form[a === 'try-anime' ? 'anime_site_url' : 'movie_tv_site_url'].value.trim();
+        if (!link) { toast('Paste the search link first', 'error'); return; }
+        const sample = a === 'try-anime' ? 'Frieren' : 'Inception';
+        await api('POST', '/api/open', { url: link.replace('{title}', encodeURIComponent(sample)) });
+        toast(`Opened a search for "${sample}" - check it shows results`);
+      } else if (a === 'dl-browse') {
+        const { path } = await api('POST', '/api/browse', { kind: 'folder', title: 'Choose your downloads folder', initial: form.downloads_folder.value });
+        if (path) form.downloads_folder.value = path;
       } else if (a === 'sync-browse') {
         const { path } = await api('POST', '/api/browse', { kind: 'folder', title: 'Choose a folder both computers sync', initial: form.sync_folder.value });
         if (path) form.sync_folder.value = path;

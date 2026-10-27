@@ -10,20 +10,37 @@ Your list can sync between your computers.
 - **Folders:** on the TV Shows, Anime and Movies pages, click **New folder** to make your own folders. Drag a poster onto a folder to move it there, or right-click a poster (or use **⋯**) → **Move to folder**. A title is in one folder at a time.
 - **Collections:** these can mix TV shows, anime and movies, and a title can be in several. Find them on the **Collections** page.
 - **Title page:** backdrop, summary, ratings and an episode list. The trailer only plays when you click it.
-- **Watch now:** your file comes first, then online.
-  - **The first time,** it asks **On my PC** or **Online**. Pick On my PC, choose the folder with the episodes, and it's remembered.
-  - **After that,** Watch now just plays the episode you're up to in VLC (episode 1 to start), followed by the next episodes in order. It loads the matching `.srt`/`.ass` subtitles too.
-  - **If the file is missing or won't start,** the app goes online instead:
-    1. **Netflix**, then **HBO Max**, if either has it in your country (Pakistan by default), opened in **Opera GX**.
-    2. Otherwise, **everythingmoe.com**.
-  - **To play a different episode,** click it in the title page's episode list. After pressing Watch now, you can also click **Wrong episode? Choose the file** to see every file in the folder.
-- **When a file doesn't work:** if the app thinks a file is fine but it isn't, press **Not working**. It's in the play window, and in the **On your PC** section of the title page.
+- **Downloads:** choose the one folder your downloads go into (**Settings → Your downloads**).
+  - The app reads each video's name, and its folder's name if needed, and connects it to the right show, season and episode or movie in your list.
+  - When it isn't sure (a typo, an unnumbered file, a subtitle without a video, a show that isn't in your list), it asks you in **Sort your downloads**. Your answer is remembered, so new episodes of that show are sorted on their own.
+  - The home screen starts with **Downloaded**: rows for anime, TV shows and movies you have files for. **Your list** below it still shows everything.
+- **Watch now:** your files come first, then online.
+  - **On your computer:** it plays the episode you're up to in the **built-in player** (mpv), followed by the next episodes in order, with matching `.srt`/`.ass` subtitles.
+    - The player handles MKV and HEVC files, several audio and subtitle tracks, and fully styled anime subtitles.
+    - It remembers where you stopped, even on your other computer, and resumes from there. An episode counts as watched once you reach the end credits, and you move on to the next one.
+    - **Play in VLC** on the title page, or **Open in VLC instead** while something is playing, switches to VLC at the same spot.
+    - Click any episode in the episode list to play it, or use **Choose file…** to pick any file.
+  - **Online, when you don't have it:**
+    1. **Netflix**, then **HBO Max**, if either has it in your country (Pakistan by default).
+    2. Otherwise, a search on **your own site**: one for anime and one for movies and TV, set in Settings.
+
+    These open in your browser (Opera GX or Chrome). The app only opens the search; it doesn't read or play anything from the site.
+- **When a file doesn't work:** press **Not working**. It's in the play window, and in the **On your PC** section of the title page.
   - Watch now then goes online for that title, and its poster shows **FILE ISSUE**.
-  - Fix it later from the title page with **Choose file…** or **Change folder**, or press **It works now**.
+  - Fix it later from the title page with **Choose file…** or **Use a different folder…**, or press **It works now**.
+
+### Your own sites
+
+In **Settings → Watching online**, paste a search link for your anime site and one for your movie and TV site:
+
+1. Search for any title on the site, for example "Frieren".
+2. Copy the address of the results page, for example `https://example-site/search?keyword=Frieren`.
+3. Replace the title with `{title}`, for example `https://example-site/search?keyword={title}`.
+4. Click **Try it** to check it opens a search.
 
 ## Setup (Windows)
 
-1. Install **VLC** from <https://www.videolan.org/>. The app finds it automatically.
+1. Optionally, install **VLC** from <https://www.videolan.org/> for the **Play in VLC** button. The built-in player is part of the app.
 2. Download **Watchlist.exe**:
    1. On GitHub, open the repo's **Actions** tab and click the latest green **Build Watchlist (Windows + Mac)** run.
    2. At the bottom, under **Artifacts**, click **Watchlist-exe**. A zip downloads.
@@ -42,7 +59,7 @@ To put it on the taskbar or Start menu, right-click `Watchlist.exe` and choose *
 
 ## Setup (Mac)
 
-1. Install **VLC** from <https://www.videolan.org/> and drag it into **Applications**. The app finds it there.
+1. Optionally, install **VLC** from <https://www.videolan.org/> into **Applications** for the **Play in VLC** button. The built-in player is part of the app.
 2. Download **Watchlist.dmg**:
    1. On GitHub, open the repo's **Actions** tab and click the latest green **Build Watchlist (Windows + Mac)** run.
    2. At the bottom, under **Artifacts**, click **Watchlist-mac**. Open the zip that downloads, if your Mac doesn't open it for you.
@@ -65,8 +82,8 @@ That can be **Google Drive**, **OneDrive**, **Dropbox** or **iCloud Drive**; ins
 
 From then on, anything you change on one computer shows up on the other within a few seconds of the cloud drive syncing it, even while the app is open.
 
-- **What syncs:** titles and their info, progress and **Mark watched**, folders, collections and removed titles.
-- **What stays on each computer:** each show's video folder (Mac and Windows paths are different), "Not working" marks, your keys and the VLC/Opera GX locations.
+- **What syncs:** titles and their info, progress and **Mark watched**, where you stopped in each episode, folders, collections and removed titles.
+- **What stays on each computer:** the downloads folder and each show's own folder (Mac and Windows paths are different), your answers in **Sort your downloads**, "Not working" marks, your keys, your own site links and the VLC/browser locations.
 
   The video files themselves aren't copied. If they're in your cloud drive too, just choose the folder once on each computer.
 - **Editing on both at once is fine.** Changes are merged title by title, including any "conflicted copy" files the cloud app makes.
@@ -83,7 +100,7 @@ If you'd rather run the Python code directly:
 
 ## Browser
 
-Netflix, HBO Max, everythingmoe.com and YouTube trailers open in **Opera GX**.
+Netflix, HBO Max, your own sites and YouTube trailers open in **Opera GX** (or the browser you pick in Settings).
 The app finds Opera GX automatically.
 If it isn't found, Settings says so: click **Browse** next to "Browser" and pick Opera GX.
 On Windows that's `launcher.exe`, usually in `C:\Users\<you>\AppData\Local\Programs\Opera GX\`; on a Mac it's **Opera GX** in Applications.

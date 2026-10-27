@@ -131,7 +131,7 @@ class ServerTest(unittest.TestCase):
         # On Max in the US but only for rent in Pakistan -> everythingmoe.
         movie = self.add("movie", "tmdb", "movie/27205")
         _, res = self.call("POST", f"/api/items/{movie['id']}/online")
-        self.assertEqual(res["service"], "everythingmoe")
+        self.assertEqual(res["service"], "everythingmoe.com")
         self.assertEqual(self.opened[-1], "https://everythingmoe.com")
         self.app.settings.update({"region": "US"})
         _, res = self.call("POST", f"/api/items/{movie['id']}/online")
@@ -140,14 +140,28 @@ class ServerTest(unittest.TestCase):
         anime = self.add("anime", "mal", "52991")
         self.app.settings.update({"region": "PK"})
         _, res = self.call("POST", f"/api/items/{anime['id']}/online")
-        self.assertEqual(res["service"], "everythingmoe")
+        self.assertEqual(res["service"], "everythingmoe.com")
         self.assertEqual(res["services"], ["Amazon Prime Video"])
+
+    def test_online_uses_your_own_site_for_each_type(self):
+        self.app.settings.update({"anime_site_url": "https://anime.example/search?keyword={title}",
+                                  "movie_tv_site_url": "https://films.example/find/{title}"})
+        anime = self.add("anime", "mal", "52991")
+        _, res = self.call("POST", f"/api/items/{anime['id']}/online")
+        self.assertEqual(res["service"], "anime.example")
+        self.assertTrue(res["own_site"])
+        self.assertEqual(self.opened[-1], "https://anime.example/search?keyword=Frieren%3A+Beyond+Journey%27s+End")
+        movie = self.add("movie", "tmdb", "movie/27205")
+        _, res = self.call("POST", f"/api/items/{movie['id']}/online")
+        self.assertEqual(self.opened[-1], "https://films.example/find/Inception")
+        status, _ = self.call("PUT", "/api/settings", {"anime_site_url": "ftp://nope"})
+        self.assertEqual(status, 400)
 
     def test_online_without_token_goes_straight_to_fallback(self):
         movie = self.add("movie", "tmdb", "movie/27205")
         self.app.settings.update({"tmdb_api_key": ""})
         _, res = self.call("POST", f"/api/items/{movie['id']}/online")
-        self.assertEqual(res["service"], "everythingmoe")
+        self.assertEqual(res["service"], "everythingmoe.com")
         self.assertIn("No TMDB token", res["message"])
 
     def test_links_open_in_the_chosen_browser(self):

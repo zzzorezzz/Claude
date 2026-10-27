@@ -80,16 +80,18 @@ def find_vlc(configured=""):
 
 
 def vlc_command(vlc, playlist):
-    """playlist: [(video_path, subtitle_path_or_None), ...]"""
+    """playlist: [(video_path, subtitle_path_or_None[, start_seconds]), ...]"""
     # Always start at the first file and play the rest in order, even if
     # shuffle was left on in VLC, and replace (not add to) the playlist of a
     # VLC window that's already open.
     cmd = [vlc, "--no-random", "--no-playlist-enqueue"]
-    for video, subtitle in playlist:
+    for video, subtitle, *rest in playlist:
         cmd.append(video)
+        # Options starting with ":" apply to the file just before them.
         if subtitle:
-            # Options starting with ":" apply to the file just before them.
             cmd.append(f":sub-file={subtitle}")
+        if rest and rest[0]:
+            cmd.append(f":start-time={int(rest[0])}")
     return cmd
 
 
