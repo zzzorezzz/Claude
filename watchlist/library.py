@@ -323,6 +323,7 @@ class Library:
         self.questions = []
         self.error = ""
         self.busy = ""          # what the automatic sorter is doing right now
+        self.gemini_error = ""
 
     def save_answers(self):
         write_json(self.answers_path, self.answers, compact=True)
@@ -444,6 +445,7 @@ class Library:
                         group = groups.setdefault(key, {
                             "kind": "title", "key": key, "guess": v["guess"],
                             "season": v["name_season"] or v["season"], "file_kind": v["kind"],
+                            "year": v["year"], "has_eps": bool(v["episodes"]),
                             "files": [], "candidates": [i for _, i in found[:5]],
                             "reason": "unsure" if found else "unknown"})
                         group["files"].append(v["rel"])
@@ -472,7 +474,7 @@ class Library:
                 key = self.title_key(v)
                 group = groups.setdefault(key, {
                     "kind": "title", "key": key, "guess": v["guess"], "season": None,
-                    "file_kind": "extra", "files": [], "candidates": [i for _, i in found[:5]],
+                    "file_kind": "extra", "year": v["year"], "has_eps": False, "files": [], "candidates": [i for _, i in found[:5]],
                     "reason": "unsure" if found else "unknown"})
                 group["files"].append(v["rel"])
 
@@ -544,13 +546,21 @@ class Library:
 
         for path in subs_for:
             subs_for[path].sort(key=lambda x: -x["score"])
-        # Questions already looked up show what the search found.
+        # Questions already looked up show what the search found; ones the
+        # automatic sorter hasn't got to yet aren't put in front of you yet.
+        settings = self.app.settings.get()
+        searching = bool(settings.get("mal_client_id") or settings.get("tmdb_api_key"))
+        rejected = set(self.answers["rejected"])
         for q in questions:
             found = self.answers["lookups"].get(q["key"]) or {}
-            if found.get("suggest"):
-                q["suggest"] = found["suggest"]
-            if found.get("hint"):
-                q["hint"] = found["hint"]
+            q["sorting"] = q["kind"] == "title" and q["key"] not in rejected and (
+                (searching and "at" not in found)
+                or (bool(settings.get("gemini_api_key")) and "gemini_at" not in found))
+            for field in ("suggest", "hint", "hint_item"):
+                if found.get(field):
+                    q[field] = found[field]
+            if q.get("hint_item") not in by_id:
+                q.pop("hint_item", None)
         self.by_item, self.subs_for, self.questions = by_item, subs_for, questions
 
     @staticmethod
@@ -574,6 +584,7 @@ class Library:
             return {"folder": self.folder, "error": self.error, "items": items,
                     "questions": self.questions, "unknown_files": unknown,
                     "auto": self.answers["auto"][-60:], "busy": self.busy,
+                    "gemini_error": self.gemini_error,
                     "videos": len(self.videos), "scanned_at": self._walked_at}
 
     def videos_for(self, item_id):
@@ -620,7 +631,8 @@ class Library:
             if by != "you":
                 self.answers["auto"].append({"key": key, "kind": kind, "item": target,
                                              "video": body.get("video"), "by": by, "at": time.time(),
-                                             "label": body.get("label", ""), "why": body.get("why", "")})
+                                             "label": body.get("label", ""), "why": body.get("why", ""),
+                                             "added": bool(body.get("added"))})
                 self.answers["auto"] = self.answers["auto"][-300:]
             else:
                 self.answers["auto"] = [a for a in self.answers["auto"] if a["key"] != key]
@@ -628,10 +640,26 @@ class Library:
             self._matched_for = None
             self._match_if_needed()
 
+    def remember_lookup(self, key, found):
+        """Keep what the automatic sorter found for a question (shown with it)."""
+        with self._lock:
+            lookups = self.answers["lookups"]
+            lookups[key] = {**(lookups.get(key) or {}), **found}
+            # Forget lookups for files that are long gone.
+            if len(lookups) > 400:
+                waiting = {q["key"] for q in self.questions}
+                for k in sorted((k for k in lookups if k not in waiting),
+                                key=lambda k: max(lookups[k].get("at", 0), lookups[k].get("gemini_at", 0)))[:100]:
+                    del lookups[k]
+            self.save_answers()
+            self._matched_for = None
+            self._match_if_needed()
+
     def undo(self, key):
         """Undo an automatic decision: the file goes back to being a question,
-        and won't be decided automatically again."""
+        and won't be decided automatically again. Returns the decisions undone."""
         with self._lock:
+            undone = [a for a in self.answers["auto"] if a["key"] == key]
             self.answers["titles"].pop(key, None)
             self.answers["files"].pop(key, None)
             self.answers["auto"] = [a for a in self.answers["auto"] if a["key"] != key]
@@ -640,6 +668,13 @@ class Library:
             self.save_answers()
             self._matched_for = None
             self._match_if_needed()
+            return undone
+
+    def uses(self, item_id):
+        """Whether any answer still points at a title."""
+        with self._lock:
+            return (item_id in self.answers["titles"].values()
+                    or any(isinstance(a, dict) and a.get("item") == item_id for a in self.answers["files"].values()))
 
 
 def watch(app, stop_event=None):

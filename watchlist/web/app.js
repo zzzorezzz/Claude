@@ -105,6 +105,7 @@ async function reload() {
   S.version = data.version;
   render();
   refreshOpenTitle();
+  if (S.redrawQuestions) S.redrawQuestions();
   maybeAskQuestions();
 }
 
@@ -797,7 +798,8 @@ async function chooseDownloadsFolder() {
 
 // New files the app isn't sure about: ask once, without nagging about the same ones.
 function maybeAskQuestions() {
-  const keys = (S.library.questions || []).filter((q) => q.reason !== 'unknown').map((q) => q.key);
+  // Only once the automatic sorter has had its go.
+  const keys = (S.library.questions || []).filter((q) => q.reason !== 'unknown' && !q.sorting).map((q) => q.key);
   let seen = [];
   try { seen = JSON.parse(localStorage.getItem('wl-asked') || '[]'); } catch { /* private mode */ }
   const fresh = keys.filter((k) => !seen.includes(k));
@@ -820,15 +822,26 @@ function openQuestions() {
       .map((i) => `<option value="${esc(i.id)}">${esc(i.title)} (${TYPE_ONE[i.type]})</option>`).join('');
     const fileList = (files) => `<div class="q-files">${files.slice(0, 3).map((f) => `<div>${esc(f)}</div>`).join('')}
       ${files.length > 3 ? `<div class="muted">…and ${files.length - 3} more</div>` : ''}</div>`;
+    const suggestions = (q) => (q.suggest || []).length ? `<div class="q-suggest">
+        <span class="muted small">${(q.suggest[0].why || '').includes('Gemini') ? 'Found by Gemini' : 'Found online'} - add it to your list and sort these files there:</span>
+        <div class="q-chips">${q.suggest.map((x, n) => `<button class="q-chip" data-a="suggest" data-s="${n}" title="${esc(x.relation || x.why || '')}">
+          ${x.poster ? `<img src="${esc(x.poster)}" alt="" loading="lazy">` : '<span class="q-chip-ph"></span>'}
+          <span><b>${esc(x.title)}</b><small>${[x.year, kindName(x)].filter(Boolean).map(esc).join(' · ')}${x.relation ? ` · ${esc(x.relation)}` : ''}</small></span>
+          <i>+</i></button>`).join('')}</div></div>` : '';
     const card = (q, i) => {
       if (q.kind === 'title') {
         const cands = q.candidates.map(findItem).filter(Boolean);
+        const hinted = q.hint_item && findItem(q.hint_item);
         return `<div class="q-card" data-q="${i}">
           <div class="q-head"><b>"${esc(q.guess || 'no name')}"${q.season ? ` · season ${q.season}` : ''}</b>
-            <span class="muted small">${q.files.length} file${q.files.length === 1 ? '' : 's'}</span></div>
+            <span class="muted small">${q.files.length} file${q.files.length === 1 ? '' : 's'}${q.file_kind && q.file_kind !== 'episode' ? ` · looks like ${q.file_kind === 'ova' ? 'an OVA' : `a ${q.file_kind}`}` : ''}</span>
+            ${q.sorting ? '<span class="q-looking"><i></i>looking it up…</span>' : ''}</div>
           ${fileList(q.files)}
+          ${q.hint ? `<div class="q-hint">✨ ${esc(q.hint)}</div>` : ''}
+          ${suggestions(q)}
           <div class="q-actions">
-            ${cands.map((c) => `<button class="btn btn-sm btn-white" data-a="item" data-item="${esc(c.id)}">It's ${esc(c.title)}</button>`).join('')}
+            ${hinted ? `<button class="btn btn-sm btn-white" data-a="item" data-item="${esc(hinted.id)}">Yes, it's ${esc(hinted.title)}</button>` : ''}
+            ${cands.filter((c) => c !== hinted).map((c) => `<button class="btn btn-sm ${hinted ? 'btn-ghost' : 'btn-white'}" data-a="item" data-item="${esc(c.id)}">It's ${esc(c.title)}</button>`).join('')}
             <select class="select q-pick"><option value="">${cands.length ? 'Another title…' : 'It\'s a title in my list…'}</option>${titleOpts}</select>
             <button class="btn btn-sm btn-ghost" data-a="add">+ Add it to my list</button>
             <button class="btn btn-sm btn-ghost" data-a="ignore">Ignore</button>
@@ -858,16 +871,38 @@ function openQuestions() {
     const subs = indexed.filter(([q]) => q.kind === 'subtitle');
     const unknown = indexed.filter(([q]) => q.reason === 'unknown');
     const section = (title, list) => (list.length ? `<h4>${title}</h4>${list.map(([q, i]) => card(q, i)).join('')}` : '');
+    const auto = [...(S.library.auto || [])].reverse().slice(0, 25);
+    const sortedForYou = auto.length ? `<details class="auto-list" ${qs.length ? '' : 'open'}>
+      <summary><b>Sorted for you (${auto.length})</b> - done automatically; undo anything that's wrong</summary>
+      ${auto.map((x) => `<div class="auto-row"><span class="auto-by ${x.by}">${x.by === 'gemini' ? 'Gemini' : 'Search'}</span>
+        <span class="auto-what"><b>${esc(x.label || x.key)}</b>${x.why ? `<small>${esc(x.why)}</small>` : ''}</span>
+        <span class="muted small">${esc(ago(x.at))}</span>
+        <button class="btn btn-sm btn-ghost" data-undo="${esc(x.key)}">Undo</button></div>`).join('')}</details>` : '';
+    const busy = S.library.busy ? `<div class="sorting-now"><i></i>${esc(S.library.busy)}</div>` : '';
     $('.modal', wrap).innerHTML = `<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
       <h2>Sort your downloads</h2>
       <p class="sub">Tell me where these belong. Answers are remembered, so new episodes of the same show are sorted automatically.</p>
+      ${busy}
+      ${S.library.gemini_error ? `<div class="warn small">Gemini: ${esc(S.library.gemini_error)}</div>` : ''}
       ${!qs.length ? '<div class="empty-state">All sorted - nothing needs your help. 🎉</div>' : ''}
       ${section('Not sure which title these are', unsure)}
       ${section('Which episode?', episodes)}
       ${section('Subtitles without a video', subs)}
       ${unknown.length ? `<details ${unsure.length + episodes.length + subs.length ? '' : 'open'}><summary><b>Not in your list (${unknown.length})</b> - add them, point them at a title, or ignore them</summary>
         ${unknown.map(([q, i]) => card(q, i)).join('')}</details>` : ''}
+      ${sortedForYou}
     </div>`;
+  };
+  // Redrawn when the background sorter changes something, unless you're typing.
+  let lastSig = '';
+  const sig = () => JSON.stringify([(S.library.questions || []).map((q) => [q.key, q.sorting, q.hint, (q.suggest || []).length]),
+    (S.library.auto || []).length, S.library.busy, S.library.gemini_error]);
+  S.redrawQuestions = () => {
+    if (!wrap.isConnected) { S.redrawQuestions = null; return; }
+    const active = document.activeElement;
+    if (sig() === lastSig || (active && wrap.contains(active) && /INPUT|SELECT/.test(active.tagName))) return;
+    lastSig = sig();
+    draw();
   };
   // Answering doesn't reload the whole app: the answer brings back the new
   // downloads state, and the answered card slides away.
@@ -889,6 +924,18 @@ function openQuestions() {
     answer({ kind: 'title', key: q.key, item: pick.value }, pick.closest('.q-card')).catch(fail);
   });
   wrap.addEventListener('click', async (e) => {
+    const undo = e.target.closest('[data-undo]');
+    if (undo) {
+      const row = undo.closest('.auto-row');
+      row.style.height = `${row.offsetHeight}px`;
+      row.classList.add('leaving');
+      try {
+        S.library = await api('POST', '/api/library/undo', { key: undo.dataset.undo });
+        await reload();
+        toast('Undone - it\'s back in your questions');
+      } catch (err) { fail(err); }
+      return;
+    }
     const btn = e.target.closest('[data-a]');
     if (!btn) return;
     const box = btn.closest('[data-q]');
@@ -907,6 +954,13 @@ function openQuestions() {
         const video = $('.q-video', box).value;
         if (!video) { toast('Choose the video first', 'error'); return; }
         await answer({ kind: 'subtitle', key: q.key, video }, box);
+      } else if (a === 'suggest') {
+        const x = q.suggest[Number(btn.dataset.s)];
+        btn.disabled = true;
+        btn.classList.add('busy');
+        await answer({ kind: 'title', key: q.key, add: { type: x.type, source: x.source, source_id: x.source_id } }, box);
+        await reload();
+        toast(`Added ${x.title} and sorted ${q.files.length} file${q.files.length === 1 ? '' : 's'}`);
       } else if (a === 'add') {
         openAdd(questionGuessType(q), q.guess, '', (item) => {
           answer({ kind: 'title', key: q.key, item: item.id }).catch(fail);
@@ -914,7 +968,23 @@ function openQuestions() {
       }
     } catch (err) { fail(err); }
   });
+  lastSig = sig();
   draw();
+}
+
+function kindName(x) {
+  const k = (x.media_kind || x.media_type || '').toLowerCase().replace(/_/g, ' ');
+  if (k === 'tv' || k === 'ona') return x.type === 'anime' ? 'TV anime' : 'TV';
+  if (k) return { ova: 'OVA', special: 'Special', 'tv special': 'TV special', movie: 'Film', music: 'Music video' }[k] || k.toUpperCase();
+  return x.type === 'movie' ? 'Film' : x.type === 'tv' ? 'TV' : '';
+}
+
+function ago(t) {
+  const s = Math.max(0, Date.now() / 1000 - (t || 0));
+  if (s < 90) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
 }
 
 /* ======================================================== collections */
@@ -1063,6 +1133,7 @@ function openTitle(id) {
   wrap.st = { season: item.progress.season, page: 0, local: null, seasons: {} };
   drawTitle(wrap);
   loadLocal(wrap);
+  loadRelated(wrap);
 }
 
 function refreshOpenTitle() {
@@ -1121,7 +1192,8 @@ function drawTitle(wrap) {
     progress = `<div class="progress-box"><span class="muted">Up next</span><b>${epLabel(item.progress)}</b>
       <div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
       <span class="muted small">${done} of ${total || '?'} watched</span>
-      <button class="btn btn-ghost btn-sm" data-t="watched">${ICON.check} Mark watched</button></div>`;
+      <button class="btn btn-ghost btn-sm" data-t="watched">${ICON.check} Mark watched</button>
+      ${S.status.gemini && done > 0 ? '<button class="btn btn-ghost btn-sm" data-t="recap" title="A spoiler-free recap of what you\'ve watched, by Gemini">✨ Previously on…</button>' : ''}</div>`;
   }
 
   modal.innerHTML = `<button class="modal-close" aria-label="Close">×</button>
@@ -1138,6 +1210,7 @@ function drawTitle(wrap) {
         </div>
       </div>
     </div>
+    <div class="tm-layout"><div class="tm-main">
     <div class="tm-body">
       <div>
         <div class="tm-meta">${meta.join('')}</div>
@@ -1151,9 +1224,11 @@ function drawTitle(wrap) {
     <section class="tm-section"><h3>On your ${pcName()}</h3><div class="folder-line" id="folder-line"></div></section>
     <section class="tm-section hidden" id="extras-section"><h3>Extras <span class="muted small" id="extras-count"></span></h3>
       <div class="extras" id="extras"></div></section>
-    ${series ? '<section class="tm-section"><h3>Episodes<span class="spacer"></span><span id="ep-picker"></span></h3><div class="episodes" id="ep-list"></div></section>' : ''}`;
+    ${series ? '<section class="tm-section"><h3>Episodes<span class="spacer"></span><span id="ep-picker"></span></h3><div class="episodes" id="ep-list"></div></section>' : ''}
+    </div><aside class="tm-related" id="related"></aside></div>`;
 
   drawFolderLine(wrap);
+  drawRelated(wrap);
   if (series) drawEpisodes(wrap);
   modal.onclick = (e) => titleClick(wrap, e);
 }
@@ -1168,8 +1243,115 @@ function absoluteIndex(item, p) {
 }
 const seasonName = (n) => (n === 0 ? 'Specials' : `Season ${n}`);
 
+// Seasons, sequels, OVAs, films and spin-offs, beside the title page.
+async function loadRelated(wrap, fresh = false) {
+  const item = findItem(wrap.dataset.itemId);
+  wrap.st.related = null;
+  drawRelated(wrap);
+  try {
+    wrap.st.related = await api('GET', `/api/items/${item.id}/related${fresh ? '?fresh=1' : ''}`);
+  } catch (e) {
+    wrap.st.related = { entries: [], note: e.message };
+  }
+  if (wrap.isConnected) drawRelated(wrap);
+}
+
+const RELATION_ORDER = ['Prequel', 'Sequel', 'Parent story', 'Full story', 'Side story', 'Spin-off', 'Spin off',
+  'Alternative version', 'Alternative setting', 'Summary', 'Same film series', 'Film', 'Character', 'Other'];
+
+function drawRelated(wrap) {
+  const box = $('#related', wrap);
+  if (!box) return;
+  const item = findItem(wrap.dataset.itemId);
+  const data = wrap.st.related;
+  const head = (n) => `<div class="rel-head"><h3>Related${n ? ` <span class="muted small">${n}</span>` : ''}</h3>
+    <button class="rel-refresh" data-r="refresh" title="Look again">↻</button></div>`;
+  if (!data) {
+    box.innerHTML = head(0) + '<div class="rel-row skeleton"><div class="sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(3);
+    return;
+  }
+  const entries = data.entries || [];
+  const missing = entries.filter((x) => !x.in_list);
+  const needKey = item.type === 'anime' ? (!S.status.mal && 'Add your MyAnimeList Client ID in Settings to see related anime.')
+    : !S.status.tmdb && 'Add your TMDB token in Settings to see related titles.';
+  const groups = {};
+  entries.forEach((x, i) => { (groups[x.relation || 'Other'] ||= []).push([x, i]); });
+  const order = Object.keys(groups).sort((a, b) => {
+    const ia = RELATION_ORDER.indexOf(a); const ib = RELATION_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+  });
+  const row = ([x, i]) => {
+    const status = x.in_list
+      ? `<span class="rel-pill in">${x.files ? `${ICON.check} On your ${pcName()}` : 'In your list'}</span>`
+      : x.waiting ? `<span class="rel-pill dl">In your downloads · ${x.waiting} file${x.waiting === 1 ? '' : 's'}</span>`
+        : '<span class="rel-pill">Not in your list</span>';
+    return `<div class="rel-row${x.in_list ? ' is-in' : ''}" ${x.in_list ? `data-open="${esc(x.in_list)}"` : ''} style="--i:${i}">
+      ${x.poster ? `<img src="${esc(x.poster)}" alt="" loading="lazy">` : '<span class="rel-ph"></span>'}
+      <div class="rel-text"><b>${esc(x.title)}</b><small>${[kindName(x), x.year].filter(Boolean).map(esc).join(' · ')}</small>${status}</div>
+      ${x.in_list ? '' : `<button class="rel-add" data-r="add" data-i="${i}" title="Add to your list">+</button>`}</div>`;
+  };
+  box.innerHTML = head(entries.length)
+    + (missing.length > 1 ? `<button class="btn btn-sm btn-white rel-all" data-r="all">+ Add all ${missing.length} missing</button>` : '')
+    + (entries.length ? order.map((g) => `<div class="rel-group"><h5>${esc(g)}</h5>${groups[g].map(row).join('')}</div>`).join('')
+      : `<p class="muted small">${esc(needKey || data.note || 'Nothing related found.')}</p>`)
+    + (entries.length && data.note ? `<p class="muted small">${esc(data.note)}</p>` : '')
+    + (item.type !== 'anime' && !S.status.gemini && S.status.tmdb
+      ? '<p class="muted small rel-tip">Tip: with a Gemini key (Settings, optional) this also finds spin-offs with different names.</p>' : '');
+}
+
+async function addRelated(wrap, x, quiet) {
+  const added = await api('POST', '/api/items', { type: x.type, source: x.source, source_id: x.source_id });
+  upsert(added);
+  x.in_list = added.id;
+  if (!quiet) toast(`Added ${added.title}`);
+}
+
+async function relatedClick(wrap, e) {
+  const r = e.target.closest('[data-r]');
+  if (r) {
+    const entries = wrap.st.related?.entries || [];
+    try {
+      if (r.dataset.r === 'refresh') { loadRelated(wrap, true); return; }
+      if (r.dataset.r === 'add') {
+        r.disabled = true;
+        r.classList.add('spin');
+        await addRelated(wrap, entries[Number(r.dataset.i)]);
+      } else if (r.dataset.r === 'all') {
+        const missing = entries.filter((x) => !x.in_list);
+        r.disabled = true;
+        for (const [n, x] of missing.entries()) {
+          r.textContent = `Adding ${n + 1} of ${missing.length}…`;
+          await addRelated(wrap, x, true);
+        }
+        toast(`Added ${missing.length} titles`);
+      }
+    } catch (err) { fail(err); }
+    await reload();
+    loadRelated(wrap);
+    return true;
+  }
+  const open = e.target.closest('[data-open]');
+  if (open) { openTitle(open.dataset.open); return true; }
+  return false;
+}
+
+async function showRecap(item) {
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Previously on ${esc(item.title)}</h2><p class="sub">Up to ${epLabel(item.progress)} - no spoilers past that. Written by Gemini.</p>
+    <div id="recap">${'<div class="skeleton"><div class="sk-lines"><i></i><i></i><i></i></div></div>'.repeat(2)}</div></div>`, 'recap-modal');
+  try {
+    const r = await api('POST', `/api/items/${item.id}/recap`, item.progress);
+    $('#recap', wrap).innerHTML = r.known && r.points.length
+      ? `<ul class="recap">${r.points.map((p, i) => `<li style="--i:${i}">${esc(p)}</li>`).join('')}</ul>`
+      : '<p class="muted">Gemini doesn\'t know this one well enough to recap it without guessing.</p>';
+  } catch (e) {
+    $('#recap', wrap).innerHTML = `<div class="warn">${esc(e.message)}</div>`;
+  }
+}
+
 async function titleClick(wrap, e) {
   const item = findItem(wrap.dataset.itemId);
+  if (e.target.closest('#related')) { await relatedClick(wrap, e); return; }
   const link = e.target.closest('[data-link]');
   if (link) { api('POST', '/api/open', { url: link.dataset.link }).catch(fail); return; }
   const extra = e.target.closest('[data-extra]');
@@ -1201,6 +1383,7 @@ async function titleClick(wrap, e) {
     else if (t === 'youtube') api('POST', '/api/open', { url: `https://www.youtube.com/watch?v=${item.trailer}` }).catch(fail);
     else if (t === 'menu') { e.stopPropagation(); openItemMenu(item, e.target.closest('[data-t]'), { inTitle: true }); }
     else if (t === 'remove') removeItem(item.id);
+    else if (t === 'recap') showRecap(item);
     else if (t === 'watched') {
       const res = await api('POST', `/api/items/${item.id}/watched`);
       upsert(res.item);
@@ -1803,6 +1986,15 @@ async function openSettings() {
         : s.downloads_folder ? `<span class="ok">✓</span> ${S.library.videos || 0} videos found, ${Object.keys(S.library.items || {}).length} titles matched${(S.library.questions || []).length ? `, ${S.library.questions.length} to sort` : ''}.`
         : 'Files are matched to your titles by their names; the app asks about any it isn\'t sure of.'}
         Each computer has its own downloads folder.</small></label>
+    <label class="check-row"><input type="checkbox" name="auto_sort" ${s.auto_sort ? 'checked' : ''}> Sort new downloads for me: look up files that aren't in my list on MyAnimeList / TMDB and add them when it's clear what they are (you can undo each one)</label>
+    <h4>Gemini <span class="tag-optional">optional</span></h4>
+    <label class="field"><span>Gemini API key</span>
+      <div class="input-row"><input class="input" name="gemini_api_key" type="password" value="${esc(s.gemini_api_key)}" placeholder="Not needed - leave empty to use the app's own sorting">
+      <button class="btn btn-ghost btn-sm" type="button" data-s="gemini-test">Test</button></div>
+      <small id="gemini-out">${s.gemini_api_key ? '<span class="ok">✓ Gemini is on.</span> ' : ''}Everything works without it: the app's own rules and MyAnimeList / TMDB searches sort your downloads.
+        With a free key, Gemini also looks at files those couldn't place, finds TV spin-offs for the Related panel, and writes "previously on" recaps.
+        To get one: go to <b>aistudio.google.com</b>, sign in with your Google account and click <b>Get API key</b> → Create API key. The newest Flash model is picked for you.
+        Only names are sent (file names and the titles in your list), never your files. Google may use what's sent on the free tier to improve its products.</small></label>
     <h4>Watching on your ${pcName()}</h4>
     <label class="field"><span>Player</span>
       <select class="select" name="player">
@@ -1815,6 +2007,17 @@ async function openSettings() {
       <button class="btn btn-ghost btn-sm" type="button" data-s="vlc">Browse</button></div>
       <small>${data.status.vlc ? `<span class="ok">✓ Found VLC:</span> ${esc(data.status.vlc)}. Leave empty to use this.` : `<span class="bad">VLC not found.</span> Install it from videolan.org or browse to ${mac ? 'VLC in Applications' : 'vlc.exe'}.`}</small></label>
     <label class="check-row"><input type="checkbox" name="queue_next_episodes" ${s.queue_next_episodes ? 'checked' : ''}> Queue the following episodes in VLC</label>
+    <label class="check-row"><input type="checkbox" name="skip_intro" ${s.skip_intro ? 'checked' : ''}> Skip openings and endings in the built-in player (when the file marks them with chapters; press <b>Shift+S</b> while watching to toggle)</label>
+    <h4>Watch together</h4>
+    <label class="field"><span>Your name in watch parties</span>
+      <input class="input" name="party_name" value="${esc(s.party_name)}" placeholder="e.g. Ali"></label>
+    <label class="field"><span>Syncplay location</span>
+      <div class="input-row"><input class="input" name="syncplay_path" value="${esc(s.syncplay_path)}" placeholder="${esc(data.status.syncplay || (mac ? '/Applications/Syncplay.app' : 'C:\\Program Files (x86)\\Syncplay\\Syncplay.exe'))}">
+      <button class="btn btn-ghost btn-sm" type="button" data-s="syncplay">Browse</button></div>
+      <small>${data.status.syncplay ? `<span class="ok">✓ Found Syncplay:</span> ${esc(data.status.syncplay)}.` : '<span class="bad">Syncplay isn\'t installed.</span> Get it free from <b>syncplay.pl</b> to watch together.'}</small></label>
+    <label class="field"><span>Watch-party server</span>
+      <input class="input" name="party_server" value="${esc(s.party_server)}" placeholder="syncplay.pl:8999">
+      <small>Syncplay's free public server works; both of you need the same one.</small></label>
     <div class="btns" style="margin-top:22px"><button class="btn btn-red" type="submit">Save</button>
       <button class="btn btn-ghost" type="button" data-s="cancel">Cancel</button></div>
   </form>`, 'settings-modal');
@@ -1827,6 +2030,8 @@ async function openSettings() {
       vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), sync_folder: f.get('sync_folder'),
       anime_site_url: f.get('anime_site_url'), movie_tv_site_url: f.get('movie_tv_site_url'),
       downloads_folder: f.get('downloads_folder'), player: f.get('player'), queue_next_episodes: form.queue_next_episodes.checked,
+      gemini_api_key: f.get('gemini_api_key'), auto_sort: form.auto_sort.checked, skip_intro: form.skip_intro.checked,
+      party_name: f.get('party_name'), party_server: f.get('party_server'), syncplay_path: f.get('syncplay_path'),
     };
   };
   const save = async () => {
@@ -1869,7 +2074,26 @@ async function openSettings() {
         if (path) form.downloads_folder.value = path;
       } else if (a === 'sync-browse') {
         const { path } = await api('POST', '/api/browse', { kind: 'folder', title: 'Choose a folder both computers sync', initial: form.sync_folder.value });
-        if (path) form.sync_folder.value = path;
+        if (path) {
+          // Applied straight away: no need to remember to press Save.
+          form.sync_folder.value = path;
+          await save();
+          toast('Syncing through that folder now');
+          closeModal(wrap); openSettings();
+        }
+      } else if (a === 'syncplay') {
+        const { path } = await api('POST', '/api/browse', mac
+          ? { kind: 'file', types: 'app', title: 'Find Syncplay', initial: '/Applications' }
+          : { kind: 'file', types: 'exe', title: 'Find Syncplay.exe', initial: 'C:\\Program Files (x86)\\Syncplay' });
+        if (path) form.syncplay_path.value = path;
+      } else if (a === 'gemini-test') {
+        const out = $('#gemini-out', form);
+        out.textContent = 'Testing…';
+        const r = await api('POST', '/api/settings/gemini', { key: form.gemini_api_key.value.trim() });
+        if (r.ok) {
+          await save();
+          out.innerHTML = `<span class="ok">✓ Working</span> - using ${esc(r.model)}. Saved.`;
+        } else out.innerHTML = `<span class="bad">✗ ${esc(r.error)}</span>`;
       } else if (a === 'sync-off') {
         form.sync_folder.value = '';
         await save();

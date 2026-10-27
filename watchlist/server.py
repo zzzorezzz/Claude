@@ -17,12 +17,15 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import dialogs, launcher, library, metadata, player, scanner
-from .config import Settings
+from concurrent.futures import ThreadPoolExecutor
+
+from . import ai, dialogs, launcher, library, metadata, player, scanner, sorter
+from .config import Settings, read_json, write_json
 from .store import TYPES, Store, new_item, next_episode
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 REFRESH_AFTER = 7 * 24 * 3600
+RELATED_TTL = 3 * 24 * 3600
 
 
 class ApiError(Exception):
@@ -51,7 +54,11 @@ class App:
         self.sync_problem = ""
         self.store = Store(self._list_path(), self.data_dir / "local.json")
         self.library = library.Library(self)
+        self.sorter = sorter.Sorter(self)
         self.player = player.Player()
+        self._related_path = self.data_dir / "related.json"
+        self._related = read_json(self._related_path, {})
+        self._related_lock = threading.Lock()
 
     # ---- syncing between computers
 
@@ -96,7 +103,7 @@ class App:
                 "sync": {"folder": s["sync_folder"], "file": str(self.store.path),
                          "problem": self.sync_problem},
                 "downloads": s["downloads_folder"], "player": s["player"],
-                "mpv": player.find_mpv()}
+                "mpv": player.find_mpv(), "gemini": bool(s["gemini_api_key"])}
 
     def open_link(self, url):
         browser = launcher.find_browser(self.settings.get()["browser_path"])
@@ -112,6 +119,116 @@ class App:
                  if k not in ("source", "source_id") and v not in (None, "", [], {})}
         patch["updated"] = time.time()
         return self.store.update(item["id"], patch)
+
+    def add_title(self, item_type, source, source_id, collections=()):
+        if item_type not in TYPES:
+            raise ApiError("type must be movie, tv or anime")
+        existing = self.store.find_source(source, source_id)
+        if existing:
+            return existing
+        info = metadata.details(self.settings.get(), item_type, source, str(source_id or ""))
+        item = new_item(item_type, info)
+        item["collections"] = [c for c in collections if isinstance(c, str)]
+        return self.store.add(item)
+
+    def undo_sorted(self, key):
+        for entry in self.library.undo(key):
+            if entry.get("added") and not self.library.uses(entry["item"]):
+                try:
+                    self.store.delete(entry["item"])
+                except KeyError:
+                    pass
+        self.library.rematch()
+
+    # ---- related titles
+
+    def related(self, item, fresh=False):
+        """Seasons, sequels, spin-offs, OVAs, films... of a title, each marked as
+        in your list (and downloaded), waiting in your downloads, or missing."""
+        cache_key = f'{item["source"]}:{item["source_id"]}'
+        with self._related_lock:
+            cached = self._related.get(cache_key)
+        if cached and not fresh and time.time() - cached["at"] < RELATED_TTL:
+            entries, note = cached["entries"], cached.get("note", "")
+        else:
+            entries, note = self._find_related(item)
+            with self._related_lock:
+                self._related[cache_key] = {"at": time.time(), "entries": entries, "note": note}
+                for k in sorted(self._related, key=lambda k: self._related[k]["at"])[:-300]:
+                    del self._related[k]
+                write_json(self._related_path, self._related, compact=True)
+        lib = self.library.state()
+        waiting = [q for q in lib["questions"] if q["kind"] == "title"]
+        out = []
+        for e in entries:
+            e = dict(e)
+            mine = self.store.find_source(e["source"], e["source_id"])
+            e["in_list"] = mine["id"] if mine else None
+            e["files"] = lib["items"].get(mine["id"], {}).get("files", 0) if mine else 0
+            e["waiting"] = 0
+            if not mine:
+                as_item = sorter._as_item(e, e["type"])
+                for q in waiting:
+                    if library.score_file(as_item, sorter._guess(q), q["file_kind"]) >= 85:
+                        e["waiting"] += len(q["files"])
+            out.append(e)
+        return {"entries": out, "note": note}
+
+    def _find_related(self, item):
+        s = self.settings.get()
+        entries, note = [], ""
+        try:
+            entries = [sorter._suggestion(r, r.get("type") if r.get("type") in TYPES else item["type"])
+                       for r in metadata.related(s, item)]
+        except metadata.MetadataError as e:
+            note = str(e)
+        if item["type"] != "anime" and s["tmdb_api_key"]:
+            try:
+                extra = (self._related_by_gemini(item, s) if s["gemini_api_key"]
+                         else self._related_by_name(item, s))
+            except ai.AIError as e:
+                note, extra = f"Gemini: {e}", self._related_by_name(item, s)
+            have = {e["source_id"] for e in entries}
+            entries += [e for e in extra if e["source_id"] not in have]
+        own = item["source_id"]
+        entries = [e for e in entries if e["source_id"] != own]
+        return entries, note
+
+    @staticmethod
+    def _search_safely(s, item_type, title):
+        try:
+            return metadata.search(s, item_type, title)[:10]
+        except metadata.MetadataError:
+            return []
+
+    def _related_by_name(self, item, s):
+        """Without Gemini: TV shows and films whose name contains this one's."""
+        name = library.norm(item["title"])
+        out = []
+        if len(name) < 3:
+            return out
+        for media in ("tv", "movie"):
+            for r in self._search_safely(s, media, item["title"]):
+                other = library.norm(r["title"])
+                if other != name and re.search(rf"(^|\s){re.escape(name)}(\s|$)", other):
+                    out.append(sorter._suggestion(dict(r, relation="Shares the name"), media))
+        return out
+
+    def _related_by_gemini(self, item, s):
+        """Spin-offs and films Gemini knows of, each checked on TMDB."""
+        named = ai.related_titles(s["gemini_api_key"], item)
+
+        def check(row):
+            want = library.norm(row["title"])
+            for r in self._search_safely(s, row["type"], row["title"]):
+                names = {library.norm(n) for n in (r["title"], r.get("original_title")) if n}
+                year = row["year"] if isinstance(row["year"], int) else None
+                if want in names and (not year or not r.get("year") or abs(r["year"] - year) <= 1):
+                    return sorter._suggestion(dict(r, relation=row["relation"]), row["type"])
+            return None
+
+        with ThreadPoolExecutor(4) as pool:
+            return [r for r in pool.map(check, named) if r]
 
     def refresh_stale(self):
         """Keep ratings and popularity current, quietly, in the background."""
@@ -372,6 +489,11 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/library", "library"),
         ("POST", r"/api/library/rescan", "library_rescan"),
         ("POST", r"/api/library/answer", "library_answer"),
+        ("POST", r"/api/library/undo", "library_undo"),
+        ("POST", r"/api/library/sort", "library_sort"),
+        ("GET", r"/api/items/(\w+)/related", "related"),
+        ("POST", r"/api/items/(\w+)/recap", "recap"),
+        ("POST", r"/api/settings/gemini", "test_gemini"),
         ("GET", r"/api/settings", "get_settings"),
         ("PUT", r"/api/settings", "put_settings"),
         ("POST", r"/api/settings/test", "test_settings"),
@@ -519,8 +641,46 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.library.state()
 
     def api_library_answer(self, body):
-        self.app.library.answer(body)
+        add = body.get("add")
+        if isinstance(add, dict):
+            # "Add it to my list": a suggestion from the search, added and connected.
+            item = self.app.add_title(add.get("type"), add.get("source"), add.get("source_id"))
+            body = dict(body, item=item["id"])
+        try:
+            self.app.library.answer(body)
+        except ValueError as e:
+            raise ApiError(str(e)) from e
         return self.app.library.state()
+
+    def api_library_undo(self, body):
+        """Undo something sorted automatically; a title it added to your list is
+        removed again, unless something else uses it now."""
+        self.app.undo_sorted(str(body.get("key") or ""))
+        return self.app.library.state()
+
+    def api_library_sort(self, body):
+        """Look up waiting downloads now rather than on the next background pass."""
+        threading.Thread(target=self.app.sorter.run_once, daemon=True).start()
+        return {"ok": True}
+
+    def api_related(self, body, item_id):
+        return self.app.related(self.app.item(item_id), fresh=self.query.get("fresh") == "1")
+
+    def api_recap(self, body, item_id):
+        item = self.app.item(item_id)
+        key = self.app.settings.get()["gemini_api_key"]
+        if not key:
+            raise ApiError("add a Gemini key in Settings for recaps")
+        try:
+            return ai.recap(key, item, int(body.get("season") or 1), int(body.get("episode") or 1))
+        except ai.AIError as e:
+            raise ApiError(str(e)) from e
+
+    def api_test_gemini(self, body):
+        key = str(body.get("key") or self.app.settings.get()["gemini_api_key"]).strip()
+        if not key:
+            return {"ok": False, "error": "paste your key first"}
+        return ai.test_key(key)
 
     def api_search(self, body):
         item_type = self.query.get("type", "")
@@ -533,17 +693,8 @@ class Handler(BaseHTTPRequestHandler):
         return {"results": results}
 
     def api_add_item(self, body):
-        item_type = body.get("type")
-        if item_type not in TYPES:
-            raise ApiError("type must be movie, tv or anime")
-        existing = self.app.store.find_source(body.get("source"), body.get("source_id"))
-        if existing:
-            return existing
-        info = metadata.details(self.app.settings.get(), item_type,
-                                body.get("source"), str(body.get("source_id", "")))
-        item = new_item(item_type, info)
-        item["collections"] = [c for c in body.get("collections", []) if isinstance(c, str)]
-        return self.app.store.add(item)
+        return self.app.add_title(body.get("type"), body.get("source"), body.get("source_id"),
+                                  body.get("collections", []))
 
     def api_get_item(self, body, item_id):
         return self.app.item(item_id)
