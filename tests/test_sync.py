@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from watchlist.server import App
@@ -15,6 +16,10 @@ class SyncTest(unittest.TestCase):
     """Two computers ("win" and "mac") sharing one cloud folder."""
 
     def setUp(self):
+        from watchlist import store
+        patcher = mock.patch.object(store, "CHECK_EVERY", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)

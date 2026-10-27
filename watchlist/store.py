@@ -30,7 +30,11 @@ METADATA_FIELDS = (
     "backdrop", "genres", "rating", "rating_source", "votes", "popularity",
     "revenue", "mal_members", "mal_rank", "runtime", "cast", "studios", "seasons",
     "episodes_total", "airing_status", "trailer", "links", "tmdb_ref", "format",
+    "media_type", "tmdb_collection",
 )
+
+# How often (seconds) to look for changes the other computer made.
+CHECK_EVERY = 2.0
 
 # Per-computer fields: kept in the local file, never synced.
 LOCAL_DEFAULTS = {
@@ -52,6 +56,8 @@ def _blank_item() -> dict:
         "revenue": None, "mal_members": None, "mal_rank": None, "runtime": None,
         "cast": [], "studios": [], "seasons": [], "episodes_total": None,
         "airing_status": "", "trailer": "", "links": {}, "tmdb_ref": "",
+        # tv / ova / ona / special / tv_special / movie (from MyAnimeList or TMDB).
+        "media_type": "", "tmdb_collection": None,
         # Things you control.
         "collections": [],
         "progress": {"season": 1, "episode": 1},
@@ -119,6 +125,7 @@ class Store:
         self.version = 0
         self.path = Path(shared_path)
         self._seen = None
+        self._checked_at = 0.0
         with self._lock:
             self._load()
             self._migrate()
@@ -195,25 +202,33 @@ class Store:
             self._save()
             self._save_local()
 
-    def _check(self):
-        """Merge in changes made elsewhere (another computer via the cloud)."""
+    def _check(self, force=False):
+        """Merge in changes made elsewhere (another computer via the cloud).
+
+        Looking at the file costs real time on a cloud drive (Google Drive's
+        virtual drive in particular), so it's done at most every CHECK_EVERY
+        seconds - except right before writing, when it always happens."""
+        now = time.monotonic()
+        if not force and now - self._checked_at < CHECK_EVERY:
+            return
+        self._checked_at = now
         if self._signature() != self._seen:
             self._load()
             self.version += 1
 
     def _save(self):
-        self._check()  # never overwrite what the other computer just wrote
+        self._check(force=True)  # never overwrite what the other computer just wrote
         write_json(self.path, {
             "version": 2,
             "items": list(self._items.values()),
             "collections": list(self._collections.values()),
             "deleted": self._deleted,
-        })
+        }, compact=True)
         self._seen = self._signature()
         self.version += 1
 
     def _save_local(self):
-        write_json(self.local_path, self._local)
+        write_json(self.local_path, self._local, compact=True)
 
     def use_file(self, shared_path: Path):
         """Switch to another list file (turning sync on/off), merging both."""
@@ -222,9 +237,9 @@ class Store:
             self._load()
             self._save()
 
-    def current_version(self):
+    def current_version(self, force=False):
         with self._lock:
-            self._check()
+            self._check(force)
             return self.version
 
     # ---- items

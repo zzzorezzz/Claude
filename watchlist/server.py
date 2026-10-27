@@ -39,6 +39,10 @@ def _inside(path, folder):
         return False
 
 
+def item_kind_is_single(item):
+    return (item.get("episodes_total") or 0) <= 1 and library.item_kind(item) in ("ova", "special", "movie")
+
+
 class App:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
@@ -128,9 +132,13 @@ class App:
         if folder and os.path.isdir(folder):
             found = scanner.scan_folder(folder)
             folder_videos, folder_subs = found["videos"], found["subs"]
+            for v in folder_videos:
+                library.Library.describe(v)
             known = {v["path"] for v in videos}
             videos += [v for v in folder_videos if v["path"] not in known]
-        videos.sort(key=lambda v: (v["season"] or 0, v["episodes"][:1] or [0], scanner.natural_key(v["rel"])))
+        # Episode order; when there are two copies of an episode, the better one first.
+        videos.sort(key=lambda v: (v["season"] if v["season"] is not None else 1, v["episodes"][:1] or [0],
+                                   [-x for x in library.quality(v)], scanner.natural_key(v["rel"])))
         in_folder = {v["path"] for v in folder_videos}
 
         def subtitles(video):
@@ -141,17 +149,21 @@ class App:
 
     def local_info(self, item, season, episode, path=""):
         folder = item["local_folder"]
-        videos, subtitles = self._sources(item)
-        info = {"folder": folder, "exists": bool(videos) or (bool(folder) and os.path.isdir(folder)),
+        everything, subtitles = self._sources(item)
+        videos = [v for v in everything if v.get("kind") != "extra"]
+        info = {"folder": folder, "exists": bool(everything) or (bool(folder) and os.path.isdir(folder)),
                 "downloads": len(self.library.videos_for(item["id"])),
-                "videos": videos, "target": None, "subtitles": [], "available": []}
+                "videos": videos, "extras": [v for v in everything if v.get("kind") == "extra"],
+                "target": None, "subtitles": [], "available": []}
         if not info["exists"]:
             return info
         if path:
-            target = next((v for v in videos if v["path"] == path), None)
+            target = next((v for v in everything if v["path"] == path), None)
         elif item["format"] == "movie":
             target = next((v for v in videos if v["path"] == item["local_file"]), None)
             target = target or scanner.find_movie(item, videos)
+        elif item_kind_is_single(item) and videos and not any(v["episodes"] for v in videos):
+            target = videos[0]   # a one-off OVA or special with an unnumbered file
         else:
             episodes = scanner.episode_map(item, videos)
             info["available"] = [f"{s}:{e}" for s, e in sorted(episodes)]
@@ -176,6 +188,8 @@ class App:
         if subtitle:
             if not os.path.isfile(subtitle) or Path(subtitle).suffix.lower() not in scanner.SUB_EXTS:
                 raise ApiError("that subtitle file can't be used")
+        if body.get("extra"):
+            return self._play_extra(item, path, subtitle, body.get("player") or s["player"])
         series = item["format"] == "series"
         if series and "season" in body and "episode" in body:
             first_key = f"{max(1, int(body['season']))}:{max(1, int(body['episode']))}"
@@ -221,6 +235,16 @@ class App:
         self.store.update(item["id"], patch)
         return {"ok": True, "player": "vlc", "file": Path(path).name, "queued": len(entries) - 1,
                 "resumed_at": start, "note": note}
+
+    def _play_extra(self, item, path, subtitle, wanted):
+        entry = {"path": path, "sub": subtitle or None, "key": f"extra:{Path(path).name}",
+                 "label": f"{item['title']} - {Path(path).stem}"}
+        mpv = player.find_mpv() if wanted == "mpv" else ""
+        if mpv:
+            self.player.play(player.Session(mpv, item["id"], [entry]))
+            return {"ok": True, "player": "mpv", "file": Path(path).name, "queued": 0, "resumed_at": 0}
+        self._play_vlc([entry])
+        return {"ok": True, "player": "vlc", "file": Path(path).name, "queued": 0, "resumed_at": 0}
 
     def _play_vlc(self, entries, start=0):
         vlc = launcher.find_vlc(self.settings.get()["vlc_path"])

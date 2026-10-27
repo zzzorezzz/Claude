@@ -443,3 +443,59 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 .ep-bar { height: 3px; background: #4d4d4d; border-radius: 2px; margin-top: 8px; max-width: 320px; overflow: hidden; }
 .ep-bar i { display: block; height: 100%; background: var(--red); }
 .live { margin: -6px 0 14px; }
+
+/* ---------- motion ---------- */
+/* Posters fade in when loaded; cards rise in one after another when they first appear. */
+.card .poster { opacity: 0; transition: opacity .35s ease; }
+.card .poster.loaded { opacity: 1; }
+.card.enter { animation: rise .42s cubic-bezier(.2,.8,.2,1) both; animation-delay: calc(min(var(--i, 0), 12) * 35ms); }
+@keyframes rise { from { opacity: 0; transform: translateY(14px) scale(.97); } }
+#view.page-in { animation: page-in .3s ease both; }
+@keyframes page-in { from { opacity: 0; transform: translateY(6px); } }
+::view-transition-old(root) { animation: .16s ease both vt-out; }
+::view-transition-new(root) { animation: .26s ease both vt-in; }
+@keyframes vt-out { to { opacity: 0; } }
+@keyframes vt-in { from { opacity: 0; transform: translateY(6px); } }
+
+/* Dialogs spring open over a blurred background. */
+#modal-root .overlay { backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.modal { animation: spring .38s cubic-bezier(.18,1.25,.4,1) both; }
+@keyframes spring { from { opacity: 0; transform: translateY(18px) scale(.95); } }
+.toast { animation: toast-in .32s cubic-bezier(.18,1.25,.4,1) both; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(16px); } }
+
+/* An answered question slides away and its space closes up. */
+.q-card { transition: opacity .2s ease, transform .2s ease, height .22s ease, margin .22s ease, padding .22s ease; overflow: hidden; }
+.q-card.leaving { opacity: 0; transform: translateX(40px); height: 0 !important; margin: 0; padding-top: 0; padding-bottom: 0; }
+
+/* Shimmering placeholders. */
+.skeleton .sk-poster, .skeleton .sk-lines i {
+  background: linear-gradient(90deg, #262626 25%, #363636 50%, #262626 75%); background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite; border-radius: 4px;
+}
+.skeleton .sk-poster { width: 62px; height: 92px; }
+.skeleton .sk-lines { display: grid; gap: 8px; }
+.skeleton .sk-lines i { display: block; height: 12px; width: 70%; }
+.skeleton .sk-lines i:first-child { height: 16px; width: 45%; }
+.skeleton .sk-lines i:last-child { width: 90%; }
+.skeleton:hover { background: none; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* Extras on the title page. */
+.extras { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.extra-tile {
+  display: grid; grid-template-columns: 34px 1fr; grid-template-rows: auto auto; column-gap: 10px; align-items: center;
+  text-align: left; padding: 10px 12px; border-radius: 6px; border: 1px solid #333; background: var(--panel-2); color: #fff;
+  cursor: pointer; transition: background .2s, border-color .2s, transform .2s;
+  animation: rise .35s cubic-bezier(.2,.8,.2,1) both; animation-delay: calc(min(var(--i, 0), 12) * 30ms);
+}
+.extra-tile:hover { background: #333; border-color: #555; transform: translateY(-2px); }
+.extra-play { grid-row: span 2; width: 34px; height: 34px; border-radius: 50%; background: #fff; color: #000; display: grid; place-items: center; }
+.extra-play svg { width: 14px; height: 14px; }
+.extra-name { font-weight: 700; font-size: 14px; }
+.extra-tile small { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; transition-duration: 1ms !important; }
+  .card .poster { opacity: 1; }
+}

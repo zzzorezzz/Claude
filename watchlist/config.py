@@ -81,11 +81,17 @@ def read_json(path: Path, default):
         return copy.deepcopy(default)
 
 
-def write_json(path: Path, data) -> None:
+def write_json(path: Path, data, compact=False) -> None:
+    """Write atomically. compact=True is for big files written often: pretty
+    printing makes Python use its slow JSON encoder (about 10x slower)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, ensure_ascii=False)
+        if compact:
+            # json.dumps (not json.dump) is what uses the fast C encoder.
+            fh.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        else:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
 
 

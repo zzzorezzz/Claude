@@ -125,6 +125,14 @@ window.addEventListener('focus', checkForChanges);
 document.addEventListener('error', (e) => {
   if (e.target.tagName === 'IMG') e.target.classList.add('broken');
 }, true);
+// Pictures fade in once they've loaded, instead of popping in.
+document.addEventListener('load', (e) => {
+  if (e.target.tagName === 'IMG') e.target.classList.add('loaded');
+}, true);
+// A card's slide-in plays once, not again whenever the card is moved.
+document.addEventListener('animationend', (e) => {
+  if (e.target.classList?.contains('enter')) e.target.classList.remove('enter');
+});
 
 /* ======================================================= sort & filter */
 
@@ -164,11 +172,43 @@ function route() {
   return { name: 'home' };
 }
 
+// Updating the screen: cards that didn't change are kept as they are (their
+// posters stay loaded, nothing flickers); only new or changed ones are created,
+// and those slide in.
+const hashText = (text) => {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+};
+
+function setView(view, html) {
+  const old = new Map();
+  view.querySelectorAll('.card[data-sig]').forEach((el) => {
+    const list = old.get(el.dataset.sig) || [];
+    list.push(el);
+    old.set(el.dataset.sig, list);
+  });
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  let fresh = 0;
+  tpl.content.querySelectorAll('.card[data-sig]').forEach((el) => {
+    const keep = old.get(el.dataset.sig)?.shift();
+    if (keep) el.replaceWith(keep);
+    else {
+      el.classList.add('enter');
+      el.style.setProperty('--i', String(Math.min(fresh++, 14)));
+    }
+  });
+  view.replaceChildren(tpl.content);
+  view.querySelectorAll('img').forEach((img) => { if (img.complete && img.naturalWidth) img.classList.add('loaded'); });
+}
+const viewTarget = { set innerHTML(html) { setView($('#view'), html); } };
+
 function render() {
   const r = route();
   $$('.nav-links a').forEach((a) => a.classList.toggle('active', a.dataset.route === r.name && !S.query));
   renderNavButtons();
-  const view = $('#view');
+  const view = viewTarget;
   if (S.query.trim()) renderSearch(view);
   else if (r.name === 'home') renderHome(view);
   else if (TYPES.includes(r.name)) renderCategory(view, r.name);
@@ -179,8 +219,17 @@ function render() {
 
 window.addEventListener('hashchange', () => {
   if (S.query) { S.query = ''; $('#search').value = ''; }
-  render();
-  window.scrollTo(0, 0);
+  const go = () => { render(); window.scrollTo(0, 0); };
+  // A smooth cross-fade between pages where the window supports it.
+  if (document.startViewTransition && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    document.startViewTransition(go);
+  } else {
+    go();
+    const view = $('#view');
+    view.classList.remove('page-in');
+    void view.offsetWidth;
+    view.classList.add('page-in');
+  }
 });
 window.addEventListener('scroll', () => $('#nav').classList.toggle('solid', window.scrollY > 30), { passive: true });
 
@@ -243,9 +292,8 @@ function cardHTML(item) {
   else if (item.runtime) meta.push(fmtRuntime(item.runtime));
   const badge = !hasFiles(item) ? ''
     : item.local_broken ? '<span class="badge-pc warn">FILE ISSUE</span>' : `<span class="badge-pc">ON ${pcName().toUpperCase()}</span>`;
-  return `<div class="card" data-id="${esc(item.id)}" tabindex="0" draggable="true">
-    <div class="poster-fallback">${esc(item.title)}</div>
-    ${item.poster ? `<img class="poster" src="${esc(item.poster)}" alt="" loading="lazy">` : ''}
+  const inner = `<div class="poster-fallback">${esc(item.title)}</div>
+    ${item.poster ? `<img class="poster" src="${esc(item.poster)}" alt="" loading="lazy" decoding="async">` : ''}
     ${badge}
     <div class="card-info">
       <div class="card-buttons">
@@ -255,8 +303,8 @@ function cardHTML(item) {
       </div>
       <div class="card-title">${esc(item.title)}</div>
       <div class="card-meta">${meta.join(' · ')}</div>
-    </div>
-  </div>`;
+    </div>`;
+  return `<div class="card" data-id="${esc(item.id)}" data-sig="${hashText(item.id + inner)}" tabindex="0" draggable="true">${inner}</div>`;
 }
 
 const addTileHTML = (type, folder) => `<button class="tile tile-add" data-add="${type}" ${folder ? `data-col="${esc(folder.id)}"` : ''} title="Add ${TYPE_ONE[type]}">
@@ -821,16 +869,24 @@ function openQuestions() {
         ${unknown.map(([q, i]) => card(q, i)).join('')}</details>` : ''}
     </div>`;
   };
-  const answer = async (body) => {
-    S.library = await api('POST', '/api/library/answer', body);
-    await reload();
+  // Answering doesn't reload the whole app: the answer brings back the new
+  // downloads state, and the answered card slides away.
+  const answer = async (body, card) => {
+    const request = api('POST', '/api/library/answer', body);
+    if (card) {
+      card.style.height = `${card.offsetHeight}px`;
+      card.classList.add('leaving');
+    }
+    S.library = await request;
+    await new Promise((r) => setTimeout(r, card ? 220 : 0));
+    render();
     if (wrap.isConnected) draw();
   };
   wrap.addEventListener('change', (e) => {
     const pick = e.target.closest('.q-pick');
     if (!pick || !pick.value) return;
     const q = S.library.questions[Number(pick.closest('[data-q]').dataset.q)];
-    answer({ kind: 'title', key: q.key, item: pick.value }).catch(fail);
+    answer({ kind: 'title', key: q.key, item: pick.value }, pick.closest('.q-card')).catch(fail);
   });
   wrap.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-a]');
@@ -839,18 +895,18 @@ function openQuestions() {
     const q = S.library.questions[Number(box.dataset.q)];
     const a = btn.dataset.a;
     try {
-      if (a === 'item') await answer({ kind: 'title', key: q.key, item: btn.dataset.item });
-      else if (a === 'ignore') await answer({ kind: 'title', key: q.key, item: 'ignore' });
-      else if (a === 'ignore-file') await answer({ kind: 'file', key: q.key, item: 'ignore' });
-      else if (a === 'ignore-sub') await answer({ kind: 'subtitle', key: q.key, video: 'ignore' });
+      if (a === 'item') await answer({ kind: 'title', key: q.key, item: btn.dataset.item }, box);
+      else if (a === 'ignore') await answer({ kind: 'title', key: q.key, item: 'ignore' }, box);
+      else if (a === 'ignore-file') await answer({ kind: 'file', key: q.key, item: 'ignore' }, box);
+      else if (a === 'ignore-sub') await answer({ kind: 'subtitle', key: q.key, video: 'ignore' }, box);
       else if (a === 'episode') {
         const episode = Number($('.q-episode', box).value);
         if (!episode) { toast('Type the episode number first', 'error'); return; }
-        await answer({ kind: 'episode', key: q.key, item: q.item, season: Number($('.q-season', box).value) || 1, episode });
+        await answer({ kind: 'episode', key: q.key, item: q.item, season: Number($('.q-season', box).value) || 1, episode }, box);
       } else if (a === 'subtitle') {
         const video = $('.q-video', box).value;
         if (!video) { toast('Choose the video first', 'error'); return; }
-        await answer({ kind: 'subtitle', key: q.key, video });
+        await answer({ kind: 'subtitle', key: q.key, video }, box);
       } else if (a === 'add') {
         openAdd(questionGuessType(q), q.guess, '', (item) => {
           answer({ kind: 'title', key: q.key, item: item.id }).catch(fail);
@@ -938,7 +994,8 @@ function openAdd(type = 'tv', query = '', preCol = '', onAdded = null) {
     }
     if (!q) { out.innerHTML = ''; return; }
     const seq = ++st.seq;
-    out.innerHTML = '<div class="spinner"></div>';
+    // Shimmering placeholders while the search runs.
+    out.innerHTML = `<div class="results">${'<div class="result skeleton"><div class="sk-poster"></div><div class="sk-lines"><i></i><i></i><i></i></div></div>'.repeat(4)}</div>`;
     try {
       const { results } = await api('GET', `/api/search?type=${st.type}&q=${encodeURIComponent(q)}`);
       if (seq !== st.seq) return;
@@ -1013,14 +1070,21 @@ function refreshOpenTitle() {
     if (!wrap.dataset.itemId) return;
     if (!findItem(wrap.dataset.itemId)) { closeModal(wrap); return; }
     if ($('.tm-trailer', wrap)) return;
+    const sig = titleSig(findItem(wrap.dataset.itemId));
+    if (sig === wrap.dataset.sig) return;
     const scroll = wrap.scrollTop;
     drawTitle(wrap);
     wrap.scrollTop = scroll;
   });
 }
 
+// Everything a title page shows: if none of it changed, the page isn't redrawn.
+const titleSig = (item) => JSON.stringify([item.modified, item.local_folder, item.local_broken,
+  (S.library.items || {})[item.id], S.collections.length, S.status.player, S.status.mpv]);
+
 function drawTitle(wrap) {
   const item = findItem(wrap.dataset.itemId);
+  wrap.dataset.sig = titleSig(item);
   const modal = $('.modal', wrap);
   const series = isSeries(item);
   const meta = [];
@@ -1051,7 +1115,7 @@ function drawTitle(wrap) {
 
   let progress = '';
   if (series) {
-    const total = item.episodes_total || item.seasons.reduce((n, s) => n + (s.episodes || 0), 0);
+    const total = item.seasons.filter((s) => s.number > 0).reduce((n, s) => n + (s.episodes || 0), 0) || item.episodes_total || 0;
     const done = absoluteIndex(item, item.progress) - 1;
     const pct = total ? Math.min(100, (done / total) * 100) : 0;
     progress = `<div class="progress-box"><span class="muted">Up next</span><b>${epLabel(item.progress)}</b>
@@ -1085,6 +1149,8 @@ function drawTitle(wrap) {
       <aside class="tm-side">${side.join('')}</aside>
     </div>
     <section class="tm-section"><h3>On your ${pcName()}</h3><div class="folder-line" id="folder-line"></div></section>
+    <section class="tm-section hidden" id="extras-section"><h3>Extras <span class="muted small" id="extras-count"></span></h3>
+      <div class="extras" id="extras"></div></section>
     ${series ? '<section class="tm-section"><h3>Episodes<span class="spacer"></span><span id="ep-picker"></span></h3><div class="episodes" id="ep-list"></div></section>' : ''}`;
 
   drawFolderLine(wrap);
@@ -1093,17 +1159,26 @@ function drawTitle(wrap) {
 }
 
 function absoluteIndex(item, p) {
+  if (p.season === 0) return 1;
   let n = 0;
   for (const s of item.seasons) {
-    if (s.number < p.season) n += s.episodes || 0;
+    if (s.number > 0 && s.number < p.season) n += s.episodes || 0;
   }
   return n + p.episode;
 }
+const seasonName = (n) => (n === 0 ? 'Specials' : `Season ${n}`);
 
 async function titleClick(wrap, e) {
   const item = findItem(wrap.dataset.itemId);
   const link = e.target.closest('[data-link]');
   if (link) { api('POST', '/api/open', { url: link.dataset.link }).catch(fail); return; }
+  const extra = e.target.closest('[data-extra]');
+  if (extra) {
+    const v = wrap.st.local.extras[Number(extra.dataset.extra)];
+    api('POST', `/api/items/${item.id}/play`, { path: v.path, extra: true })
+      .then((res) => toast(`Playing ${extraLabel(v)}${res.player === 'vlc' ? ' in VLC' : ''}`)).catch(fail);
+    return;
+  }
   const ep = e.target.closest('[data-ep]');
   if (ep) {
     const [s, n] = ep.dataset.ep.split(':').map(Number);
@@ -1219,7 +1294,32 @@ async function loadLocal(wrap) {
   } catch { wrap.st.local = null; }
   if (!wrap.isConnected) return;
   drawFolderLine(wrap);
+  drawExtras(wrap);
   if (isSeries(item)) drawEpisodes(wrap);
+}
+
+// Openings, endings, trailers... found with the show's files: ready to play, kept apart from episodes.
+function drawExtras(wrap) {
+  const box = $('#extras', wrap);
+  const extras = wrap.st.local?.extras || [];
+  if (!box) return;
+  $('#extras-section', wrap).classList.toggle('hidden', !extras.length);
+  if (!extras.length) return;
+  $('#extras-count', wrap).textContent = `${extras.length} file${extras.length === 1 ? '' : 's'}`;
+  box.innerHTML = extras.map((v, i) => `<button class="extra-tile" data-extra="${i}" style="--i:${i}">
+      <span class="extra-play">${ICON.play}</span><span class="extra-name">${esc(extraLabel(v))}</span>
+      <small>${esc(v.rel)}</small></button>`).join('');
+}
+
+function extraLabel(v) {
+  const stem = v.name.replace(/\.[^.]+$/, '').replace(/\[[^\]]*\]|\([^)]*\)/g, ' ').replace(/[._]/g, ' ');
+  const m = stem.match(/\b(?:nc)?(op|ed)\s*(\d*)\b/i);
+  if (/creditless\s+opening|\bncop\b/i.test(stem) || (m && m[1].toLowerCase() === 'op')) return `Opening ${m && m[2] ? m[2] : ''}`.trim();
+  if (/creditless\s+ending|\bnced\b/i.test(stem) || (m && m[1].toLowerCase() === 'ed')) return `Ending ${m && m[2] ? m[2] : ''}`.trim();
+  if (/\bpv\b|trailer|teaser|promo/i.test(stem)) return 'Trailer';
+  if (/preview/i.test(stem)) return 'Preview';
+  if (/menu/i.test(stem)) return 'Menu';
+  return stem.replace(/\s+/g, ' ').trim();
 }
 
 async function drawEpisodes(wrap) {
@@ -1242,7 +1342,7 @@ async function drawEpisodes(wrap) {
   const pages = Math.ceil(count / PAGE);
   if (st.page >= pages) st.page = 0;
 
-  picker.innerHTML = `${seasons.length > 1 ? `<select class="select" id="season-sel">${seasons.map((s) => `<option value="${s.number}" ${s.number === st.season ? 'selected' : ''}>Season ${s.number}</option>`).join('')}</select>` : ''}
+  picker.innerHTML = `${seasons.length > 1 ? `<select class="select" id="season-sel">${seasons.map((s) => `<option value="${s.number}" ${s.number === st.season ? 'selected' : ''}>${seasonName(s.number)}</option>`).join('')}</select>` : ''}
     ${pages > 1 ? `<select class="select" id="page-sel">${Array.from({ length: pages }, (_, i) => `<option value="${i}" ${i === st.page ? 'selected' : ''}>Episodes ${i * PAGE + 1}-${Math.min(count, (i + 1) * PAGE)}</option>`).join('')}</select>` : ''}`;
   $('#season-sel', picker)?.addEventListener('change', (e) => { st.season = Number(e.target.value); st.page = 0; drawEpisodes(wrap); });
   $('#page-sel', picker)?.addEventListener('change', (e) => { st.page = Number(e.target.value); drawEpisodes(wrap); });
@@ -1424,7 +1524,7 @@ function watchChoice(wrap) {
   const ep = wrap.st.ep;
   const seasons = item.seasons.length ? item.seasons : [{ number: 1, episodes: item.episodes_total || 0 }];
   const picker = isSeries(item) ? `<span class="ep-picker">
-      ${seasons.length > 1 ? `<select class="select" id="w-season">${seasons.map((s) => `<option value="${s.number}" ${s.number === ep.season ? 'selected' : ''}>Season ${s.number}</option>`).join('')}</select>` : ''}
+      ${seasons.length > 1 ? `<select class="select" id="w-season">${seasons.map((s) => `<option value="${s.number}" ${s.number === ep.season ? 'selected' : ''}>${seasonName(s.number)}</option>`).join('')}</select>` : ''}
       <span>Episode</span><input class="input" id="w-ep" type="number" min="1" value="${ep.episode}"></span>` : '';
   const region = regionName(S.status.region || 'PK');
   const body = watchBody(wrap, `<h2>How do you want to watch?</h2>

@@ -29,7 +29,9 @@ class MetadataTest(unittest.TestCase):
         item = metadata.details(SETTINGS, "tv", "tmdb", "tv/1396")
         self.assertEqual(item["title"], "Breaking Bad")
         self.assertEqual(item["format"], "series")
-        self.assertEqual(item["seasons"], [{"number": 1, "episodes": 7}, {"number": 2, "episodes": 13}])
+        self.assertEqual(item["seasons"], [{"number": 0, "episodes": 9}, {"number": 1, "episodes": 7},
+                                           {"number": 2, "episodes": 13}], "specials are kept as season 0")
+        self.assertEqual(item["media_type"], "tv")
         self.assertEqual(item["trailer"], "HhesaQXLuRY", "official trailer wins over fan uploads and featurettes")
         self.assertEqual(item["rating"], 8.9)
         self.assertEqual(item["links"]["imdb"], "https://www.imdb.com/title/tt0903747/")

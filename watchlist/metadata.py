@@ -95,6 +95,7 @@ class _Cache:
 
 _season_cache = _Cache(6 * 3600)
 _provider_cache = _Cache(6 * 3600)
+_related_cache = _Cache(24 * 3600)
 
 
 def _year(date):
@@ -203,13 +204,18 @@ class TMDB:
             "links": links,
         }
         if media == "movie":
-            item.update(format="movie", runtime=d.get("runtime") or None,
+            collection = d.get("belongs_to_collection") or {}
+            item.update(format="movie", media_type="movie", runtime=d.get("runtime") or None,
                         revenue=d.get("revenue") or None,
                         studios=[c["name"] for c in d.get("production_companies", [])[:3]],
-                        airing_status=d.get("status") or "")
+                        airing_status=d.get("status") or "",
+                        tmdb_collection=collection.get("id"))
         else:
+            # Season 0 is "Specials" on TMDB; it's kept when it has episodes.
             seasons = [{"number": s["season_number"], "episodes": s.get("episode_count") or 0}
-                       for s in d.get("seasons", []) if (s.get("season_number") or 0) > 0]
+                       for s in d.get("seasons", [])
+                       if (s.get("season_number") or 0) > 0 or s.get("episode_count")]
+            item["media_type"] = "tv"
             runtimes = d.get("episode_run_time") or []
             item.update(format="series", seasons=seasons,
                         episodes_total=d.get("number_of_episodes"),
@@ -217,6 +223,25 @@ class TMDB:
                         studios=[n["name"] for n in d.get("networks", [])[:3]],
                         airing_status=d.get("status") or "")
         return item
+
+    def collection(self, collection_id):
+        """The other films in a movie series (TMDB "collection")."""
+        d = self._get(f"/collection/{int(collection_id)}")
+        return [{
+            "source": "tmdb", "source_id": f"movie/{p['id']}", "title": p.get("title") or "",
+            "original_title": p.get("original_title") or "", "year": _year(p.get("release_date")),
+            "overview": p.get("overview") or "", "poster": self.image(p.get("poster_path"), "w342"),
+            "format": "movie", "media_type": "MOVIE", "media_kind": "movie", "type": "movie",
+            "relation": "Same film series",
+        } for p in sorted(d.get("parts", []), key=lambda p: p.get("release_date") or "9999")]
+
+    def search_titles(self, query, media):
+        """Search results with the extra fields the automatic sorter needs."""
+        rows = self.search(query, media)
+        for r in rows:
+            r["media_kind"] = "movie" if media == "movie" else "tv"
+            r["type"] = "movie" if media == "movie" else "tv"
+        return rows
 
     def season(self, tv_id, number):
         key = (tv_id, number)
@@ -351,8 +376,35 @@ class MAL:
             "poster": self._picture(a), "rating": a.get("mean"),
             "format": "movie" if a.get("media_type") == "movie" else "series",
             "media_type": (a.get("media_type") or "").upper().replace("_", " "),
+            "media_kind": a.get("media_type") or "",
+            "type": "anime",
             "episodes_total": a.get("num_episodes") or None,
+            "aliases": self._titles(a)[2],
         }
+
+    def related(self, mal_id):
+        """Sequels, prequels, side stories, spin-offs, OVAs, specials, films...
+        directly related to an anime on MyAnimeList."""
+        cached = _related_cache.get(("mal", str(mal_id)))
+        if cached is not None:
+            return cached
+        rows = self._get(f"/anime/{int(mal_id)}", fields="related_anime").get("related_anime") or []
+        out = []
+        for row in rows[:30]:
+            node = row.get("node") or {}
+            if not node.get("id"):
+                continue
+            try:
+                entry = self._summary(self._get(f"/anime/{node['id']}", fields=MAL_SEARCH_FIELDS))
+            except MetadataError:
+                entry = {"source": "mal", "source_id": str(node["id"]), "title": node.get("title", ""),
+                         "original_title": "", "year": None, "overview": "", "rating": None,
+                         "poster": self._picture(node), "format": "series", "media_type": "",
+                         "media_kind": "", "type": "anime", "episodes_total": None, "aliases": []}
+            entry["relation"] = row.get("relation_type_formatted") or row.get("relation_type", "")
+            out.append(entry)
+        _related_cache.put(("mal", str(mal_id)), out)
+        return out
 
     def search(self, query):
         query = query.strip()
@@ -377,6 +429,7 @@ class MAL:
         duration = a.get("average_episode_duration")
         return {
             "source": "mal", "source_id": str(a["id"]), "format": fmt,
+            "media_type": a.get("media_type") or "",
             "title": title, "original_title": romaji if romaji != title else "",
             "aliases": aliases, "year": _year(a.get("start_date")),
             "overview": _clean_text(a.get("synopsis")),
@@ -429,6 +482,18 @@ def details(settings, item_type, source, source_id):
     if source == "tmdb":
         return TMDB(settings["tmdb_api_key"]).details(source_id)
     raise MetadataError("unknown source")
+
+
+def related(settings, item):
+    """Titles related to one in your list: for anime, MyAnimeList's relations; for
+    films, the rest of their series on TMDB. (TV spin-offs come from Gemini.)"""
+    if item.get("source") == "mal" and settings.get("mal_client_id"):
+        return MAL(settings["mal_client_id"]).related(item["source_id"])
+    if item.get("format") == "movie" and item.get("tmdb_collection") and settings.get("tmdb_api_key"):
+        own = item.get("source_id")
+        return [r for r in TMDB(settings["tmdb_api_key"]).collection(item["tmdb_collection"])
+                if r["source_id"] != own]
+    return []
 
 
 def _enrich_anime(settings, item):

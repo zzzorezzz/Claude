@@ -104,7 +104,7 @@ def scan_folder(folder):
 def _from_absolute(counts, number):
     """Absolute episode number -> (season, episode) using the season sizes."""
     remaining = number
-    for season in sorted(counts):
+    for season in sorted(n for n in counts if n > 0):  # season 0 holds specials
         size = counts[season]
         if not size or remaining <= size:
             return season, remaining
@@ -114,15 +114,17 @@ def _from_absolute(counts, number):
 
 def episode_map(item, videos):
     """{(season, episode): video} for every episode found in a folder."""
-    counts = {s["number"]: s["episodes"] for s in item.get("seasons", [])}
+    counts = {s["number"]: s["episodes"] for s in item.get("seasons", []) if s["number"] > 0}
+    # Extras (openings, endings...) are never episodes.
+    videos = [v for v in videos if v.get("kind") != "extra"]
     numbered = [v for v in videos if v["episodes"]]
     # A one-season entry (most MyAnimeList anime) whose files all say e.g. "S02E05".
-    single = len(counts) <= 1 and len({v["season"] for v in numbered}) == 1
+    single = len(counts) <= 1 and len({v["season"] for v in numbered if v["season"] != 0}) == 1
     found = {}
     for v in numbered:
         if v["season"] is not None:
             for ep in v["episodes"]:
-                found.setdefault((1 if single else v["season"], ep), v)
+                found.setdefault((v["season"] if v["season"] == 0 or not single else 1, ep), v)
     for v in numbered:
         if v["season"] is None:
             for ep in v["episodes"]:
