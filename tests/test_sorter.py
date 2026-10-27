@@ -244,6 +244,8 @@ class AITest(unittest.TestCase):
             if "gemini-3.8-flash:" in url:
                 slow.wait(5)
                 raise net.NetError("Gemini took too long to answer", "timeout")
+            if "gemini-2.5-flash:" in url:
+                time.sleep(0.3)        # answers a moment after the busy one has said so
             return fake(url, service, headers, body, timeout, method)
         fake = self.fake_gemini({"gemini-flash-latest": net.NetError(
             "x", "http", 503, "This model is currently experiencing high demand.")}, calls)

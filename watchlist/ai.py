@@ -187,26 +187,29 @@ class _Provider:
             pending = set(futures)
             while pending:
                 done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                for f in done:
-                    model = futures[f]
-                    reply, err = f.result()
-                    if not err:
-                        self._worked(model)
+                results = {f: f.result() for f in done}
+                winner = next((f for f, (_r, err) in results.items() if not err), None)
+                for f, (_reply, err) in results.items():
+                    if err:
+                        self._failed(futures[f], err)
+                        errors.append(err)
                         if log is not None:
-                            log.append(f"{model}: answered first")
-                            log.extend(f"{futures[p]}: still waiting" for p in pending)
-                        return reply, model
-                    self._failed(model, err)
-                    errors.append(err)
+                            log.append(f"{futures[f]}: {err}")
+                if winner:
+                    model = futures[winner]
+                    self._worked(model)
                     if log is not None:
-                        log.append(f"{model}: {err}")
+                        log.append(f"{model}: answered first")
+                        log.extend(f"{futures[p]}: still waiting" for p in pending)
+                    return results[winner][0], model
+                for f, (_reply, err) in results.items():
                     if err.kind not in NEXT_MODEL:
                         raise err
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
         if errors and all(e.kind == "busy" for e in errors):
-            raise AIError(f"{self.name} is overloaded right now (Google says the high demand is usually "
-                          "temporary) - try again in a few minutes", "busy")
+            raise AIError(f"{self.name} is overloaded right now (usually only for a few minutes) - "
+                          "try again soon", "busy")
         kinds = [e.kind for e in errors]
         for kind in ("limit", "busy", "timeout", "model"):
             if kind in kinds:
