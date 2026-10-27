@@ -20,7 +20,7 @@ import unicodedata
 from collections import Counter
 from pathlib import Path
 
-from . import scanner
+from . import ai, scanner
 from .config import read_json, write_json
 
 RESCAN_EVERY = 60  # seconds
@@ -550,12 +550,13 @@ class Library:
         # automatic sorter hasn't got to yet aren't put in front of you yet.
         settings = self.app.settings.get()
         searching = bool(settings.get("mal_client_id") or settings.get("tmdb_api_key"))
+        helpers = bool(ai.available(settings))
         rejected = set(self.answers["rejected"])
         for q in questions:
             found = self.answers["lookups"].get(q["key"]) or {}
             q["sorting"] = q["kind"] == "title" and q["key"] not in rejected and (
                 (searching and "at" not in found)
-                or (bool(settings.get("gemini_api_key")) and "gemini_at" not in found))
+                or (helpers and "gemini_at" not in found))
             for field in ("suggest", "hint", "hint_item"):
                 if found.get(field):
                     q[field] = found[field]
@@ -590,6 +591,26 @@ class Library:
     def videos_for(self, item_id):
         with self._lock:
             return [dict(v) for v in self.by_item.get(item_id, [])]
+
+    def unsorted_match(self, item, season, episode):
+        """A download not sorted yet that looks like this episode of `item`
+        (for watch parties: the other person is playing it, so it's wanted now)."""
+        best = None
+        with self._lock:
+            for v in self.videos:
+                if v.get("item") or v.get("how") == "ignored" or v.get("kind") == "extra":
+                    continue
+                g = {"title": v["guess"], "full": v["full"], "title_season": v["name_season"],
+                     "file_season": v["season"], "year": v["year"], "has_eps": bool(v["episodes"])}
+                score = score_file(dict(item), g, v["kind"])
+                if score < 70:
+                    continue
+                if item["format"] == "series":
+                    if episode not in v["episodes"] or v["season"] not in (None, season):
+                        continue
+                if not best or score > best[0]:
+                    best = (score, v)
+        return dict(best[1]) if best else None
 
     def subtitles_for(self, video_path):
         with self._lock:

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,7 +6,7 @@ from unittest import mock
 
 from tests.test_library import add
 from tests.test_scanner import touch
-from watchlist import ai, metadata, sorter
+from watchlist import ai, metadata, net
 from watchlist.server import App
 
 
@@ -130,7 +131,7 @@ class SorterTest(_Base):
         touch(self.dl, "Mystery Thing - 01.mkv")
         replies = {"frirn|": {"decision": "in_list", "item_id": self.frieren["id"], "confidence": 0.95, "why": "typo"},
                    "mystery thing|": {"decision": "in_list", "item_id": self.frieren["id"], "confidence": 0.4}}
-        with mock.patch.object(ai, "sort_downloads", return_value=replies) as asked:
+        with mock.patch.object(ai, "sort_downloads", return_value=(replies, "gemini")) as asked:
             state = self.sort()
         self.assertEqual(asked.call_count, 1)
         self.assertEqual(state["items"][self.frieren["id"]]["episodes"], ["1:7"])
@@ -153,7 +154,7 @@ class SorterTest(_Base):
         self.searches[("anime", "The Apothecary Diaries")] = [result("anime", "The Apothecary Diaries", "54492")]
         replies = {"apo diaries|": {"decision": "add", "confidence": 0.9,
                                     "add": {"type": "anime", "title": "The Apothecary Diaries", "year": 2023}}}
-        with mock.patch.object(ai, "sort_downloads", return_value=replies):
+        with mock.patch.object(ai, "sort_downloads", return_value=(replies, "gemini")):
             state = self.sort()
         self.assertEqual(state["questions"], [])
         self.assertIsNotNone(self.app.store.find_source("mal", "54492"))
@@ -161,42 +162,116 @@ class SorterTest(_Base):
         # A title that can't be found isn't added.
         touch(self.dl, "Made Up - 01.mkv")
         replies = {"made up|": {"decision": "add", "confidence": 0.9, "add": {"type": "anime", "title": "Made Up Show"}}}
-        with mock.patch.object(ai, "sort_downloads", return_value=replies):
+        with mock.patch.object(ai, "sort_downloads", return_value=(replies, "gemini")):
             state = self.sort()
         self.assertEqual(len(state["questions"]), 1)
 
 
-class GeminiTest(unittest.TestCase):
-    def test_picks_the_newest_flash_model(self):
-        names = ["models/gemini-2.0-flash", "models/gemini-2.5-flash", "models/gemini-2.5-flash-lite",
-                 "models/gemini-2.5-flash-image", "models/gemini-2.5-pro", "models/gemini-3-flash-preview",
-                 "models/gemini-2.5-flash-preview-tts", "models/gemini-flash-latest", "models/gemini-2.0-flash-001"]
-        self.assertEqual(ai.rank_models(names)[:4], ["gemini-3-flash-preview", "gemini-2.5-flash",
-                                                     "gemini-2.0-flash", "gemini-2.0-flash-001"])
-        self.assertEqual(ai.rank_models(["models/gemini-3-flash", "models/gemini-3-flash-preview"])[0], "gemini-3-flash")
+class AITest(unittest.TestCase):
+    def setUp(self):
+        for d in (ai._models, ai._good, ai._bad):
+            d.clear()
 
-    def test_ask_reads_the_json_answer_and_falls_back_to_the_next_model(self):
-        ai._models.clear()
-        calls = []
+    def test_gemini_model_order(self):
+        # Names from a real key's model list (October 2026).
+        names = ["models/gemini-2.5-flash", "models/gemini-2.5-pro", "models/gemini-2.5-flash-preview-tts",
+                 "models/gemma-4-31b-it", "models/gemini-flash-latest", "models/gemini-flash-lite-latest",
+                 "models/gemini-2.5-flash-lite", "models/gemini-2.5-flash-image", "models/gemini-3-flash-preview",
+                 "models/gemini-3.1-flash-lite-preview", "models/gemini-3.1-flash-lite", "models/gemini-3.5-flash",
+                 "models/gemini-3.5-flash-lite", "models/gemini-omni-flash-preview", "models/gemini-omni-1.1-flash",
+                 "models/gemini-3.6-flash", "models/gemini-3.7-flash", "models/gemini-3.8-flash",
+                 "models/gemini-4-argon", "models/gemini-3.8-flash-tts", "models/gemini-3.1-flash-image"]
+        self.assertEqual(ai.Gemini.rank(names), [
+            "gemini-flash-latest", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+            "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-flash-lite-latest", "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite-preview"])
 
-        def fake(key, path, body=None):
-            calls.append(path)
-            if path.startswith("/models?"):
-                return {"models": [{"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
-                                   {"name": "models/gemini-2.0-flash", "supportedGenerationMethods": ["generateContent"]}]}
-            if "2.5" in path:
-                raise ai.AIError("Gemini's free limit is used up for now")
+    def test_openai_and_grok_model_order(self):
+        self.assertEqual(ai.OpenAI.rank(["gpt-5.2", "gpt-5.2-mini", "gpt-5-nano", "gpt-5-mini", "gpt-4o-mini",
+                                         "gpt-5.2-2026-01-01", "dall-e-3", "gpt-image-1", "o3"]),
+                         ["gpt-5.2-mini", "gpt-5.2", "gpt-5-mini", "gpt-5-nano", "gpt-4o-mini"])
+        self.assertEqual(ai.XAI.rank(["grok-4.3", "grok-4.3-fast-non-reasoning", "grok-code-fast-1",
+                                      "grok-2-image", "grok-3-mini", "grok-4.20"])[:3],
+                         ["grok-4.3-fast-non-reasoning", "grok-4.3", "grok-4.20"])
+
+    def fake_gemini(self, behaviour, calls):
+        def request(url, service, headers=None, body=None, timeout=20, method=None):
+            calls.append((url, json.dumps(body) if body else ""))
+            if "/models?" in url:
+                return {"models": [{"name": f"models/{m}", "supportedGenerationMethods": ["generateContent"]}
+                                   for m in ("gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash")]}
+            model = url.split("/models/")[1].split(":")[0]
+            result = behaviour.get(model, "ok")
+            if isinstance(result, Exception):
+                raise result
             return {"candidates": [{"content": {"parts": [{"text": '```json\n{"ok": true}\n```'}]}}]}
+        return request
 
-        with mock.patch.object(ai, "_request", side_effect=fake):
-            self.assertEqual(ai.Gemini("k").ask("hi"), {"ok": True})
-            self.assertEqual(ai.test_key("k"), {"ok": True, "model": "gemini-2.5-flash"})
-        self.assertIn("/models/gemini-2.0-flash:generateContent", calls)
+    def test_skips_models_over_their_limit_and_remembers_the_one_that_works(self):
+        calls = []
+        behaviour = {"gemini-flash-latest": net.NetError("x", "http", 429, "quota exceeded"),
+                     "gemini-3.8-flash": net.NetError("Gemini took too long to answer", "timeout")}
+        with mock.patch.object(net, "request_json", side_effect=self.fake_gemini(behaviour, calls)):
+            result = ai.test_key("gemini", "k")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["model"], "gemini-2.5-flash")
+            self.assertEqual(len(result["tried"]), 3)
+            self.assertIn("free limit", result["tried"][0])
+            calls.clear()
+            self.assertEqual(ai.Gemini("k").ask("hi")[0], {"ok": True})
+        self.assertEqual(len(calls), 1)                        # straight to the model that worked
+        self.assertIn('"thinkingBudget": 0', calls[0][1])        # 2.5: no thinking
 
-    def test_bad_key(self):
-        ai._models.clear()
-        with mock.patch.object(ai, "_request", side_effect=ai.AIError("Gemini rejected your key - check it in Settings")):
-            self.assertEqual(ai.test_key("bad"), {"ok": False, "error": "Gemini rejected your key - check it in Settings"})
+    def test_newer_models_think_briefly(self):
+        calls = []
+        with mock.patch.object(net, "request_json", side_effect=self.fake_gemini({}, calls)):
+            ai.Gemini("k").ask("hi")
+        self.assertIn("gemini-flash-latest", calls[-1][0])
+        self.assertIn('"thinkingLevel": "low"', calls[-1][1])
+
+    def test_errors_that_stop_straight_away(self):
+        cases = [(net.NetError("x", "http", 400, "API key not valid. Please pass a valid API key."), "key"),
+                 (net.NetError("x", "http", 400, "User location is not supported for the API use."), "region"),
+                 (net.NetError("couldn't find Gemini's server", "dns"), "offline")]
+        for error, kind in cases:
+            calls = []
+            ai._models.clear()
+            behaviour = {m: error for m in ("gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash")}
+            with mock.patch.object(net, "request_json", side_effect=self.fake_gemini(behaviour, calls)):
+                result = ai.test_key("gemini", "k")
+            self.assertEqual(result["kind"], kind, result)
+            self.assertEqual(len(calls), 2)                    # the list, then one try
+
+    def test_chatgpt_without_credit(self):
+        def request(url, service, headers=None, body=None, timeout=20, method=None):
+            if url.endswith("/models"):
+                return {"data": [{"id": "gpt-5-mini"}]}
+            raise net.NetError("x", "http", 429, "You exceeded your current quota, please check your plan and billing details.")
+        with mock.patch.object(net, "request_json", side_effect=request):
+            result = ai.test_key("openai", "sk-x")
+        self.assertEqual(result["kind"], "credit")
+        self.assertIn("platform.openai.com", result["error"])
+
+    def test_grok_answers_and_options_it_refuses_are_dropped(self):
+        bodies = []
+
+        def request(url, service, headers=None, body=None, timeout=20, method=None):
+            if url.endswith("/models"):
+                return {"data": [{"id": "grok-4.3"}]}
+            bodies.append(dict(body))
+            if "response_format" in body:
+                raise net.NetError("x", "http", 400, "response_format is not supported for this model")
+            return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+        with mock.patch.object(net, "request_json", side_effect=request):
+            self.assertTrue(ai.test_key("xai", "xai-k")["ok"])
+        self.assertNotIn("response_format", bodies[-1])
+
+    def test_falls_back_to_the_next_helper(self):
+        settings = {"gemini_api_key": "g", "openai_api_key": "o", "xai_api_key": ""}
+        with mock.patch.object(ai.Gemini, "ask", side_effect=ai.AIError("limit", "limit")), \
+                mock.patch.object(ai.OpenAI, "ask", return_value=({"answers": []}, "gpt-5-mini")):
+            self.assertEqual(ai.sort_downloads(settings, [], []), ({}, "openai"))
+        self.assertEqual(ai.available({"gemini_api_key": " ", "xai_api_key": "x"}), ["xai"])
 
 
 class RelatedTest(_Base):

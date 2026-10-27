@@ -74,6 +74,7 @@ jobs:
           if ($r.connected -ne $true) { throw "couldn't talk to mpv: $($r.error)" }
           if ($r.finished -ne $true) { throw "playing to the end wasn't noticed (last position $($r.last_position))" }
           if (-not ($r.skip_log -like "opening*")) { throw "the opening skipper didn't work: '$($r.skip_log)'" }
+          if ($r.send_ok -ne $true -or $r.played_after_send -ne $true) { throw "commands sent to the player didn't work (watch parties need them)" }
 
       - name: Start the exe and load the app
         shell: pwsh
@@ -186,6 +187,8 @@ jobs:
               sys.exit(f"playing to the end wasn't noticed: {r}")
           if not r.get("skip_log", "").startswith("opening"):
               sys.exit(f"the opening skipper didn't work: {r}")
+          if not (r.get("send_ok") and r.get("played_after_send")):
+              sys.exit(f"commands sent to the player didn't work (watch parties need them): {r}")
           PY
 
       - name: Start the app and load it

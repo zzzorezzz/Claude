@@ -5,7 +5,6 @@ knows whether a title is on Netflix or HBO Max in Pakistan.
 """
 
 import html
-import json
 import re
 import ssl
 import threading
@@ -13,6 +12,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import net
 
 UA = "Watchlist/1.0 (personal desktop app)"
 TIMEOUT = 15
@@ -53,26 +54,16 @@ def ssl_context():
 
 
 def _get_json(url, headers=None, service="the server"):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json",
-                                               **(headers or {})})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT, context=ssl_context()) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
+        return net.request_json(url, service, headers, timeout=TIMEOUT)
+    except net.NetError as e:
+        if e.status in (401, 403):
             raise MetadataError(f"{service} rejected your key - check it in Settings") from e
-        if e.code == 404:
+        if e.status == 404:
             raise MetadataError(f"{service} doesn't have that title") from e
-        if e.code == 429:
+        if e.status == 429:
             raise MetadataError(f"{service} is rate limiting - try again in a few seconds") from e
-        raise MetadataError(f"{service} returned an error (HTTP {e.code})") from e
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        reason = getattr(e, "reason", e)
-        if isinstance(reason, ssl.SSLError):
-            raise MetadataError(f"couldn't make a secure connection to {service} ({reason})") from e
-        raise MetadataError(f"couldn't reach {service} ({reason}) - are you online?") from e
-    except ValueError as e:
-        raise MetadataError(f"{service} sent an unreadable reply") from e
+        raise MetadataError(str(e)) from e
 
 
 class _Cache:

@@ -99,6 +99,9 @@ function upsert(item) {
 
 async function reload() {
   const data = await api('GET', '/api/state');
+  if (S.status?.party && !data.status.party) {
+    api('GET', '/api/party').then((st) => { if (st.ended) toast(`The watch party ended: ${st.ended}`); }).catch(() => {});
+  }
   S.items = data.items;
   S.collections = data.collections;
   S.status = data.status;
@@ -238,6 +241,8 @@ window.addEventListener('scroll', () => $('#nav').classList.toggle('solid', wind
 /* ============================================================== nav */
 
 function renderNavButtons() {
+  $('#btn-party').classList.toggle('in-party', !!S.status?.party);
+  $('#btn-party').title = S.status?.party ? 'Your watch party' : 'Join a watch party';
   const yearBtn = $('#btn-year');
   yearBtn.textContent = S.sort === 'newest' ? 'Year: newest first ↓' : S.sort === 'oldest' ? 'Year: oldest first ↑' : 'Sort by year';
   yearBtn.classList.toggle('on', S.sort !== 'popular');
@@ -852,7 +857,7 @@ function openQuestions() {
     const fileList = (files) => `<div class="q-files">${files.slice(0, 3).map((f) => `<div>${esc(f)}</div>`).join('')}
       ${files.length > 3 ? `<div class="muted">…and ${files.length - 3} more</div>` : ''}</div>`;
     const suggestions = (q) => (q.suggest || []).length ? `<div class="q-suggest">
-        <span class="muted small">${(q.suggest[0].why || '').includes('Gemini') ? 'Found by Gemini' : 'Found online'} - add it to your list and sort these files there:</span>
+        <span class="muted small">${(q.suggest[0].why || '').includes('AI') ? 'Found with AI' : 'Found online'} - add it to your list and sort these files there:</span>
         <div class="q-chips">${q.suggest.map((x, n) => `<button class="q-chip" data-a="suggest" data-s="${n}" title="${esc(x.relation || x.why || '')}">
           ${x.poster ? `<img src="${esc(x.poster)}" alt="" loading="lazy">` : '<span class="q-chip-ph"></span>'}
           <span><b>${esc(x.title)}</b><small>${[x.year, kindName(x)].filter(Boolean).map(esc).join(' · ')}${x.relation ? ` · ${esc(x.relation)}` : ''}</small></span>
@@ -903,7 +908,7 @@ function openQuestions() {
     const auto = [...(S.library.auto || [])].reverse().slice(0, 25);
     const sortedForYou = auto.length ? `<details class="auto-list" ${qs.length ? '' : 'open'}>
       <summary><b>Sorted for you (${auto.length})</b> - done automatically; undo anything that's wrong</summary>
-      ${auto.map((x) => `<div class="auto-row"><span class="auto-by ${x.by}">${x.by === 'gemini' ? 'Gemini' : 'Search'}</span>
+      ${auto.map((x) => `<div class="auto-row"><span class="auto-by ${x.by === 'search' ? 'search' : 'ai'}">${AI_NAME[x.by] || 'Search'}</span>
         <span class="auto-what"><b>${esc(x.label || x.key)}</b>${x.why ? `<small>${esc(x.why)}</small>` : ''}</span>
         <span class="muted small">${esc(ago(x.at))}</span>
         <button class="btn btn-sm btn-ghost" data-undo="${esc(x.key)}">Undo</button></div>`).join('')}</details>` : '';
@@ -912,7 +917,7 @@ function openQuestions() {
       <h2>Sort your downloads</h2>
       <p class="sub">Tell me where these belong. Answers are remembered, so new episodes of the same show are sorted automatically.</p>
       ${busy}
-      ${S.library.gemini_error ? `<div class="warn small">Gemini: ${esc(S.library.gemini_error)}</div>` : ''}
+      ${S.library.gemini_error ? `<div class="warn small">AI helper: ${esc(S.library.gemini_error)}</div>` : ''}
       ${!qs.length ? '<div class="empty-state">All sorted - nothing needs your help. 🎉</div>' : ''}
       ${section('Not sure which title these are', unsure)}
       ${section('Which episode?', episodes)}
@@ -1016,6 +1021,48 @@ function ago(t) {
   return `${Math.round(s / 86400)} d ago`;
 }
 
+function aiKeyRow(s, provider, label, field, help) {
+  return `<label class="field"><span>${label}</span>
+    <div class="input-row"><input class="input" name="${field}" type="password" value="${esc(s[field] || '')}" placeholder="Optional - paste a key to use it">
+    <button class="btn btn-ghost btn-sm" type="button" data-s="ai-test" data-p="${provider}" data-field="${field}">Test</button></div>
+    <small id="ai-out-${provider}">${s[field] ? '<span class="ok">✓ Key added.</span> ' : ''}${help}</small></label>`;
+}
+
+// Saves the key and checks it answers. Always ends with a clear result.
+async function testAiKey(form, btn) {
+  const provider = btn.dataset.p;
+  const out = $(`#ai-out-${provider}`, form);
+  const started = Date.now();
+  const tick = () => { out.innerHTML = `<span class="testing"><i></i>Testing… ${Math.round((Date.now() - started) / 1000)}s</span> (a slow model is skipped for the next one)`; };
+  tick();
+  const timer = setInterval(tick, 1000);
+  btn.disabled = true;
+  const tried = (r) => (r.tried && r.tried.length > 1
+    ? `<details class="ai-tried"><summary>What was tried</summary>${r.tried.map((t) => `<div>${esc(t)}</div>`).join('')}</details>` : '');
+  try {
+    const r = await api('POST', '/api/settings/ai', { provider, key: form[btn.dataset.field].value.trim() });
+    out.innerHTML = r.ok
+      ? `<span class="ok">✓ Working</span> - using ${esc(r.model)}. Saved.${tried(r)}`
+      : `<span class="bad">✗ ${esc(r.error)}</span>${{
+        key: ' Check you copied the whole key.',
+        credit: '',
+        region: '',
+        limit: ' The key is saved; the app tries again later by itself.',
+        busy: ' The key is saved; the app tries again later by itself.',
+        timeout: ' The key is saved; the app tries again later by itself.',
+        offline: ' The key is saved; the app tries again once it can connect.',
+      }[r.kind] || ''}${tried(r)}`;
+    S.status = (await api('GET', '/api/settings')).status;
+  } catch (err) {
+    out.innerHTML = `<span class="bad">✗ ${esc(err.message)}</span>`;
+  } finally {
+    clearInterval(timer);
+    btn.disabled = false;
+  }
+}
+
+const AI_NAME = { gemini: 'Gemini', openai: 'ChatGPT', xai: 'Grok' };
+
 /* ======================================================== MyAnimeList import */
 
 const MAL_STATUS = { watching: 'Watching', plan_to_watch: 'Plan to watch', on_hold: 'On hold', completed: 'Completed', dropped: 'Dropped' };
@@ -1085,15 +1132,11 @@ function openImportMal() {
 
 /* ======================================================== watch together */
 
-const SYNCPLAY_HELP = `<div class="warn">Watching together uses <b>Syncplay</b>, a free app that keeps both players in step.
-  Install it from syncplay.pl on both computers, then try again.
-  <button class="btn btn-sm btn-white" data-p="get-syncplay">Open syncplay.pl</button></div>`;
-const SYNCPLAY_NOTE = '<p class="muted small">Syncplay opens with everything filled in: click <b>Run Syncplay</b> (untick "Always show this dialog" to skip it next time). Pausing or skipping on either side does the same for both of you.</p>';
+const PARTY_NOTE = '<p class="muted small">Each of you plays your own copy in the built-in player. Pausing, playing or skipping on either side does the same for both of you, the next episode follows along, and the party ends when the host closes their player.</p>';
 
 function partyClicks(wrap) {
-  wrap.addEventListener('click', (e) => {
+  wrap.addEventListener('click', async (e) => {
     const p = e.target.closest('[data-p]')?.dataset.p;
-    if (p === 'get-syncplay') api('POST', '/api/open', { url: 'https://syncplay.pl/' }).catch(fail);
     if (p === 'copy') {
       const code = $('.party-code', wrap).textContent.trim();
       navigator.clipboard?.writeText(code).then(() => toast('Invite copied - send it to them'), () => {
@@ -1101,8 +1144,32 @@ function partyClicks(wrap) {
         getSelection().removeAllRanges(); getSelection().addRange(r);
         toast('Press Ctrl+C (Cmd+C) to copy');
       });
+    } else if (p === 'leave') {
+      try { await api('POST', '/api/party/leave'); toast('You left the watch party'); closeModal(wrap); } catch (err) { fail(err); }
     }
   });
+}
+
+// Who's there and what's playing, kept up to date while the window is open.
+function followParty(wrap, box) {
+  const draw = async () => {
+    if (!wrap.isConnected) return;
+    let st;
+    try { st = await api('GET', '/api/party'); } catch { st = null; }
+    if (st) {
+      box.innerHTML = st.active ? `<div class="party-live">
+          <div class="party-row"><span class="live-dot"></span><b>${st.role === 'host' ? 'Your watch party' : `${esc(st.leader || 'The host')}'s watch party`}</b>
+            <span class="muted small">${st.encrypted ? 'encrypted · ' : ''}${esc(st.server)}</span></div>
+          ${st.playing ? `<div class="small">Playing <b>${esc(st.playing)}</b></div>` : ''}
+          ${st.missing ? `<div class="warn small">They're playing ${esc(st.missing)}, which isn't in your downloads.</div>` : ''}
+          <div class="party-people">${st.people.map((p) => `<span class="person${p.me ? ' me' : ''}">${esc(p.name)}${p.me ? ' (you)' : ''}${p.file ? '' : ' <i>no file</i>'}</span>`).join('')}</div>
+          ${st.people.length < 2 && st.role === 'host' ? '<div class="muted small">Waiting for them to join…</div>' : ''}
+          <button class="btn btn-sm btn-ghost" data-p="leave">${st.role === 'host' ? 'End the watch party' : 'Leave'}</button></div>`
+        : st.ended ? `<div class="warn">The watch party ended: ${esc(st.ended)}.</div>` : '';
+    }
+    setTimeout(draw, 1500);
+  };
+  draw();
 }
 
 function openStartParty(item) {
@@ -1112,38 +1179,52 @@ function openStartParty(item) {
   const options = avail.map((k) => { const [s, n] = k.split(':').map(Number); return `<option value="${k}" ${k === current ? 'selected' : ''}>${esc(epLabel({ season: s, episode: n }))}</option>`; }).join('');
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>${ICON.people} Watch ${esc(item.title)} together</h2>
-    <p class="sub">You each play your own copy, kept in step over the internet.</p>
-    ${S.status.syncplay ? '' : SYNCPLAY_HELP}
+    <p class="sub">With someone on another computer, kept in step over the internet.</p>
+    ${S.status.mpv ? '' : '<div class="warn">This needs the built-in player, which is missing.</div>'}
     ${series && avail.length ? `<label class="field"><span>Episode</span><select class="select" id="party-ep">${options}</select></label>` : ''}
     <div class="btns"><button class="btn btn-red" data-p="start">Start the watch party</button></div>
-    <div id="party-out"></div>${SYNCPLAY_NOTE}</div>`, 'party-modal');
+    <div id="party-out"></div><div id="party-live"></div>${PARTY_NOTE}</div>`, 'party-modal');
   partyClicks(wrap);
   $('[data-p="start"]', wrap).addEventListener('click', async (e) => {
     const [season, episode] = ($('#party-ep', wrap)?.value || current).split(':').map(Number);
     e.target.disabled = true;
+    e.target.textContent = 'Starting…';
     try {
       const r = await api('POST', '/api/party/start', { item_id: item.id, season, episode });
       if (!r.ok) { $('#party-out', wrap).innerHTML = `<div class="warn">${esc(r.message)}</div>`; return; }
+      e.target.closest('.btns').remove();
+      $('#party-ep', wrap)?.closest('.field').remove();
       $('#party-out', wrap).innerHTML = `<div class="party-invite">
-        <p><b>Syncplay is opening ${esc(r.file)}.</b> Send this invite; they paste it into <b>Join a watch party</b> (the ${ICON.people} button at the top of their Watchlist):</p>
+        <p><b>The player is open, paused on ${esc(r.file)}.</b> Send this invite; they paste it into <b>Join a watch party</b> (the ${ICON.people} button at the top of their Watchlist):</p>
         <div class="party-code-row"><code class="party-code">${esc(r.code)}</code><button class="btn btn-sm btn-white" data-p="copy">Copy</button></div>
-        <p class="muted small">Their app finds the same episode in their downloads and joins your room.</p></div>`;
+        <p class="muted small">When they've joined, press Space in the player to start for both of you.
+          Someone using the Syncplay app instead can join server <b>${esc(r.server)}</b>, room <b>${esc(r.room)}</b>.</p></div>`;
+      followParty(wrap, $('#party-live', wrap));
     } catch (err) {
-      if (/Syncplay isn't installed/.test(err.message)) $('#party-out', wrap).innerHTML = SYNCPLAY_HELP;
-      else fail(err);
-    } finally { e.target.disabled = false; }
+      $('#party-out', wrap).innerHTML = `<div class="warn">${esc(err.message)}</div>`;
+    } finally { e.target.disabled = false; if (e.target.isConnected) e.target.textContent = 'Start the watch party'; }
   });
 }
 
-function openJoinParty() {
+async function openJoinParty() {
+  // In a party already: show it.
+  try {
+    const st = await api('GET', '/api/party');
+    if (st.active) {
+      const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+        <h2>${ICON.people} Watch party</h2><div id="party-live"></div>${PARTY_NOTE}</div>`, 'party-modal');
+      partyClicks(wrap);
+      followParty(wrap, $('#party-live', wrap));
+      return;
+    }
+  } catch { /* show the join window */ }
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>${ICON.people} Join a watch party</h2>
     <p class="sub">Paste the invite you were sent. It starts with WLP1.</p>
-    ${S.status.syncplay ? '' : SYNCPLAY_HELP}
     <textarea class="input party-paste" rows="3" placeholder="WLP1.…"></textarea>
     <div id="party-peek"></div>
     <div class="btns"><button class="btn btn-red" data-p="join" disabled>Join</button></div>
-    <div id="party-out"></div>${SYNCPLAY_NOTE}</div>`, 'party-modal');
+    <div id="party-out"></div><div id="party-live"></div>${PARTY_NOTE}</div>`, 'party-modal');
   partyClicks(wrap);
   const box = $('.party-paste', wrap);
   const join = $('[data-p="join"]', wrap);
@@ -1156,7 +1237,7 @@ function openJoinParty() {
     try {
       const inv = await api('POST', '/api/party/peek', { code });
       $('#party-peek', wrap).innerHTML = `<div class="party-what">${esc(inv.title)}${inv.episode ? ` · ${esc(epLabel({ season: inv.season, episode: inv.episode }))}` : ''}
-        <span class="muted small">${inv.in_list ? 'in your list' : 'not in your list yet - it will be added'}</span></div>`;
+        <span class="muted small">${inv.host ? `from ${esc(inv.host)} · ` : ''}${inv.in_list ? 'in your list' : 'not in your list yet - it will be added'}</span></div>`;
       join.disabled = false;
     } catch (err) {
       $('#party-peek', wrap).innerHTML = `<p class="bad small">${esc(err.message)}</p>`;
@@ -1164,10 +1245,14 @@ function openJoinParty() {
   });
   const go = async (path = '') => {
     join.disabled = true;
+    join.textContent = 'Joining…';
     try {
       const r = await api('POST', '/api/party/join', { code: box.value.trim(), path });
       if (r.ok) {
-        $('#party-out', wrap).innerHTML = `<p class="ok"><b>✓ Syncplay is opening ${esc(r.file)}.</b> Enjoy!</p>`;
+        $('#party-out', wrap).innerHTML = `<p class="ok"><b>✓ Joined.</b> Playing your copy: ${esc(r.file)}. It starts when ${esc(r.leader || 'the host')} presses play.</p>`;
+        join.closest('.btns').remove();
+        box.remove();
+        followParty(wrap, $('#party-live', wrap));
         await reload();
         return;
       }
@@ -1178,9 +1263,8 @@ function openJoinParty() {
       });
       await reload();
     } catch (err) {
-      if (/Syncplay isn't installed/.test(err.message)) $('#party-out', wrap).innerHTML = SYNCPLAY_HELP;
-      else fail(err);
-    } finally { join.disabled = false; }
+      $('#party-out', wrap).innerHTML = `<div class="warn">${esc(err.message)}</div>`;
+    } finally { if (join.isConnected) { join.disabled = false; join.textContent = 'Join'; } }
   };
   join.addEventListener('click', () => go());
 }
@@ -1391,7 +1475,7 @@ function drawTitle(wrap) {
       <div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
       <span class="muted small">${done} of ${total || '?'} watched</span>
       <button class="btn btn-ghost btn-sm" data-t="watched">${ICON.check} Mark watched</button>
-      ${S.status.gemini && done > 0 ? '<button class="btn btn-ghost btn-sm" data-t="recap" title="A spoiler-free recap of what you\'ve watched, by Gemini">✨ Previously on…</button>' : ''}</div>`;
+      ${(S.status.ai || []).length && done > 0 ? '<button class="btn btn-ghost btn-sm" data-t="recap" title="A spoiler-free recap of what you\'ve watched, written by AI">✨ Previously on…</button>' : ''}</div>`;
   }
 
   modal.innerHTML = `<button class="modal-close" aria-label="Close">×</button>
@@ -1402,7 +1486,7 @@ function drawTitle(wrap) {
         <div class="btns">
           <button class="btn btn-white" data-t="watch">${ICON.play} ${esc(watchLabel(item))}</button>
           ${hasFiles(item) ? '<button class="btn btn-grey" data-t="vlc" title="Play the file in VLC instead of the built-in player">Play in VLC</button>' : ''}
-          ${hasFiles(item) ? `<button class="btn btn-grey" data-t="party" title="Watch in sync with someone else, each on your own computer (Syncplay)">${ICON.people} Watch together</button>` : ''}
+          ${hasFiles(item) ? `<button class="btn btn-grey" data-t="party" title="Watch in sync with someone else, each on your own computer">${ICON.people} Watch together</button>` : ''}
           <button class="btn btn-grey" data-t="trailer">${ICON.play} ${item.trailer ? 'Trailer' : 'Find trailer'}</button>
           <button class="btn-round" data-t="menu" title="Collections & more">${ICON.plus}</button>
           <button class="btn-round" data-t="remove" title="Remove from list">${ICON.trash}</button>
@@ -1494,8 +1578,8 @@ function drawRelated(wrap) {
     + (entries.length ? order.map((g) => `<div class="rel-group"><h5>${esc(g)}</h5>${groups[g].map(row).join('')}</div>`).join('')
       : `<p class="muted small">${esc(needKey || data.note || 'Nothing related found.')}</p>`)
     + (entries.length && data.note ? `<p class="muted small">${esc(data.note)}</p>` : '')
-    + (item.type !== 'anime' && !S.status.gemini && S.status.tmdb
-      ? '<p class="muted small rel-tip">Tip: with a Gemini key (Settings, optional) this also finds spin-offs with different names.</p>' : '');
+    + (item.type !== 'anime' && !(S.status.ai || []).length && S.status.tmdb
+      ? '<p class="muted small rel-tip">Tip: with an AI key (Settings, optional) this also finds spin-offs with different names.</p>' : '');
 }
 
 async function addRelated(wrap, x, quiet) {
@@ -1536,13 +1620,14 @@ async function relatedClick(wrap, e) {
 
 async function showRecap(item) {
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
-    <h2>Previously on ${esc(item.title)}</h2><p class="sub">Up to ${epLabel(item.progress)} - no spoilers past that. Written by Gemini.</p>
+    <h2>Previously on ${esc(item.title)}</h2><p class="sub" id="recap-sub">Up to ${epLabel(item.progress)} - no spoilers past that. Written by AI.</p>
     <div id="recap">${'<div class="skeleton"><div class="sk-lines"><i></i><i></i><i></i></div></div>'.repeat(2)}</div></div>`, 'recap-modal');
   try {
     const r = await api('POST', `/api/items/${item.id}/recap`, item.progress);
     $('#recap', wrap).innerHTML = r.known && r.points.length
       ? `<ul class="recap">${r.points.map((p, i) => `<li style="--i:${i}">${esc(p)}</li>`).join('')}</ul>`
-      : '<p class="muted">Gemini doesn\'t know this one well enough to recap it without guessing.</p>';
+      : `<p class="muted">${esc(r.by)} doesn't know this one well enough to recap it without guessing.</p>`;
+    $('#recap-sub', wrap).textContent = `Up to ${epLabel(item.progress)} - no spoilers past that. Written by ${r.by}.`;
   } catch (e) {
     $('#recap', wrap).innerHTML = `<div class="warn">${esc(e.message)}</div>`;
   }
@@ -2188,14 +2273,17 @@ async function openSettings() {
         : 'Files are matched to your titles by their names; the app asks about any it isn\'t sure of.'}
         Each computer has its own downloads folder.</small></label>
     <label class="check-row"><input type="checkbox" name="auto_sort" ${s.auto_sort ? 'checked' : ''}> Sort new downloads for me: look up files that aren't in my list on MyAnimeList / TMDB and add them when it's clear what they are (you can undo each one)</label>
-    <h4>Gemini <span class="tag-optional">optional</span></h4>
-    <label class="field"><span>Gemini API key</span>
-      <div class="input-row"><input class="input" name="gemini_api_key" type="password" value="${esc(s.gemini_api_key)}" placeholder="Not needed - leave empty to use the app's own sorting">
-      <button class="btn btn-ghost btn-sm" type="button" data-s="gemini-test">Test</button></div>
-      <small id="gemini-out">${s.gemini_api_key ? '<span class="ok">✓ Gemini is on.</span> ' : ''}Everything works without it: the app's own rules and MyAnimeList / TMDB searches sort your downloads.
-        With a free key, Gemini also looks at files those couldn't place, finds TV spin-offs for the Related panel, and writes "previously on" recaps.
-        To get one: go to <b>aistudio.google.com</b>, sign in with your Google account and click <b>Get API key</b> → Create API key. The newest Flash model is picked for you.
-        Only names are sent (file names and the titles in your list), never your files. Google may use what's sent on the free tier to improve its products.</small></label>
+    <h4>AI helpers <span class="tag-optional">optional</span></h4>
+    <p class="muted small" style="margin-top:-4px">Everything works without them: the app's own rules and MyAnimeList / TMDB searches sort your downloads.
+      With a key, the AI also looks at files those couldn't place, finds TV spin-offs for the Related panel and writes "previously on" recaps.
+      The first helper with a key that answers is used: Gemini, then ChatGPT, then Grok.
+      Only names are sent (file names and the titles in your list), never your files.</p>
+    ${aiKeyRow(s, 'gemini', 'Gemini (Google) - free', 'gemini_api_key',
+      'Free: go to <b>aistudio.google.com</b>, sign in with your Google account, click <b>Get API key</b> → Create API key. Google may use what\'s sent on the free tier to improve its products.')}
+    ${aiKeyRow(s, 'openai', 'ChatGPT (OpenAI)', 'openai_api_key',
+      'From <b>platform.openai.com</b> → API keys. It needs prepaid API credit: ChatGPT\'s free plan only covers the ChatGPT app itself.')}
+    ${aiKeyRow(s, 'xai', 'Grok (xAI)', 'xai_api_key',
+      'From <b>console.x.ai</b> → API keys. It needs API credit: Grok\'s free plan only covers the Grok app itself.')}
     <h4>Watching on your ${pcName()}</h4>
     <label class="field"><span>Player</span>
       <select class="select" name="player">
@@ -2212,13 +2300,9 @@ async function openSettings() {
     <h4>Watch together</h4>
     <label class="field"><span>Your name in watch parties</span>
       <input class="input" name="party_name" value="${esc(s.party_name)}" placeholder="e.g. Ali"></label>
-    <label class="field"><span>Syncplay location</span>
-      <div class="input-row"><input class="input" name="syncplay_path" value="${esc(s.syncplay_path)}" placeholder="${esc(data.status.syncplay || (mac ? '/Applications/Syncplay.app' : 'C:\\Program Files (x86)\\Syncplay\\Syncplay.exe'))}">
-      <button class="btn btn-ghost btn-sm" type="button" data-s="syncplay">Browse</button></div>
-      <small>${data.status.syncplay ? `<span class="ok">✓ Found Syncplay:</span> ${esc(data.status.syncplay)}.` : '<span class="bad">Syncplay isn\'t installed.</span> Get it free from <b>syncplay.pl</b> to watch together.'}</small></label>
     <label class="field"><span>Watch-party server</span>
       <input class="input" name="party_server" value="${esc(s.party_server)}" placeholder="syncplay.pl:8999">
-      <small>Syncplay's free public server works; both of you need the same one.</small></label>
+      <small>A Syncplay server: the free public one works. Only the host's setting counts - it's in the invite.</small></label>
     <div class="btns" style="margin-top:22px"><button class="btn btn-red" type="submit">Save</button>
       <button class="btn btn-ghost" type="button" data-s="cancel">Cancel</button></div>
   </form>`, 'settings-modal');
@@ -2231,8 +2315,9 @@ async function openSettings() {
       vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), sync_folder: f.get('sync_folder'),
       anime_site_url: f.get('anime_site_url'), movie_tv_site_url: f.get('movie_tv_site_url'),
       downloads_folder: f.get('downloads_folder'), player: f.get('player'), queue_next_episodes: form.queue_next_episodes.checked,
-      gemini_api_key: f.get('gemini_api_key'), auto_sort: form.auto_sort.checked, skip_intro: form.skip_intro.checked,
-      party_name: f.get('party_name'), party_server: f.get('party_server'), syncplay_path: f.get('syncplay_path'),
+      gemini_api_key: f.get('gemini_api_key'), openai_api_key: f.get('openai_api_key'), xai_api_key: f.get('xai_api_key'),
+      auto_sort: form.auto_sort.checked, skip_intro: form.skip_intro.checked,
+      party_name: f.get('party_name'), party_server: f.get('party_server'),
     };
   };
   const save = async () => {
@@ -2282,22 +2367,8 @@ async function openSettings() {
           toast('Syncing through that folder now');
           closeModal(wrap); openSettings();
         }
-      } else if (a === 'syncplay') {
-        const { path } = await api('POST', '/api/browse', mac
-          ? { kind: 'file', types: 'app', title: 'Find Syncplay', initial: '/Applications' }
-          : { kind: 'file', types: 'exe', title: 'Find Syncplay.exe', initial: 'C:\\Program Files (x86)\\Syncplay' });
-        if (path) form.syncplay_path.value = path;
-      } else if (a === 'import-mal') {
-        closeModal(wrap);
-        openImportMal();
-      } else if (a === 'gemini-test') {
-        const out = $('#gemini-out', form);
-        out.textContent = 'Testing…';
-        const r = await api('POST', '/api/settings/gemini', { key: form.gemini_api_key.value.trim() });
-        if (r.ok) {
-          await save();
-          out.innerHTML = `<span class="ok">✓ Working</span> - using ${esc(r.model)}. Saved.`;
-        } else out.innerHTML = `<span class="bad">✗ ${esc(r.error)}</span>`;
+      } else if (a === 'ai-test') {
+        await testAiKey(form, e.target.closest('[data-s]'));
       } else if (a === 'sync-off') {
         form.sync_folder.value = '';
         await save();

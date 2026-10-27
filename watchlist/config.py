@@ -46,6 +46,10 @@ DEFAULT_SETTINGS = {
     # Optional: a free Google Gemini API key (aistudio.google.com). Without
     # one, the app's own rules and searches do all the sorting.
     "gemini_api_key": "",
+    # Optional too: OpenAI (ChatGPT) and xAI (Grok) API keys. Their APIs need
+    # prepaid credit; the first helper that answers is used.
+    "openai_api_key": "",
+    "xai_api_key": "",
     # Search MyAnimeList / TMDB for downloads that aren't in your list, and
     # add them when it's clear what they are.
     "auto_sort": True,
@@ -54,14 +58,13 @@ DEFAULT_SETTINGS = {
     # Watch together (Syncplay): your name, the server and Syncplay's location.
     "party_name": "",
     "party_server": "syncplay.pl:8999",
-    "syncplay_path": "",
 }
 
 URL_KEYS = ("netflix_url", "hbomax_url", "fallback_url")
 OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
 TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "sync_folder",
-             "downloads_folder", "last_folder", "gemini_api_key", "party_name", "party_server",
-             "syncplay_path")
+             "downloads_folder", "last_folder", "gemini_api_key", "openai_api_key", "xai_api_key",
+             "party_name", "party_server")
 BOOL_KEYS = ("queue_next_episodes", "auto_sort", "skip_intro")
 
 

@@ -5,7 +5,7 @@ A Netflix-style desktop app for Windows and Mac, for the TV shows, anime and mov
 Two things are optional, and everything works without them:
 
 - **A sync folder.** Without one, your list is saved on this computer only. With one (Google Drive, OneDrive...), your list stays the same on your Windows PC and your Mac.
-- **A Gemini key.** Without one, the app's own rules and MyAnimeList / TMDB searches sort your downloads and find related titles. With a free key, Gemini helps with the files those can't place, finds TV spin-offs and writes recaps.
+- **An AI key** (Gemini for free, or ChatGPT / Grok). Without one, the app's own rules and MyAnimeList / TMDB searches sort your downloads and find related titles. With one, the AI helps with the files those can't place, finds TV spin-offs and writes recaps.
 
 - **Home screen:** three rows (TV Shows, Anime, Movies), each showing your 5–6 most popular titles and a **Show more** tile for the full list.
   - Movies are ordered by box office, TV shows by TMDB popularity, and anime by MyAnimeList members.
@@ -17,7 +17,7 @@ Two things are optional, and everything works without them:
 - **Title page:** backdrop, summary, ratings and an episode list. The trailer only plays when you click it.
   - **Related**, on the right: the other seasons, sequels, prequels, OVAs, specials, films and spin-offs. Each one shows whether it's in your list, on your computer, or waiting in your downloads. Add them one at a time, or with **Add all**.
     - Anime come from MyAnimeList, and film series from TMDB.
-    - TV shows list titles that share their name; with a Gemini key, spin-offs with other names too (each one checked on TMDB).
+    - TV shows list titles that share their name; with an AI key, spin-offs with other names too (each one checked on TMDB).
   - **Extras:** openings, endings, trailers and other bonus videos found with the show's files, kept apart from the episodes.
 - **Import from MyAnimeList:** **Settings → Import my MyAnimeList list…** brings in your list by user name (if it's public) or from MyAnimeList's export file. Your watched episodes set where you're up to.
 - **Downloads:** choose the one folder your downloads go into (**Settings → Your downloads**).
@@ -45,26 +45,40 @@ Two things are optional, and everything works without them:
 
 ### Watch together
 
-**Watch together** on a title page plays an episode in sync with someone else, each of you on your own computer with your own copy of the file. When one of you pauses or skips, so does the other. It uses **Syncplay**, a free app: install it on both computers from <https://syncplay.pl/>.
+**Watch together** on a title page plays an episode in step with someone on another computer. Each of you plays your own copy in the built-in player. When either of you pauses, presses play or skips, the other player does the same. Nothing else needs installing: the app talks to Syncplay's free public server itself.
 
-1. You: open the title, click **Watch together**, pick the episode and click **Start the watch party**. Syncplay opens with everything filled in; click **Run Syncplay**. (Untick "Always show this dialog" to skip that step next time.)
+1. You: open the title, click **Watch together**, pick the episode and click **Start the watch party**. The player opens, paused.
 2. Copy the invite code it shows (it starts with `WLP1.`) and send it to the other person.
-3. Them: click the **people** button at the top of Watchlist, paste the code and click **Join**. Their app finds the same episode in their downloads (adding the show to their list if needed) and joins your room.
+3. Them: click the **people** button at the top of Watchlist, paste the code and click **Join**.
+   - Their app finds the same episode in their own downloads, even if it's named differently or not sorted yet, and adds the show to their list if needed.
+   - If it isn't found, they're asked to choose the file.
+4. Once they've joined, press **Space** in the player to start for both of you.
 
-Both of you need the episode downloaded. If theirs isn't found, they're asked to choose the file. The free public server (`syncplay.pl:8999`) is used unless you change it in Settings.
+While you watch:
 
-### Gemini (optional)
+- When the host moves on to the next episode, the other player loads its own copy of it.
+- When the host closes the player (or ends the party), the other player closes too.
+- Messages appear in the player when someone joins, leaves, pauses or skips.
+- Someone using the Syncplay app can join too, with the server and room name shown under the invite.
 
-1. Go to <https://aistudio.google.com/>, sign in with your Google account and click **Get API key → Create API key**. It's free.
-2. Paste it in **Settings → Gemini** and click **Test**. The newest Flash model is picked for you.
+The free public server (`syncplay.pl:8999`) is used unless you change it in **Settings → Watch together**. The connection is encrypted when the server allows it.
+
+### AI helpers (optional)
+
+The app can use **Gemini**, **ChatGPT** or **Grok** to help. Add a key for any of them in **Settings → AI helpers** and click **Test**. If you add more than one, the first that answers is used, in that order.
+
+- **Gemini is free.** Go to <https://aistudio.google.com/>, sign in with your Google account and click **Get API key → Create API key**. Google may use what's sent on the free tier to improve its products.
+- **ChatGPT and Grok need API credit.** Their free plans only cover their own apps; using them from another app needs an API key with credit, from <https://platform.openai.com/> or <https://console.x.ai/>.
 
 With a key:
 
-- Gemini looks at the downloads that the rules and searches couldn't place. Titles it names are checked on MyAnimeList / TMDB before anything is added, and its decisions are listed under **Sorted for you** like the others.
+- The AI looks at the downloads that the rules and searches couldn't place. Titles it names are checked on MyAnimeList / TMDB before anything is added, and its decisions are listed under **Sorted for you** like the others.
 - The Related panel also finds TV spin-offs, films and specials with other names.
 - **Previously on…** on a title page gives a short, spoiler-free recap up to the episode you're on.
 
-Only names are sent to Google (file names, folder names and the titles in your list), never the files. On the free tier, Google may use what's sent to improve its products. If the free limit runs out, the app carries on without Gemini and tries again later.
+The app picks a quick model for you and moves on to the next one if a model is over its free limit, busy or slow. **Test** says which model worked, or what went wrong (a wrong key, no credit, no connection), and the key is saved either way.
+
+Only names are sent (file names, folder names and the titles in your list), never the files.
 
 ### Your own sites
 
@@ -122,7 +136,7 @@ This is optional: without a sync folder, your list is simply saved on that compu
 From then on, anything you change on one computer shows up on the other within a few seconds of the cloud drive syncing it, even while the app is open.
 
 - **What syncs:** titles and their info, progress and **Mark watched**, where you stopped in each episode, folders, collections and removed titles.
-- **What stays on each computer:** the downloads folder and each show's own folder (Mac and Windows paths are different), your answers in **Sort your downloads**, "Not working" marks, your keys (including Gemini), your own site links, and the VLC, browser and Syncplay locations.
+- **What stays on each computer:** the downloads folder and each show's own folder (Mac and Windows paths are different), your answers in **Sort your downloads**, "Not working" marks, your keys (including the AI keys), your own site links, and the VLC and browser locations.
 
   The video files themselves aren't copied. If they're in your cloud drive too, just choose the folder once on each computer.
 - **Editing on both at once is fine.** Changes are merged title by title, including any "conflicted copy" files the cloud app makes.

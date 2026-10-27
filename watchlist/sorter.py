@@ -4,7 +4,7 @@ their names alone, before you're asked about them.
 1. An OVA, special, film or later season of an anime in your list: its
    MyAnimeList relations are checked for that exact entry.
 2. MyAnimeList and TMDB are searched for the guessed title.
-3. With a Gemini key, Gemini looks at whatever is still left.
+3. With an AI key (Gemini, ChatGPT or Grok), the AI looks at whatever is still left.
 
 A confident answer is applied straight away (adding the title to your list if
 needed) and shown under "Sorted for you", where it can be undone. Anything
@@ -108,12 +108,12 @@ class Sorter:
             for q in todo[:LOOKUPS_PER_PASS]:
                 lib.busy = f'Looking up "{q["guess"]}"…'
                 self._look_up(q, settings)
-        if settings.get("gemini_api_key"):
+        if ai.available(settings):
             waiting = [q for q in lib.pending() if q["kind"] == "title" and q["key"] not in rejected]
             todo = [q for q in waiting
                     if now - (lookups.get(q["key"]) or {}).get("gemini_at", 0) > RETRY_AFTER]
             if todo:
-                lib.busy = "Asking Gemini about your downloads…"
+                lib.busy = f"Asking {ai.NAMES[ai.available(settings)[0]]} about your downloads…"
                 self._ask_gemini(todo[:GEMINI_BATCH], settings)
 
     def _look_up(self, q, settings):
@@ -184,37 +184,38 @@ class Sorter:
                             for s in (lookups.get(q["key"]) or {}).get("suggest", [])[:4]]}
                  for q in todo]
         try:
-            replies = ai.sort_downloads(settings["gemini_api_key"], items, asked)
+            replies, provider = ai.sort_downloads(settings, items, asked)
         except ai.AIError as e:
             lib.gemini_error = str(e)
             for q in todo:   # try again in an hour
                 lib.remember_lookup(q["key"], {"gemini_at": time.time() - RETRY_AFTER + 3600})
             return
         lib.gemini_error = ""
+        who = ai.NAMES[provider]
         for q in todo:
             row = replies.get(q["key"]) or {}
             decision, sure = row.get("decision"), row.get("confidence", 0) >= 0.8
             why = str(row.get("why") or "")[:160]
             note = {"gemini_at": time.time()}
             if decision == "in_list" and row.get("item_id") in by_id:
-                if sure and self._apply(q, {"item_id": row["item_id"]}, "gemini", why):
+                if sure and self._apply(q, {"item_id": row["item_id"]}, provider, why):
                     continue
-                note["hint"] = f'Gemini thinks this is {by_id[row["item_id"]]["title"]}' + (f" ({why})" if why else "")
+                note["hint"] = f'{who} thinks this is {by_id[row["item_id"]]["title"]}' + (f" ({why})" if why else "")
                 note["hint_item"] = row["item_id"]
             elif decision == "add" and isinstance(row.get("add"), dict):
                 found = self._verify(row["add"], settings)
-                if found and sure and self._apply(q, found, "gemini", why):
+                if found and sure and self._apply(q, found, provider, why):
                     continue
                 if found:
                     current = (lookups.get(q["key"]) or {}).get("suggest", [])
                     note["suggest"] = [found] + [s for s in current if s["source_id"] != found["source_id"]][:3]
-                    note["hint"] = f'Gemini thinks this is {found["title"]}' + (f" ({why})" if why else "")
+                    note["hint"] = f'{who} thinks this is {found["title"]}' + (f" ({why})" if why else "")
             elif decision == "not_a_show":
-                note["hint"] = "Gemini thinks this isn't a show or film" + (f" ({why})" if why else "")
+                note["hint"] = f"{who} thinks this isn't a show or film" + (f" ({why})" if why else "")
             lib.remember_lookup(q["key"], note)
 
     def _verify(self, add, settings):
-        """A title Gemini named, checked against MyAnimeList / TMDB, or None."""
+        """A title the AI named, checked against MyAnimeList / TMDB, or None."""
         item_type = add.get("type")
         title = str(add.get("title") or "")
         if item_type not in ("anime", "tv", "movie") or not title:
@@ -230,7 +231,7 @@ class Sorter:
         for r in results:
             names = {norm(n) for n in [r.get("title"), r.get("original_title"), *(r.get("aliases") or [])] if n}
             if want in names and (not year or not r.get("year") or abs(r["year"] - year) <= 1):
-                return _suggestion(r, item_type, "named by Gemini, found on " +
+                return _suggestion(r, item_type, "named by AI, found on " +
                                    ("MyAnimeList" if item_type == "anime" else "TMDB"))
         return None
 

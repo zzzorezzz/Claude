@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -100,6 +101,20 @@ def _player_test(path):
         skip.start()
         done.wait(60)
         report["skip_log"] = log.read_text(encoding="utf-8").strip() if log.exists() else ""
+        # Watch parties send commands while the player runs: start paused, then press play from here.
+        done.clear()
+        live = player.Session(
+            report["mpv"], "test",
+            [{"path": "av://lavfi:testsrc=duration=4:size=160x120:rate=10", "key": "1:3", "label": "send test"}],
+            extra_args=["--vo=null", "--ao=null", "--force-window=no", "--pause"],
+            on_exit=lambda s: done.set())
+        live.start()
+        deadline = time.time() + 30
+        while time.time() < deadline and not (live.connected and live.dur):
+            time.sleep(0.1)
+        report["send_ok"] = bool(live.send(["set_property", "pause", False]))
+        done.wait(30)
+        report["played_after_send"] = bool(live.pos and live.pos > 2)
     Path(path).write_text(json.dumps(report), encoding="utf-8")
     return 0
 

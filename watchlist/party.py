@@ -1,0 +1,523 @@
+"""Watch together, built in.
+
+The app talks to a Syncplay server itself (Syncplay's free public server by
+default), so no other program is needed. Each of you plays your own copy in
+the built-in player and the server keeps you in step: pausing, playing and
+skipping on either side happens on both. It follows Syncplay's own rules
+(protocols.py and client.py in the Syncplay source), so people using the
+Syncplay app can join a room too.
+
+On top of Syncplay, each player tells the room which title and episode it's
+playing. The guest's app uses that to find the same episode in its own
+downloads, moves on when the host does, and closes when the host leaves.
+"""
+
+import json
+import os
+import socket
+import ssl
+import threading
+import time
+
+PROTOCOL_VERSION = "1.2.255"     # what Syncplay clients send, for old servers
+SYNCPLAY_VERSION = "1.7.7"
+FEATURES = {"sharedPlaylists": False, "chat": True, "uiMode": "CLI", "featureList": True,
+            "readiness": True, "managedRooms": True, "persistentRooms": True, "setOthersReadiness": False}
+SEEK_THRESHOLD = 1.0             # Syncplay's numbers (constants.py)
+REWIND_THRESHOLD = 4.0
+SLOWDOWN_THRESHOLD = 1.5
+SLOWDOWN_RESET = 0.1
+SLOWDOWN_RATE = 0.95
+PING_WEIGHT = 0.85
+TICK = 0.2                       # how often the player is checked
+
+
+class PartyError(Exception):
+    pass
+
+
+class _Ping:
+    """Syncplay's round-trip and delay estimate (protocols.PingService)."""
+
+    def __init__(self):
+        self.rtt, self.fd, self.avg = 0.0, 0.0, 0.0
+
+    def receive(self, timestamp, sender_rtt):
+        if not timestamp:
+            return
+        self.rtt = time.time() - timestamp
+        if self.rtt < 0 or sender_rtt < 0:
+            return
+        if not self.avg:
+            self.avg = self.rtt
+        self.avg = self.avg * PING_WEIGHT + self.rtt * (1 - PING_WEIGHT)
+        self.fd = self.avg / 2 + (self.rtt - sender_rtt) if sender_rtt < self.rtt else self.avg / 2
+
+
+class Connection:
+    """JSON lines to and from a Syncplay server, encrypted when it allows."""
+
+    def __init__(self, host, port, timeout=10, context=None):
+        self.host, self.port, self.tls = host, port, False
+        self._lock = threading.Lock()
+        self._buf = b""
+        try:
+            self.sock = self._connect(timeout, context)
+        except (OSError, ssl.SSLError):
+            # A server without a proper certificate: connect without encryption.
+            self.sock = self._connect(timeout, None, tls=False)
+
+    def _connect(self, timeout, context, tls=True):
+        sock = socket.create_connection((self.host, self.port), timeout=timeout)
+        sock.settimeout(timeout)
+        self.sock, self._buf = sock, b""
+        if tls:
+            self.send({"TLS": {"startTLS": "send"}})
+            reply = self.read() or {}
+            if "true" in str((reply.get("TLS") or {}).get("startTLS", "")):
+                ctx = context or ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname=self.host)
+                self.tls = True
+        self.sock = sock
+        return sock
+
+    def send(self, message):
+        data = json.dumps(message).encode("utf-8") + b"\r\n"
+        with self._lock:
+            self.sock.sendall(data)
+
+    def read(self):
+        """The next message, or None when the server has closed the connection."""
+        while True:
+            for sep in (b"\r\n", b"\n"):
+                if sep in self._buf:
+                    line, self._buf = self._buf.split(sep, 1)
+                    line = line.strip()
+                    if not line:
+                        break
+                    try:
+                        return json.loads(line.decode("utf-8"))
+                    except ValueError:
+                        break
+            else:
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    return None
+                self._buf += chunk
+                continue
+
+    def close(self):
+        # shutdown() first: it tells the server at once, and wakes the reading thread.
+        for step in (lambda: self.sock.shutdown(socket.SHUT_RDWR), self.sock.close):
+            try:
+                step()
+            except OSError:
+                pass
+
+
+class Party:
+    """One watch party: a connection to the room and the built-in player.
+
+    role "host" leads (its player moves on to the next episode by itself);
+    "guest" follows `leader` (the host's name): it plays the same episode,
+    found by `resolve(file)`, and leaves when the leader does."""
+
+    def __init__(self, server, room, name, role, resolve=None, leader=None, context=None, on_end=None):
+        host, _, port = server.partition(":")
+        self.server_host, self.server_port = host, int(port or 8999)
+        self.server, self.room, self.name, self.role = server, room, name, role
+        self.resolve, self.leader, self.context = resolve, leader, context
+        self.on_end = on_end or (lambda party, reason: None)
+        self.me = name
+        self.people = {}             # name -> file info
+        self.session = None
+        self.conn = None
+        self.active = False
+        self.ended = ""
+        self.missing = ""            # what the leader plays that this computer doesn't have
+        self.lock = threading.RLock()
+        self._joined = threading.Event()
+        self._listed = threading.Event()
+        self._ping = _Ping()
+        self._client_ignoring = 0
+        self._server_ignoring = 0
+        self._player_pos, self._player_paused, self._player_at = 0.0, True, None
+        self._global_pos, self._global_paused, self._global_at = 0.0, True, None
+        self._speed_changed = False
+        self._quiet_until = 0.0      # just moved the player ourselves: don't read that as you
+        self._file_key = None        # what's loaded, as announced
+        self._announced = False
+        self._init_pending = False   # a guest's new file waits for the room's position
+        self._leader_file = None
+        self._last_leader_key = None
+
+    # ---- connecting
+
+    def connect(self, timeout=10):
+        try:
+            self.conn = Connection(self.server_host, self.server_port, timeout, self.context)
+            self.conn.send({"Hello": {"username": self.name, "room": {"name": self.room},
+                                      "version": PROTOCOL_VERSION, "realversion": SYNCPLAY_VERSION,
+                                      "features": FEATURES}})
+        except OSError as e:
+            raise PartyError(f"couldn't connect to the watch-party server {self.server} ({e})") from e
+        self.active = True
+        threading.Thread(target=self._read_loop, daemon=True).start()
+        if not self._joined.wait(timeout):
+            self.leave("the watch-party server didn't answer")
+            raise PartyError(f"the watch-party server {self.server} didn't answer")
+        if self.ended:
+            raise PartyError(self.ended)
+        self.conn.send({"List": None})
+        self._listed.wait(5)
+        threading.Thread(target=self._tick_loop, daemon=True).start()
+        return self
+
+    def attach(self, session):
+        """Follow this player window (and leave the party when it's closed)."""
+        with self.lock:
+            self.session = session
+            self._announced = False
+            self._file_key = None
+            self._player_at = None
+            if self.role == "guest":
+                self._init_pending = True
+        session.listeners.append(self._player_message)
+
+    def leave(self, reason="you left"):
+        with self.lock:
+            if not self.active and self.ended:
+                return
+            self.active = False
+            self.ended = self.ended or reason
+        if self.conn:
+            self.conn.close()
+        self.on_end(self, self.ended)
+
+    # ---- what others see
+
+    def leader_name(self):
+        if self.role == "host":
+            return self.me
+        if self.leader and self.leader in self.people:
+            return self.leader
+        return next((n for n, f in self.people.items() if n != self.me and f), self.leader)
+
+    def leader_file(self):
+        name = self.leader_name()
+        return self.people.get(name) if name else None
+
+    def status(self):
+        with self.lock:
+            entry = self.session.current() if self.session and not self.session.ended else None
+            return {"active": self.active, "role": self.role, "room": self.room, "server": self.server,
+                    "me": self.me, "leader": self.leader_name(),
+                    "people": [{"name": n, "file": (f or {}).get("name", ""), "me": n == self.me}
+                               for n, f in sorted(self.people.items())],
+                    "playing": (entry or {}).get("label", ""), "missing": self.missing,
+                    "ended": self.ended, "encrypted": bool(self.conn and self.conn.tls)}
+
+    def osd(self, text, seconds=4):
+        if self.session:
+            self.session.send(["show-text", text, int(seconds * 1000)])
+
+    # ---- messages from the server
+
+    def _read_loop(self):
+        reason = "the connection to the watch party was lost"
+        try:
+            self.conn.sock.settimeout(30)
+            while self.active:
+                msg = self.conn.read()
+                if msg is None:
+                    break
+                for command, value in msg.items():
+                    self._handle(command, value)
+        except (OSError, ValueError):
+            pass
+        if self.active:
+            self.leave(reason)
+
+    def _handle(self, command, value):
+        with self.lock:
+            if command == "Hello":
+                self.me = value.get("username") or self.me
+                self.people.setdefault(self.me, None)
+                self._joined.set()
+            elif command == "Error":
+                self.ended = (value or {}).get("message") or "the watch-party server refused"
+                self._joined.set()
+                self.active = False
+            elif command == "List":
+                # Servers that don't keep rooms apart list everyone: only this room counts.
+                self.people = {name: (info or {}).get("file") or None
+                               for name, info in ((value or {}).get(self.room) or {}).items()}
+                self.people.setdefault(self.me, None)
+                self._listed.set()
+                self._follow_leader()
+            elif command == "Set":
+                self._handle_set(value or {})
+            elif command == "State":
+                self._handle_state(value or {})
+            elif command == "Chat":
+                self.osd(f'{value.get("username")}: {value.get("message")}', 6)
+
+    def _handle_set(self, settings):
+        users = settings.get("user") or {}
+        for name, info in users.items():
+            info = info or {}
+            if (info.get("room") or {}).get("name", self.room) != self.room:
+                if name in self.people and name != self.me:
+                    info = {"event": {"left": True}}   # moved to another room
+                else:
+                    continue
+            event = info.get("event") or {}
+            if event.get("left"):
+                was_leader = self.role == "guest" and name != self.me and name == self.leader_name()
+                self.people.pop(name, None)
+                if was_leader:
+                    self.osd(f"{name} left - the watch party is over", 5)
+                    threading.Thread(target=self._end_after_leader_left, args=(name,), daemon=True).start()
+                elif name != self.me:
+                    self.osd(f"{name} left the watch party")
+                continue
+            if event.get("joined"):
+                self.people.setdefault(name, None)
+                if name != self.me:
+                    self.osd(f"{name} joined the watch party"
+                             + (" - press Space when you're both ready" if self.role == "host" else ""), 6)
+            if "file" in info:
+                self.people[name] = info["file"] or None
+                if name != self.me:
+                    self._follow_leader()
+
+    def _end_after_leader_left(self, name):
+        time.sleep(3)
+        if self.session and not self.session.ended:
+            self.session.stop()
+        self.leave(f"{name} left")
+
+    # ---- a guest following the host
+
+    def _follow_leader(self):
+        if self.role != "guest" or not self.resolve:
+            return
+        file_ = self.leader_file()
+        if not file_:
+            return
+        key = json.dumps(file_, sort_keys=True)
+        if key == self._last_leader_key:
+            return
+        self._last_leader_key = key
+        threading.Thread(target=self._switch_to, args=(file_,), daemon=True).start()
+
+    def _switch_to(self, file_):
+        entry = self.resolve(file_)
+        with self.lock:
+            if not entry:
+                self.missing = file_.get("name", "")
+                label = (file_.get("watchlist") or {}).get("label") or file_.get("name", "that episode")
+                self.osd(f"You don't have {label} - choose it in Watchlist to keep watching", 8)
+                return
+            self.missing = ""
+            session = self.session
+            if not session or session.ended:
+                return   # joining: the app opens the player itself
+            current = session.current()
+            if current and current.get("path") == entry["path"]:
+                return
+            self._init_pending = True
+            self._announced = False
+            self._file_key = None
+        session.replace(entry)
+        self.osd(f"Now playing {entry.get('label') or ''}".strip())
+
+    # ---- keeping the players together (Syncplay's client.py)
+
+    def _player_message(self, session, msg):
+        if msg.get("event") == "property-change" and msg.get("name") in ("duration", "playlist-pos"):
+            with self.lock:
+                if msg.get("name") == "playlist-pos":
+                    self._announced = False
+                    if self.role == "guest":
+                        self._init_pending = True
+
+    def _tick_loop(self):
+        while self.active:
+            time.sleep(TICK)
+            session = self.session
+            if not session:
+                continue
+            if session.ended:
+                self.leave("the player was closed")
+                return
+            try:
+                with self.lock:
+                    self._announce_file(session)
+                    self._update_player(session)
+            except OSError:
+                pass
+
+    def _announce_file(self, session):
+        """Tell the room what's playing once its length is known."""
+        entry = session.current()
+        if self._announced or not entry or not session.dur or session.pos is None:
+            return
+        meta = dict(entry.get("party") or {})
+        meta["label"] = entry.get("label") or ""
+        try:
+            size = os.path.getsize(entry["path"])
+        except OSError:
+            size = 0
+        file_ = {"name": os.path.basename(entry["path"]), "duration": round(session.dur, 3), "size": size,
+                 "watchlist": meta}
+        self.conn.send({"Set": {"file": file_}})
+        self.people[self.me] = file_
+        self._announced = True
+        self._file_key = entry["path"]
+        if self.role == "host":
+            # The host decides where a new episode starts (its own place in it).
+            pos = session.position() or 0.0
+            self._player_pos, self._player_paused, self._player_at = pos, session.paused, time.time()
+            self._global_pos, self._global_paused, self._global_at = pos, session.paused, time.time()
+            self._send_state(pos, session.paused, True, None, True)
+
+    def _ready(self, session):
+        return session.connected and session.dur is not None and session.pos is not None and self._announced
+
+    def _player_position(self):
+        if self._player_at is None:
+            return self._global_position() if self._global_at else 0.0
+        if self._player_paused:
+            return self._player_pos
+        return self._player_pos + (time.time() - self._player_at)
+
+    def _global_position(self):
+        if self._global_at is None:
+            return 0.0
+        if self._global_paused:
+            return self._global_pos
+        return self._global_pos + (time.time() - self._global_at)
+
+    def _changes(self, paused, position):
+        pause_change = (self._player_paused if self._player_at else True) != paused and \
+            (self._global_paused if self._global_at else True) != paused
+        seeked = abs(self._player_position() - position) > SEEK_THRESHOLD and \
+            abs(self._global_position() - position) > SEEK_THRESHOLD
+        return pause_change, seeked
+
+    def _update_player(self, session):
+        """You paused, played or skipped: tell the room."""
+        if not self._ready(session) or self._init_pending:
+            return
+        if time.time() < self._quiet_until:
+            return
+        paused, position = session.paused, session.position()
+        pause_change, seeked = self._changes(paused, position)
+        first = self._player_at is None
+        self._player_pos, self._player_paused, self._player_at = position, paused, time.time()
+        if self._global_at and not first and (pause_change or seeked):
+            self._send_state(position, paused, seeked, None, True)
+
+    def _handle_state(self, state):
+        latency = None
+        age = 0.0
+        ignore = state.get("ignoringOnTheFly") or {}
+        if "server" in ignore:
+            self._server_ignoring = ignore["server"]
+            self._client_ignoring = 0
+        elif "client" in ignore and ignore["client"] == self._client_ignoring:
+            self._client_ignoring = 0
+        playstate = state.get("playstate")
+        ping = state.get("ping") or {}
+        latency = ping.get("latencyCalculation")
+        if "clientLatencyCalculation" in ping:
+            self._ping.receive(ping["clientLatencyCalculation"], ping.get("serverRtt") or 0)
+            age = self._ping.fd
+        session = self.session
+        ready = session is not None and not session.ended and self._ready(session)
+        if playstate is not None and not self._client_ignoring and ready:
+            position = playstate.get("position") or 0.0
+            paused = playstate.get("paused")
+            if paused is not None:
+                if not paused:
+                    position += age
+                self._apply_room_state(session, position, paused, playstate.get("doSeek"), playstate.get("setBy"))
+        if ready and not self._init_pending and self._player_at is not None and time.time() >= self._quiet_until:
+            position = session.position()
+            paused = session.paused
+            pause_change, seeked = self._changes(paused, position)
+            self._send_state(position, paused, seeked, latency, pause_change)
+        else:
+            self._send_state(None, None, False, latency, False)
+
+    def _apply_room_state(self, session, position, paused, do_seek, set_by):
+        if self.role == "guest" and self._init_pending:
+            # Starting a file: go to where the room is, playing or paused like the room.
+            leader = self.leader_file() or {}
+            mine = self.people.get(self.me) or {}
+            if leader.get("watchlist") and mine.get("watchlist") and \
+                    leader["watchlist"].get("key") != mine["watchlist"].get("key"):
+                return   # still on another episode; the switch is on its way
+            self._quiet_until = time.time() + 1.5
+            session.send(["seek", position, "absolute"], ["set_property", "pause", paused])
+            self._player_pos, self._player_paused, self._player_at = position, paused, time.time()
+            self._global_pos, self._global_paused, self._global_at = position, paused, time.time()
+            self._init_pending = False
+            return
+        pause_changed = paused != self._global_paused or paused != self._player_paused
+        diff = self._player_position() - position
+        first = self._global_at is None
+        self._global_pos, self._global_paused, self._global_at = position, paused, time.time()
+        if first:
+            return
+        commands = []
+        if do_seek and set_by != self.me:
+            commands.append(["seek", position, "absolute"])
+            self._player_pos, self._player_at = position, time.time()
+            if set_by:
+                self.osd(f"{set_by} skipped", 2)
+        elif diff > REWIND_THRESHOLD and set_by != self.me:
+            commands.append(["seek", position, "absolute"])
+            self._player_pos, self._player_at = position, time.time()
+        elif not do_seek and not paused:
+            if diff > SLOWDOWN_THRESHOLD and not self._speed_changed and set_by != self.me:
+                commands.append(["set_property", "speed", SLOWDOWN_RATE])
+                self._speed_changed = True
+            elif self._speed_changed and diff < SLOWDOWN_RESET:
+                commands.append(["set_property", "speed", 1.0])
+                self._speed_changed = False
+        if pause_changed and paused != self._player_paused:
+            if paused and set_by != self.me:
+                commands.append(["seek", position, "absolute"])
+            commands.append(["set_property", "pause", paused])
+            self._player_paused = paused
+            self._player_at = time.time()
+            if set_by and set_by != self.me:
+                self.osd(f"{set_by} {'paused' if paused else 'pressed play'}", 2)
+        if commands:
+            self._quiet_until = time.time() + 1.0
+            session.send(*commands)
+
+    def _send_state(self, position, paused, do_seek, latency, state_change):
+        state = {}
+        if (self._client_ignoring == 0 or self._server_ignoring != 0) and position is not None and paused is not None:
+            state["playstate"] = {"position": position, "paused": paused}
+            if do_seek:
+                state["playstate"]["doSeek"] = True
+        state["ping"] = {"clientLatencyCalculation": time.time(), "clientRtt": self._ping.rtt}
+        if latency:
+            state["ping"]["latencyCalculation"] = latency
+        if state_change:
+            self._client_ignoring += 1
+        if self._server_ignoring or self._client_ignoring:
+            state["ignoringOnTheFly"] = {}
+            if self._server_ignoring:
+                state["ignoringOnTheFly"]["server"] = self._server_ignoring
+                self._server_ignoring = 0
+            if self._client_ignoring:
+                state["ignoringOnTheFly"]["client"] = self._client_ignoring
+        try:
+            self.conn.send({"State": state})
+        except OSError:
+            pass

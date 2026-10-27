@@ -142,6 +142,9 @@ class Session:
         self.on_finished = on_finished or (lambda *a: None)
         self.on_exit = on_exit or (lambda *a: None)
         self.index, self.pos, self.dur, self.paused = 0, None, None, False
+        self.pos_at = 0.0            # when pos was last reported (time.monotonic())
+        self.listeners = []          # called with every message from mpv (watch parties)
+        self._pending_sub = None
         self.connected, self.error, self.ended = False, "", False
         self.done = set()
         self.proc = None
@@ -212,11 +215,14 @@ class Session:
                 if event == "property-change":
                     name, data = msg.get("name"), msg.get("data")
                     if name == "time-pos" and data is not None:
-                        self.pos = float(data)
+                        self.pos, self.pos_at = float(data), time.monotonic()
                         self._save()
                     elif name == "duration" and data is not None:
                         self.dur = float(data)
                     elif name == "pause":
+                        if self.pos is not None:
+                            # Estimates of where playback is restart from here.
+                            self.pos, self.pos_at = self.position(), time.monotonic()
                         self.paused = bool(data)
                         if self.paused:
                             self._save(force=True)
@@ -225,6 +231,14 @@ class Session:
                         self.index, self.pos, self.dur = data, None, None
                 elif event == "end-file" and msg.get("reason") == "eof":
                     self._wrap_up_current(reached_end=True)
+                elif event == "file-loaded" and self._pending_sub:
+                    self.send(["sub-add", self._pending_sub, "select"])
+                    self._pending_sub = None
+                for listener in list(self.listeners):
+                    try:
+                        listener(self, msg)
+                    except Exception:  # noqa: BLE001 - a listener mustn't stop playback being followed
+                        pass
         except OSError as e:
             self.error = f"couldn't connect to the player ({e})"
         finally:
@@ -243,6 +257,42 @@ class Session:
                 except OSError:
                     pass
             self.on_exit(self)
+
+    def position(self):
+        """Where playback is now (moving on from the last report while playing)."""
+        if self.pos is None:
+            return None
+        if self.paused:
+            return self.pos
+        return self.pos + max(0.0, time.monotonic() - self.pos_at)
+
+    def send(self, *commands):
+        """Send commands to mpv on a connection of their own. (On Windows the
+        following connection only reads, so commands can't go through it.)"""
+        if self.ended or not self.connected:
+            return False
+        try:
+            conn = _Connection(self.address, timeout=3)
+        except OSError:
+            return False
+        try:
+            conn.send(*commands)
+            if sys.platform != "win32":
+                time.sleep(0.05)   # let mpv read them before the socket closes
+            return True
+        except OSError:
+            return False
+        finally:
+            conn.close()
+
+    def replace(self, entry):
+        """Play a different file in the same window (a watch party moving on)."""
+        self._wrap_up_current()
+        self.entries, self.index, self.pos, self.dur = [entry], 0, None, None
+        self._pending_sub = entry.get("sub")
+        cmds = [["set_property", "force-media-title", entry.get("label") or Path(entry["path"]).name],
+                ["loadfile", entry["path"], "replace"]]
+        return self.send(*cmds)
 
     def stop(self):
         """Close the player window (saving your place first)."""

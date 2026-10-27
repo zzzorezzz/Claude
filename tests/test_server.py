@@ -8,7 +8,7 @@ from unittest import mock
 
 from tests import fixtures
 from tests.test_scanner import touch
-from watchlist import launcher, metadata
+from watchlist import launcher, metadata, player
 from watchlist.server import App, make_server
 
 
@@ -32,6 +32,8 @@ class ServerTest(unittest.TestCase):
             (mock.patch.object(launcher, "_spawn", side_effect=self.spawned.append), None),
             (mock.patch.object(launcher.webbrowser, "open", side_effect=lambda url, new=0: self.opened.append(url) or True), None),
             (mock.patch.object(launcher, "find_vlc", return_value="C:/VLC/vlc.exe"), None),
+            # These tests play in VLC; the built-in player has tests of its own.
+            (mock.patch.object(player, "find_mpv", return_value=""), None),
         ]:
             target.start()
             self.addCleanup(target.stop)
