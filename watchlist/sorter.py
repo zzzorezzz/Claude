@@ -158,6 +158,8 @@ class Sorter:
 
     def _from_search(self, q, settings):
         scored = []
+        if len(q["guess"]) < 3:
+            return None, []   # too short to search for
         for item_type in _type_order(q, settings):
             query = q["guess"] if not q.get("season") or q["season"] == 1 or item_type != "anime" \
                 else f'{q["guess"]} season {q["season"]}'
