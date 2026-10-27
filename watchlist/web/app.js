@@ -433,6 +433,7 @@ function viewAction(name, data) {
   else if (name === 'search-online') openAdd(data.type, S.query.trim());
   else if (name === 'set-downloads') chooseDownloadsFolder();
   else if (name === 'questions') openQuestions();
+  else if (name === 'sort-now') sortNow();
   else if (name === 'rescan') {
     toast('Looking through your downloads…');
     api('POST', '/api/library/rescan').then(() => reload()).then(() => toast('Downloads updated')).catch(fail);
@@ -542,7 +543,8 @@ function questionsBanner() {
   if (q.length) parts.push(`<b>${q.length} download${q.length === 1 ? '' : 's'} need${q.length === 1 ? 's' : ''} your help</b> to be sorted`);
   if (unknown.length) parts.push(`${unknown.length} show${unknown.length === 1 ? '' : 's'} in your downloads ${unknown.length === 1 ? "isn't" : "aren't"} in your list`);
   return `<div class="help-banner">${parts.join(' · ')}<span class="spacer"></span>
-    <button class="btn btn-sm btn-white" data-do="questions">Sort them</button></div>`;
+    <button class="btn btn-sm btn-ghost" data-do="sort-now" title="Search for them and ask the AI now">✨ Sort now</button>
+    <button class="btn btn-sm btn-white" data-do="questions">Sort them myself</button></div>`;
 }
 
 function downloadsSectionHTML() {
@@ -914,8 +916,10 @@ function openQuestions() {
         <button class="btn btn-sm btn-ghost" data-undo="${esc(x.key)}">Undo</button></div>`).join('')}</details>` : '';
     const busy = S.library.busy ? `<div class="sorting-now"><i></i>${esc(S.library.busy)}</div>` : '';
     $('.modal', wrap).innerHTML = `<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
-      <h2>Sort your downloads</h2>
-      <p class="sub">Tell me where these belong. Answers are remembered, so new episodes of the same show are sorted automatically.</p>
+      <div class="q-title"><h2>Sort your downloads</h2>
+        ${qs.some((q) => q.kind === 'title') ? `<button class="btn btn-sm btn-white" data-sortnow ${S.library.sort_now?.running ? 'disabled' : ''}>✨ ${S.library.sort_now?.running ? 'Sorting…' : 'Sort now'}</button>` : ''}</div>
+      <p class="sub">Tell me where these belong, or press <b>Sort now</b> to have the app search for them and ask the AI. Answers are remembered, so new episodes of the same show are sorted automatically.</p>
+      ${sortNowReport()}
       ${busy}
       ${S.library.gemini_error ? `<div class="warn small">AI helper: ${esc(S.library.gemini_error)}</div>` : ''}
       ${!qs.length ? '<div class="empty-state">All sorted - nothing needs your help. 🎉</div>' : ''}
@@ -930,7 +934,7 @@ function openQuestions() {
   // Redrawn when the background sorter changes something, unless you're typing.
   let lastSig = '';
   const sig = () => JSON.stringify([(S.library.questions || []).map((q) => [q.key, q.sorting, q.hint, (q.suggest || []).length]),
-    (S.library.auto || []).length, S.library.busy, S.library.gemini_error]);
+    (S.library.auto || []).length, S.library.busy, S.library.gemini_error, S.library.sort_now]);
   S.redrawQuestions = () => {
     if (!wrap.isConnected) { S.redrawQuestions = null; return; }
     const active = document.activeElement;
@@ -958,6 +962,7 @@ function openQuestions() {
     answer({ kind: 'title', key: q.key, item: pick.value }, pick.closest('.q-card')).catch(fail);
   });
   wrap.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-sortnow]')) { sortNow(); return; }
     const undo = e.target.closest('[data-undo]');
     if (undo) {
       const row = undo.closest('.auto-row');
@@ -1004,6 +1009,34 @@ function openQuestions() {
   });
   lastSig = sig();
   draw();
+}
+
+// Sort now: search for and ask the AI about every waiting download, and follow along.
+async function sortNow() {
+  if (S.library.sort_now?.running) return;
+  try {
+    S.library = await api('POST', '/api/library/sort');
+    S.library.sort_now = { ...(S.library.sort_now || {}), running: true };
+    if ($$('#modal-root .questions-modal').length && S.redrawQuestions) S.redrawQuestions(); else openQuestions();
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1200));
+      S.library = await api('GET', '/api/library');
+      if (S.redrawQuestions) S.redrawQuestions();
+      if (!S.library.sort_now?.running) break;
+    }
+    await reload();
+    const r = S.library.sort_now?.last;
+    if (r) toast(r.sorted ? `Sorted ${r.sorted} download${r.sorted === 1 ? '' : 's'}${r.left ? ` · ${r.left} still need you` : ''}`
+      : r.error ? `Nothing more sorted: ${r.error}` : 'Nothing more could be sorted for sure - the rest need you', r.sorted || !r.error ? '' : 'error');
+  } catch (err) { fail(err); }
+}
+
+function sortNowReport() {
+  const r = S.library.sort_now?.last;
+  if (!r || S.library.sort_now.running || Date.now() / 1000 - r.at > 600) return '';
+  const parts = [r.sorted ? `<b>Sorted ${r.sorted}</b>${r.ai ? ` (with ${esc(r.ai)})` : ''}` : 'Nothing more could be sorted for sure'];
+  if (r.suggested) parts.push(`${r.suggested} with a suggestion below`);
+  return `<div class="sortnow-report ${r.error && !r.sorted ? 'warn' : ''}">${parts.join(' · ')}${r.error ? ` - ${esc(r.error)}` : ''}</div>`;
 }
 
 function kindName(x) {

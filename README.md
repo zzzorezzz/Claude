@@ -25,6 +25,7 @@ Two things are optional, and everything works without them:
   - It tells episodes, OVAs, specials, films and extras apart, using the file and folder names, the size, and what MyAnimeList says each title is.
   - **Shows that aren't in your list are found for you.** It searches MyAnimeList and TMDB, and an OVA, special, film or second season of an anime you have is found through that anime's MyAnimeList relations. When it's clear what a file is, the title is added and the file sorted. Everything done this way is listed under **Sorted for you**, where **Undo** puts it back (and removes the title it added).
     - To decide everything yourself, untick **Sort new downloads for me** in Settings. What was found is then shown as a suggestion.
+  - **Sort now** (in **Sort your downloads**, and in the banner above your downloads) does all of this straight away for everything waiting: it searches again and asks your AI helper about the rest, then says how many it sorted. Pressing it also sorts when **Sort new downloads for me** is off, and gives an AI helper that's resting after being busy another go.
   - When it still isn't sure (a typo, an unnumbered file, a subtitle without a video), it asks you in **Sort your downloads**, with what it found. Your answer is remembered, so new episodes of that show are sorted on their own.
   - The home screen starts with **Downloaded**: rows for anime, TV shows and movies you have files for. **Your list** below it still shows everything.
 - **Watch now:** your files come first, then online.
@@ -126,6 +127,11 @@ To put it on the taskbar or Start menu, right-click `Watchlist.exe` and choose *
 
    After that it opens normally. This works on Apple Silicon Macs (M1 and newer).
 5. In the app, open **Settings** and paste your TMDB token and MyAnimeList Client ID, as on Windows.
+
+Watchlist never makes itself the default app for your videos: its player is only used for what you play from the app.
+Earlier versions could take over as the default video player.
+To give that back to VLC, select a video in Finder, press **Cmd+I** (Get Info), choose **VLC** under **Open with** and click **Change All…**.
+Do this once for each kind of video you have (for example once for an `.mkv` and once for an `.mp4`).
 
 ## Syncing between Windows and Mac
 

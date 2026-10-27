@@ -873,9 +873,12 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.library.state()
 
     def api_library_sort(self, body):
-        """Look up waiting downloads now rather than on the next background pass."""
-        threading.Thread(target=self.app.sorter.run_once, daemon=True).start()
-        return {"ok": True}
+        """Sort now: search for and ask the AI about every waiting download,
+        in the background; the window follows it through /api/library."""
+        if not self.app.sorter.now.get("running"):
+            self.app.sorter.now = {"running": True, "last": self.app.sorter.now.get("last")}
+            threading.Thread(target=self.app.sorter.run_now, daemon=True).start()
+        return self.app.library.state()
 
     def api_related(self, body, item_id):
         return self.app.related(self.app.item(item_id), fresh=self.query.get("fresh") == "1")

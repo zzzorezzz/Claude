@@ -618,3 +618,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 .person i { color: var(--muted); font-style: normal; font-size: 11px; }
 #btn-party { position: relative; }
 #btn-party.in-party::after { content: ""; position: absolute; top: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: live 1.6s ease-out infinite; }
+.q-title { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding-right: 40px; }
+.q-title h2 { margin: 0; }
+.sortnow-report { margin: -6px 0 14px; padding: 10px 12px; border-radius: 6px; background: rgba(70, 211, 105, .1); border: 1px solid rgba(70, 211, 105, .35); font-size: 14px; animation: rise .35s ease both; }
+.sortnow-report.warn { background: #2b1a00; border-color: #7a4b00; color: #ffd28a; }

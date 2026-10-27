@@ -31,7 +31,8 @@ _lock = threading.Lock()
 _models = {}              # (provider, key) -> (ranked model names, when)
 _good = {}                # (provider, key) -> the model that last answered
 _bad = {}                 # (provider, key, model) -> skip until
-_resting = {}             # (provider, key) -> (until, why)
+_resting = {}             # (provider, key) -> (until, why, kind)
+SHORT_RESTS = {"busy", "timeout", "offline", "limit", "model"}   # skipped when you press Sort now
 
 
 class AIError(Exception):
@@ -449,7 +450,7 @@ def resting(settings):
     """{provider: (seconds left, why)} for helpers being left alone for now."""
     now = time.time()
     with _lock:
-        return {p: (int(until - now), why) for (p, k), (until, why) in _resting.items()
+        return {p: (int(until - now), why) for (p, k), (until, why, _kind) in _resting.items()
                 if until > now and settings.get(KEY_SETTINGS[p], "").strip() == k}
 
 
@@ -457,20 +458,21 @@ def _rest(provider, key, err):
     seconds = REST.get(err.kind)
     if seconds:
         with _lock:
-            _resting[(provider, key)] = (time.time() + seconds, str(err))
+            _resting[(provider, key)] = (time.time() + seconds, str(err), err.kind)
 
 
-def ask(settings, prompt, timeout=60, budget=None):
+def ask(settings, prompt, timeout=60, budget=None, fresh=False):
     """(answer, provider) from the first helper that answers. A helper that
     fails as a whole (out for the day, overloaded, unreachable...) is left
-    alone for a while, and the next one is asked instead."""
+    alone for a while, and the next one is asked instead. `fresh` (you pressed
+    a button) gives helpers on a short rest another go."""
     errors = []
     now = time.time()
     for provider in available(settings):
         key = settings[KEY_SETTINGS[provider]].strip()
         with _lock:
-            until, why = _resting.get((provider, key), (0, ""))
-        if until > now:
+            until, why, kind = _resting.get((provider, key), (0, "", ""))
+        if until > now and not (fresh and kind in SHORT_RESTS):
             errors.append(f"{NAMES[provider]}: {why} (resting for {max(1, int((until - now) / 60))} min)")
             continue
         try:
@@ -525,7 +527,7 @@ def _short(items, limit=500):
             for i in items[:limit]]
 
 
-def sort_downloads(settings, items, questions):
+def sort_downloads(settings, items, questions, fresh=False):
     """The AI's view on downloads the app couldn't place: ({key: row}, provider).
 
     questions: [{"key", "files", "guess", "season", "file_kind", "found"}]
@@ -546,7 +548,7 @@ def sort_downloads(settings, items, questions):
         '"confidence": ..., "why": ...}]}\n\n'
         f"The watchlist:\n{json.dumps(_short(_relevant(items, questions)), ensure_ascii=False)}\n\n"
         f"Questions:\n{json.dumps(questions, ensure_ascii=False)}")
-    reply, provider = ask(settings, prompt, timeout=90, budget=180)
+    reply, provider = ask(settings, prompt, timeout=90, budget=180, fresh=fresh)
     rows = reply.get("answers") if isinstance(reply, dict) else reply
     out = {}
     for row in rows or []:

@@ -155,8 +155,27 @@ jobs:
             --add-data "watchlist/mpv_scripts:watchlist/mpv_scripts"
           # The built-in player goes inside the app, then the whole app is signed again.
           ditto packaging/mpv.app dist/Watchlist.app/Contents/Resources/mpv.app
+          # mpv's own app says it opens every kind of video, which lets macOS make it
+          # the default player for videos. Inside Watchlist it only plays what the app
+          # asks it to, so those claims are removed before signing.
+          plist=dist/Watchlist.app/Contents/Resources/mpv.app/Contents/Info.plist
+          for key in CFBundleDocumentTypes CFBundleURLTypes UTExportedTypeDeclarations UTImportedTypeDeclarations NSServices; do
+            /usr/libexec/PlistBuddy -c "Delete :$key" "$plist" 2>/dev/null || true
+          done
           codesign --force --deep --sign - dist/Watchlist.app
           codesign --verify --deep --strict dist/Watchlist.app && echo "signature ok"
+
+      - name: Check the app doesn't claim any kind of file
+        run: |
+          # Watchlist must never become the default app for videos (or anything else).
+          for p in dist/Watchlist.app/Contents/Info.plist dist/Watchlist.app/Contents/Resources/mpv.app/Contents/Info.plist; do
+            for key in CFBundleDocumentTypes CFBundleURLTypes UTExportedTypeDeclarations; do
+              if /usr/libexec/PlistBuddy -c "Print :$key" "$p" >/dev/null 2>&1; then
+                echo "$p still has $key"; exit 1
+              fi
+            done
+          done
+          echo "no file types claimed"
 
       - name: Check the app has everything it needs
         run: |

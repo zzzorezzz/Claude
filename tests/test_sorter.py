@@ -169,6 +169,54 @@ class SorterTest(_Base):
         self.assertEqual(len(state["questions"]), 1)
 
 
+class SortNowTest(_Base):
+    def test_sort_now_asks_the_ai_about_everything_waiting(self):
+        self.app.settings.update({"gemini_api_key": "g", "auto_sort": False})
+        words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet",
+                 "kilo", "lima", "mike", "november", "oscar"]
+        for w in words:
+            touch(self.dl, f"Mystery {w.title()} - 01.mkv")
+        touch(self.dl, "Frirn - 07.mkv")
+        replies = {"frirn|": {"decision": "in_list", "item_id": self.frieren["id"], "confidence": 0.9, "why": "typo"},
+                   "mystery alpha|": {"decision": "in_list", "item_id": self.frieren["id"], "confidence": 0.3}}
+        with mock.patch.object(ai, "sort_downloads", return_value=(replies, "groq")) as asked:
+            report = self.app.sorter.run_now()
+        self.assertEqual(asked.call_count, 2)                 # 16 waiting: two batches
+        self.assertTrue(all(c.kwargs.get("fresh") for c in asked.call_args_list))
+        self.assertEqual((report["sorted"], report["ai"], report["error"]), (1, "Groq", ""))
+        self.assertEqual(report["left"], 15)
+        self.assertEqual(report["suggested"], 1)               # "Groq thinks this is Frieren"
+        state = self.app.library.state()
+        self.assertEqual(state["items"][self.frieren["id"]]["episodes"], ["1:7"])
+        self.assertFalse(state["sort_now"]["running"])
+        self.assertEqual(state["sort_now"]["last"]["sorted"], 1)
+        # "Sort for me" being off doesn't stop the background sorter from asking first.
+        self.assertFalse(self.app.sorter._force)
+
+    def test_sort_now_without_an_ai_key(self):
+        self.app.settings.update({"mal_client_id": "", "tmdb_api_key": ""})
+        touch(self.dl, "Mystery - 01.mkv")
+        report = self.app.sorter.run_now()
+        self.assertIn("AI key", report["error"])
+        self.assertEqual(report["left"], 1)
+
+    def test_sort_now_gives_a_resting_helper_another_go(self):
+        self.app.settings.update({"gemini_api_key": "g"})
+        ai._resting.clear()
+        ai._resting[("gemini", "g")] = (time.time() + 300, "Gemini is busy", "busy")
+        self.addCleanup(ai._resting.clear)
+        touch(self.dl, "Frirn - 07.mkv")
+        answer = {"answers": [{"key": "frirn|", "decision": "in_list", "item_id": self.frieren["id"], "confidence": 0.9}]}
+        with mock.patch.object(ai.Gemini, "ask", return_value=(answer, "gemini-flash-latest")) as asked:
+            report = self.app.sorter.run_now()
+        self.assertEqual(asked.call_count, 1)
+        self.assertEqual(report["sorted"], 1)
+        # A helper that's out for the day is still left alone.
+        ai._resting[("gemini", "g")] = (time.time() + 300, "used up", "daily")
+        with self.assertRaisesRegex(ai.AIError, "resting"):
+            ai.ask({"gemini_api_key": "g"}, "hi", fresh=True)
+
+
 class AITest(unittest.TestCase):
     def setUp(self):
         for d in (ai._models, ai._good, ai._bad, ai._resting):

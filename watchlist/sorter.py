@@ -23,6 +23,9 @@ from .store import new_item
 LOOKUPS_PER_PASS = 6
 RETRY_AFTER = 3 * 24 * 3600
 GEMINI_BATCH = 12
+NOW_LOOKUPS = 40          # Sort now: searches in one go
+NOW_BATCHES = 5           # Sort now: AI requests in one go (12 downloads each)
+NOW_RESEARCH_AFTER = 600  # Sort now searches again what was searched over 10 minutes ago
 SURE = 90
 
 # MyAnimeList media types for each kind of file.
@@ -84,6 +87,8 @@ class Sorter:
     def __init__(self, app):
         self.app = app
         self._running = threading.Lock()
+        self._force = False          # Sort now: apply decisions even with "sort for me" off
+        self.now = {"running": False, "last": None}
 
     def run_once(self):
         if not self._running.acquire(blocking=False):
@@ -93,6 +98,58 @@ class Sorter:
         finally:
             self.app.library.busy = ""
             self._running.release()
+
+    # ---- Sort now
+
+    def run_now(self):
+        """Sort now: search for, and ask the AI about, every download that's
+        waiting, straight away. Returns what happened (also kept in self.now)."""
+        lib = self.app.library
+        if not self._running.acquire(timeout=120):
+            return {"error": "the sorter is busy - try again in a minute"}
+        self.now = {"running": True, "last": self.now.get("last")}
+        auto_before = len(lib.answers["auto"])
+        report = {"at": time.time(), "sorted": 0, "left": 0, "suggested": 0, "ai": "", "error": ""}
+        try:
+            self._force = True
+            lib.busy = "Looking through your downloads…"
+            lib.scan(force=True)
+            settings = self.app.settings.get()
+            rejected = set(lib.answers["rejected"])
+            lookups = lib.answers["lookups"]
+            waiting = [q for q in lib.pending() if q["kind"] == "title" and q["key"] not in rejected]
+            if settings.get("mal_client_id") or settings.get("tmdb_api_key"):
+                todo = [q for q in waiting
+                        if time.time() - (lookups.get(q["key"]) or {}).get("at", 0) > NOW_RESEARCH_AFTER]
+                for n, q in enumerate(todo[:NOW_LOOKUPS]):
+                    lib.busy = f'Looking up "{q["guess"]}" ({n + 1} of {min(len(todo), NOW_LOOKUPS)})…'
+                    self._look_up(q, settings)
+            helpers = ai.available(settings)
+            if helpers:
+                waiting = [q for q in lib.pending() if q["kind"] == "title" and q["key"] not in rejected]
+                batches = [waiting[i:i + GEMINI_BATCH] for i in range(0, len(waiting), GEMINI_BATCH)][:NOW_BATCHES]
+                for n, batch in enumerate(batches):
+                    lib.busy = (f"Asking the AI about {len(batch)} download{'s' if len(batch) != 1 else ''}"
+                                + (f" (batch {n + 1} of {len(batches)})" if len(batches) > 1 else "") + "…")
+                    used = self._ask_gemini(batch, settings, fresh=True)
+                    if used:
+                        report["ai"] = ai.NAMES[used]
+                    elif lib.gemini_error:
+                        report["error"] = lib.gemini_error
+                        break
+            elif waiting:
+                report["error"] = "no AI key - add a free one in Settings to let AI sort the rest"
+        finally:
+            self._force = False
+            lib.busy = ""
+            state = lib.state()
+            report["sorted"] = max(0, len(lib.answers["auto"]) - auto_before)
+            titles = [q for q in state["questions"] if q["kind"] == "title"]
+            report["left"] = len(state["questions"])
+            report["suggested"] = sum(1 for q in titles if q.get("suggest") or q.get("hint"))
+            self.now = {"running": False, "last": report}
+            self._running.release()
+        return report
 
     # ---- the passes
 
@@ -173,7 +230,7 @@ class Sorter:
                 return pick, [s for _, s in sorted(scored, key=lambda x: -x[0])]
         return None, [s for _, s in sorted(scored, key=lambda x: -x[0])]
 
-    def _ask_gemini(self, todo, settings):
+    def _ask_gemini(self, todo, settings, fresh=False):
         lib = self.app.library
         lookups = lib.answers["lookups"]
         items = self.app.store.list()
@@ -184,12 +241,12 @@ class Sorter:
                             for s in (lookups.get(q["key"]) or {}).get("suggest", [])[:4]]}
                  for q in todo]
         try:
-            replies, provider = ai.sort_downloads(settings, items, asked)
+            replies, provider = ai.sort_downloads(settings, items, asked, fresh=fresh)
         except ai.AIError as e:
             lib.gemini_error = str(e)
             for q in todo:   # try again in an hour
                 lib.remember_lookup(q["key"], {"gemini_at": time.time() - RETRY_AFTER + 3600})
-            return
+            return None
         lib.gemini_error = ""
         who = ai.NAMES[provider]
         for q in todo:
@@ -213,6 +270,7 @@ class Sorter:
             elif decision == "not_a_show":
                 note["hint"] = f"{who} thinks this isn't a show or film" + (f" ({why})" if why else "")
             lib.remember_lookup(q["key"], note)
+        return provider
 
     def _verify(self, add, settings):
         """A title the AI named, checked against MyAnimeList / TMDB, or None."""
@@ -239,7 +297,7 @@ class Sorter:
 
     def _apply(self, q, pick, by, why):
         """Connect the files to a title, adding it to your list first if needed."""
-        if not self.app.settings.get().get("auto_sort", True):
+        if not self._force and not self.app.settings.get().get("auto_sort", True):
             return False   # you'd rather decide: it's shown as a suggestion instead
         lib = self.app.library
         added = False

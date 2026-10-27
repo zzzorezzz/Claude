@@ -586,6 +586,7 @@ class Library:
                     "questions": self.questions, "unknown_files": unknown,
                     "auto": self.answers["auto"][-60:], "busy": self.busy,
                     "gemini_error": self.gemini_error,
+                    "sort_now": dict(getattr(getattr(self.app, "sorter", None), "now", None) or {}),
                     "videos": len(self.videos), "scanned_at": self._walked_at}
 
     def videos_for(self, item_id):
