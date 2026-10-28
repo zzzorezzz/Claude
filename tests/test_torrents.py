@@ -241,6 +241,22 @@ class TorrentTest(test_server.ServerBase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("End of file", result.stdout + result.stderr)
 
+    def test_getting_an_episode_ready_first(self):
+        """Before the player opens: its start and end, from this file alone."""
+        h = self.add()
+        eps = self.app.torrents.episodes(self.app.store.get(self.item["id"]))
+        self.app.torrents.set_priority(h, eps["1:3"]["index"], 4)        # wanted before
+        url = self.app.torrents.stream_url(h, eps["1:2"]["index"], "x.mkv")
+        body = {"path": url, "season": 1, "episode": 2}
+        status, st = self.call("POST", f"/api/items/{self.item['id']}/stream-buffer", body)
+        self.assertEqual(status, 200, st)
+        self.assertGreater(st["need"], 0)
+        self.assertTrue(wait_for(lambda: self.call("POST", f"/api/items/{self.item['id']}/stream-buffer", body)[1]["ready"]))
+        prio = {f["index"]: f["priority"] for f in self.app.torrents.view(h)["files"]}
+        self.assertEqual((prio[eps["1:2"]["index"]], prio[eps["1:3"]["index"]]), (7, 0))   # this one only
+        status, _ = self.call("POST", f"/api/items/{self.item['id']}/stream-buffer", {"path": "/etc/passwd"})
+        self.assertEqual(status, 400)
+
     def test_peeking_inside_a_torrent_adds_nothing(self):
         """Get magnet compares torrents by their files before one is added."""
         magnet = f"{self.magnet}&x.pe=127.0.0.1:{self.seeder.listen_port()}"

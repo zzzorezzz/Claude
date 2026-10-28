@@ -103,6 +103,29 @@ class FakeSite(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
 
+class FakePeeker:
+    """The people sharing each torrent answer with its files (or don't)."""
+
+    def __init__(self, test):
+        self.test, self.asked = test, []
+
+    def add(self, magnet):
+        self.asked.append(magnet)
+        self.test.peeked.append([magnet])
+        return sites._BTIH.search(magnet).group(1).lower()
+
+    def poll(self):
+        out = {}
+        for m in self.asked:
+            hh = sites._BTIH.search(m).group(1).lower()
+            if hh in FILES:
+                out[hh] = {"files": FILES[hh], "seeds": None, "name": ""}
+        return out
+
+    def close(self):
+        pass
+
+
 class SiteBase(test_server.ServerBase):
     def setUp(self):
         super().setUp()
@@ -118,7 +141,8 @@ class SiteBase(test_server.ServerBase):
         for target in (mock.patch.object(packs, "entries", return_value=ENTRIES),
                        mock.patch.object(ai, "available", return_value=[]),
                        mock.patch.object(torrents, "lt", torrents.lt),
-                       mock.patch.object(self.app.torrents, "peek_many", side_effect=self.peek),
+                       mock.patch.object(self.app.torrents, "peeker", side_effect=lambda: FakePeeker(self)),
+                       mock.patch.object(sites, "PEEK_WAIT", 1.5),
                        mock.patch.object(self.app.torrents, "add", side_effect=self.add_torrent)):
             target.start()
             self.addCleanup(target.stop)
@@ -127,15 +151,6 @@ class SiteBase(test_server.ServerBase):
             "source": "mal", "source_id": "28891", "title": "Haikyuu!! Second Season",
             "original_title": "Haikyuu!! Second Season", "aliases": ["Haikyu!! 2nd Season"], "format": "series",
             "year": 2015, "episodes_total": 25, "seasons": [{"number": 1, "episodes": 25}]}))
-
-    def peek(self, magnets, wait=45):
-        self.peeked.append(magnets)
-        out = {}
-        for m in magnets:
-            hh = sites._BTIH.search(m).group(1).lower()
-            if hh in FILES:
-                out[hh] = {"files": FILES[hh], "seeds": None, "name": ""}
-        return out
 
     def add_torrent(self, item_id, magnet):
         self.added.append((item_id, magnet))

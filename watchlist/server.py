@@ -736,7 +736,8 @@ class App:
             try:
                 self.torrents.prepare(*found)
                 if not subtitle and body.get("subtitles", True):
-                    subs = self.torrents.subtitles(*found)
+                    # (Got ready first: its subtitle came meanwhile, or isn't worth waiting for.)
+                    subs = self.torrents.subtitles(*found, wait=3 if found in self.torrents.buffers else 20)
                     subtitle = subs[0] if subs else None
             except torrents_mod.TorrentError as e:
                 raise ApiError(str(e)) from e
@@ -1016,6 +1017,7 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/items/(\w+)/find-torrent", "find_torrent_state"),
         ("POST", r"/api/items/(\w+)/find-torrent", "find_torrent"),
         ("POST", r"/api/items/(\w+)/find-torrent/use", "find_torrent_use"),
+        ("POST", r"/api/items/(\w+)/stream-buffer", "stream_buffer"),
         ("POST", r"/api/sites/test", "test_site"),
         ("POST", r"/api/torrents/(\w+)/plan", "torrent_plan_group"),
         ("POST", r"/api/torrents/(\w+)/plan/redo", "torrent_plan_redo"),
@@ -1590,6 +1592,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.app.site_jobs.use(item_id, str(body.get("key") or ""))
         except (sites.SiteError, torrents_mod.TorrentError) as e:
             raise ApiError(str(e)) from e
+
+    def api_stream_buffer(self, body, item_id):
+        """Getting a torrent's episode ready to play: how far along it is."""
+        item = self.app.item(item_id)
+        path = str(body.get("path") or "")
+        found = self.app.torrents.parse_url(path)
+        if not found or not self.app.torrents.owns(item_id, path):
+            raise ApiError("that isn't one of this title's torrent episodes")
+        at = 0.0
+        season, episode = body.get("season"), body.get("episode")
+        key = f"{season}:{episode}" if item["format"] == "series" and season is not None and episode is not None else "movie"
+        saved = item["positions"].get(key)
+        if not body.get("from_start") and saved and saved.get("dur"):
+            at = round(player.resume_point(saved) / saved["dur"], 3)
+        try:
+            first = found not in self.app.torrents.buffers
+            self.app.torrents.prepare(*found)
+            out = self.app.torrents.buffer(*found, at=at)
+            if first:
+                # Its subtitle (small) comes along meanwhile.
+                threading.Thread(target=self.app.torrents.subtitles, args=found, kwargs={"wait": 60}, daemon=True).start()
+        except torrents_mod.TorrentError as e:
+            raise ApiError(str(e)) from e
+        return out
 
     def api_test_site(self, body):
         try:

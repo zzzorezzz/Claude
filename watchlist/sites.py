@@ -40,7 +40,7 @@ MAX_PAGE = 4 * 1024 * 1024
 MAX_TORRENT_FILE = 8 * 1024 * 1024
 OPEN_PAGES = 10          # result pages opened to find a magnet
 CHECK = 6                # torrents whose list of files is fetched
-PEEK_WAIT = 45           # seconds to wait for those lists
+PEEK_WAIT = 30           # seconds to wait for those lists
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/128.0 Safari/537.36 Watchlist")
 
@@ -490,25 +490,27 @@ class Finder:
                                         if n))[:6]
         common = packs._common_words(ents) if len(ents) > 1 else set()
         queries = self._queries(item, item_names, common)
-        # 1. Searching.
-        found = []
-        for site in sites:
-            for q in queries:
-                self.stage(f'Searching {site["name"]} for "{q}"…')
-                url = search_url(site, q)
-                self.state["searched"].append(url)
-                try:
-                    data, final, _ = fetch(url)
-                except SiteError as e:
-                    self.log(f'{site["name"]}: {e}')
-                    continue
-                rows = results(data, final)
-                self.log(f'{site["name"]} "{q}": {len(rows)} results')
-                for r in rows:
-                    r["site"] = site["name"]
-                    r["site_id"] = site["id"]
-                found += rows
-        found = self._unique(found)
+        # 1. Searching: every site, for every name, at once.
+        self.stage(f'Searching {", ".join(s["name"] for s in sites)}…')
+
+        def search(job):
+            site, q = job
+            url = search_url(site, q)
+            self.state["searched"].append(url)
+            try:
+                data, final, _ = fetch(url)
+            except SiteError as e:
+                self.log(f'{site["name"]}: {e}')
+                return []
+            rows = results(data, final)
+            self.log(f'{site["name"]} "{q}": {len(rows)} results')
+            for r in rows:
+                r["site"] = site["name"]
+                r["site_id"] = site["id"]
+            return rows
+        jobs = [(site, q) for site in sites for q in queries]
+        with ThreadPoolExecutor(min(8, len(jobs))) as pool:
+            found = self._unique([r for rows in pool.map(search, jobs) for r in rows])
         # 2. The ones about this anime, best first by what their names say.
         others = [e for e in ents if e["source_id"] != item["source_id"]]
         for r in found:
@@ -529,22 +531,17 @@ class Finder:
         for r in found:
             r["score"] = self._name_score(r, wanted)
         found.sort(key=lambda r: -r["score"])
-        # 3. Their magnets: from the result, its page, or its .torrent file.
-        self.stage("Reading the results' pages for their magnet links…")
+        # 3. Their magnets (from the result, its page, or its .torrent file) and,
+        #    as soon as each is known, its real list of files: shown as they come.
         top = found[:OPEN_PAGES]
-        with ThreadPoolExecutor(4) as pool:
-            list(pool.map(self._complete, top))
+        for r in top:
+            r["status"] = "page" if not r["hash"] else "queued"
+        self._pages_and_files(settings, top, ents, wanted)
         ready = [r for r in top if r.get("hash")]
         if not ready:
             raise SiteError("found results, but no magnet link or info hash on their pages")
-        # 4. Their real files.
-        check = ready[:CHECK]
-        self.stage(f"Getting the list of files of the best {len(check)} from the people sharing them…")
-        self._peek(check)
-        for r in check:
-            self._cover(settings, r, ents)
-        # 5. Deciding.
-        checked = [r for r in check if r.get("files")]
+        # 4. Deciding.
+        checked = [r for r in ready if r.get("files")]
         for r in ready:
             r["final"] = self._final_score(r, wanted)
         ranked = sorted(ready, key=lambda r: -r["final"])
@@ -562,6 +559,82 @@ class Finder:
             self.state["added"] = self.use(best)
         elif not checked:
             self.log("none of them could be checked: nobody sharing them answered in time")
+
+    def _pages_and_files(self, settings, top, ents, wanted):
+        torrents = getattr(self.app, "torrents", None)
+        peeker = torrents.peeker() if torrents is not None and self._can_peek() else None
+        peeking = {}                       # info hash -> result
+        started = None
+        try:
+            with ThreadPoolExecutor(8) as pool:
+                futures = {pool.submit(self._complete, r): r for r in top}
+                while True:
+                    for f, r in list(futures.items()):
+                        if f.done():
+                            del futures[f]
+                            if not r.get("hash"):
+                                r["status"] = "nomagnet"
+                            elif r.get("files"):
+                                self._cover(settings, r, ents)      # its .torrent file had them
+                                r["status"] = "done"
+                            else:
+                                r["status"] = "queued"
+                    # The best few (by name, while their pages come in) are checked.
+                    order = [r for r in top if r["status"] != "nomagnet"]
+                    for r in order[:CHECK]:
+                        if r["status"] == "queued" and peeker is not None:
+                            h = peeker.add(r["magnet"])
+                            if h:
+                                peeking[h] = r
+                                r["status"] = "files"
+                                started = started or time.time()
+                            else:
+                                r["status"] = "unchecked"
+                    for r in order[CHECK:]:
+                        if r["status"] == "queued":
+                            r["status"] = "unchecked"
+                    if peeker is not None:
+                        for h, info in peeker.poll().items():
+                            r = peeking.get(h)
+                            if r is None:
+                                continue
+                            if info.get("seeds") is not None and info["seeds"] >= 0:
+                                r["live_seeders"] = info["seeds"]
+                            if r["status"] == "files" and info.get("files"):
+                                r["files"] = info["files"]
+                                r["size"] = sum(x["size"] for x in info["files"])
+                                self._cover(settings, r, ents)
+                                r["status"] = "done"
+                    waiting = [r for r in top if r["status"] in ("page", "files")]
+                    self._publish(top, wanted, waiting)
+                    if not waiting:
+                        break
+                    if not futures and started and time.time() - started > PEEK_WAIT:
+                        for r in waiting:
+                            r["status"] = "unchecked"
+                        break
+                    time.sleep(0.25)
+        finally:
+            if peeker is not None:
+                peeker.close()
+
+    def _can_peek(self):
+        from .torrents import lt
+        return lt is not None
+
+    def _publish(self, top, wanted, waiting):
+        """What's found so far, best first, for the page to show while it works."""
+        shown = [r for r in top if r["status"] != "nomagnet"]
+        for r in shown:
+            r["final"] = self._final_score(r, wanted)
+        shown.sort(key=lambda r: -r["final"])
+        self.state["choices"] = [self._view(r) for r in shown[:8]]
+        checking = sum(1 for r in waiting if r["status"] == "files")
+        reading = sum(1 for r in waiting if r["status"] == "page")
+        self.stage("Checking " + " and ".join(filter(None, [
+            f"{reading} page{'s' if reading != 1 else ''} for the magnet" if reading else "",
+            f"the files of {checking} torrent{'s' if checking != 1 else ''}" if checking else ""])) + "…"
+                   if waiting else "Comparing them…")
 
     @staticmethod
     def _queries(item, names, common):
@@ -641,20 +714,6 @@ class Finder:
         return {"hash": t["hash"], "files": t["files"], "trackers": t["trackers"],
                 "size": sum(f["size"] for f in t["files"])}
 
-    def _peek(self, rows):
-        torrents = getattr(self.app, "torrents", None)
-        todo = [r for r in rows if not r.get("files")]
-        if not todo or torrents is None:
-            return
-        got = torrents.peek_many([r["magnet"] for r in todo], wait=PEEK_WAIT)
-        for r in todo:
-            info = got.get(r["hash"]) or {}
-            if info.get("files"):
-                r["files"] = info["files"]
-                r["size"] = sum(f["size"] for f in info["files"])
-            if info.get("seeds") is not None and info["seeds"] >= 0:
-                r["live_seeders"] = info["seeds"]
-
     def _cover(self, settings, r, ents):
         """How much of this title a torrent really has, from its list of files."""
         files = [{"key": f["index"], "rel": f["path"], "size": f["size"]} for f in r.get("files") or []
@@ -733,11 +792,12 @@ class Finder:
 
     def _view(self, r):
         rel = r["release"]
-        return {"key": r["hash"], "name": r["name"], "site": r["site"], "size": r.get("size") or 0,
+        return {"key": r["hash"] or f'page:{r["page"]}', "status": r.get("status", "done"),
+                "name": r["name"], "site": r["site"], "size": r.get("size") or 0,
                 "seeders": r.get("live_seeders", r.get("seeders")), "resolution": r.get("file_resolution") or rel["resolution"],
                 "bd": rel["bd"], "pack": rel["pack"], "has": r.get("has"), "wanted": r.get("wanted"),
                 "complete": r.get("complete"), "others": r.get("others", 0), "checked": "has" in r,
-                "why": r.get("why", ""), "score": r.get("final"), "magnet": r["magnet"],
+                "why": r.get("why", ""), "score": r.get("final"), "magnet": r.get("magnet") or "",
                 "files": [{"path": f["path"], "size": f["size"]} for f in (r.get("files") or [])][:400]}
 
     def use(self, r):
@@ -775,6 +835,8 @@ class Jobs:
         choice = next((c for c in job.state["choices"] if c["key"] == key), None)
         if not choice:
             raise SiteError("that torrent isn't in the list any more")
+        if not choice["magnet"]:
+            raise SiteError("its magnet link isn't read yet - a moment")
         job.state["added"] = job.use(choice)
         return job.state
 

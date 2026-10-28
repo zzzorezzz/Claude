@@ -447,6 +447,19 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 /* Posters fade in when loaded; cards rise in one after another when they first appear. */
 .card .poster { opacity: 0; transition: opacity .35s ease; }
 .card .poster.loaded { opacity: 1; }
+/* Every other picture too: a shimmer in its place while it loads, then it fades in. */
+:is(#view, #modal-root) img:not(.poster):not(.loaded):not(.broken) {
+  background: linear-gradient(90deg, #222 25%, #313131 50%, #222 75%); background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite; color: transparent;
+}
+:is(#view, #modal-root) img:not(.poster).loaded { animation: img-in .4s ease both; }
+:is(#view, #modal-root) img.broken:not(.poster) { visibility: hidden; }
+img.retrying { visibility: hidden; }
+@keyframes img-in { from { opacity: 0; } }
+.card:has(.poster:not(.loaded):not(.broken)) .poster-fallback {
+  color: transparent; background: linear-gradient(90deg, #222 25%, #313131 50%, #222 75%); background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
 .card.enter { animation: rise .42s cubic-bezier(.2,.8,.2,1) both; animation-delay: calc(min(var(--i, 0), 12) * 35ms); }
 @keyframes rise { from { opacity: 0; transform: translateY(14px) scale(.97); } }
 #view.page-in { animation: page-in .3s ease both; }
@@ -1023,3 +1036,18 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 .fd-log div { word-break: break-all; }
 .site-examples { margin: 6px 0 0 16px; padding: 0; }
 .site-test-out { margin-top: 4px; }
+.fd-working { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: #dfe6f0; }
+.fd-card.fresh { animation: fd-in .35s ease both; }
+@keyframes fd-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* Getting a streamed episode ready */
+.buffer-box .result-icon svg { width: 44px; height: 44px; fill: currentColor; }
+.buf-bar { height: 10px; border-radius: 99px; background: #262626; overflow: hidden; margin: 18px auto 10px; max-width: 520px; }
+.buf-bar i { display: block; height: 100%; width: 0; border-radius: 99px; background: linear-gradient(90deg, var(--red), #ff5d5d);
+  transition: width .45s ease; position: relative; }
+.buf-bar i::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .28), transparent);
+  animation: buf-shine 1.4s linear infinite; }
+@keyframes buf-shine { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.buf-line { display: flex; gap: 10px; justify-content: center; align-items: baseline; flex-wrap: wrap; }
+.buf-pct { font-size: 20px; font-variant-numeric: tabular-nums; }
+.buf-info, .buf-whole { font-variant-numeric: tabular-nums; }

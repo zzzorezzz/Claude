@@ -49,6 +49,11 @@ READ_AHEAD = 32 * 1024 * 1024  # bytes asked for urgently ahead of what's being 
 WAIT_FOR_DATA = 90            # seconds a stream waits for a piece before giving up
 METADATA_WAIT = 60            # seconds to wait for a magnet's list of files
 PRIORITIES = {0: "Skip", 1: "Normal", 4: "High", 7: "Now"}
+# What has to be there before the player opens: the start (where the file says
+# what it is), from where you're watching on, and the end (an MKV's index).
+BUFFER_START = 2 * 1024 * 1024
+BUFFER_AHEAD = 16 * 1024 * 1024
+BUFFER_END = 2 * 1024 * 1024
 
 
 class TorrentError(Exception):
@@ -77,6 +82,93 @@ def kind_of(path):
     return "video" if ext in scanner.VIDEO_EXTS else "subtitle" if ext in scanner.SUB_EXTS else "other"
 
 
+class _Peeker:
+    """Looking inside torrents that aren't added, one by one as they come:
+    add() starts fetching a torrent's list of files, poll() gives every one
+    that has arrived (its seeders kept up to date), close() lets them go."""
+
+    def __init__(self, torrents):
+        self.t = torrents
+        self.handles = {}
+        self.found = {}
+        self.folder = torrents.dir / "peek"
+        self.folder.mkdir(parents=True, exist_ok=True)
+
+    def add(self, magnet):
+        """The torrent's info hash ("" for a magnet that can't be read)."""
+        if not lt:
+            return ""
+        t = self.t
+        try:
+            p = lt.parse_magnet_uri(magnet)
+        except Exception:  # noqa: BLE001 - a broken magnet: skipped
+            return ""
+        h = _hash_of(p)
+        with t.lock:
+            t._start()
+            rec = t.records.get(h)
+            if rec and rec.get("files"):
+                self.found[h] = {"files": rec["files"], "seeds": None, "name": rec.get("name") or ""}
+                return h
+            if h in t.handles or h in self.handles:
+                return h
+            meta = self.folder / f"{h}.torrent"
+            if meta.exists():
+                try:
+                    p = lt.add_torrent_params()
+                    p.ti = lt.torrent_info(str(meta))
+                    p.file_priorities = [0] * p.ti.num_files()
+                except Exception:  # noqa: BLE001 - fetched again
+                    p = lt.parse_magnet_uri(magnet)
+            p.save_path = str(self.folder)
+            p.flags |= lt.torrent_flags.upload_mode
+            p.flags &= ~lt.torrent_flags.auto_managed
+            p.flags &= ~lt.torrent_flags.paused
+            try:
+                self.handles[h] = t.ses.add_torrent(p)
+            except Exception:  # noqa: BLE001
+                return ""
+        return h
+
+    def poll(self):
+        for h, handle in list(self.handles.items()):
+            try:
+                st = handle.status()
+            except Exception:  # noqa: BLE001
+                continue
+            if h not in self.found and st.has_metadata:
+                ti = handle.torrent_file()
+                fs = ti.files()
+                self.found[h] = {"name": ti.name(), "seeds": None,
+                                 "files": [{"index": i, "path": fs.file_path(i), "size": fs.file_size(i)}
+                                           for i in range(fs.num_files()) if not _is_pad(fs, i)]}
+                try:
+                    (self.folder / f"{h}.torrent").write_bytes(lt.bencode({"info": lt.bdecode(ti.metadata())}))
+                except Exception:  # noqa: BLE001
+                    pass
+                handle.scrape_tracker()
+            if h in self.found and (st.num_complete >= 0 or st.list_seeds):
+                self.found[h]["seeds"] = max(st.num_complete, st.list_seeds)
+        return {h: dict(v) for h, v in self.found.items()}
+
+    def waiting(self):
+        self.poll()
+        return [h for h in self.handles if h not in self.found]
+
+    def all_seeded(self):
+        self.poll()
+        return all(self.found.get(h, {}).get("seeds") is not None for h in self.handles)
+
+    def close(self):
+        with self.t.lock:
+            for handle in self.handles.values():
+                try:
+                    self.t.ses.remove_torrent(handle)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.handles = {}
+
+
 class Torrents:
     SETTINGS = {"user_agent": "Watchlist", "listen_interfaces": "0.0.0.0:6881,[::]:6881",
                 "enable_dht": True, "enable_lsd": True, "enable_upnp": True, "enable_natpmp": True}
@@ -96,6 +188,7 @@ class Torrents:
         self.token = secrets.token_hex(8)
         self.port = 0                       # the app's local server, for stream links
         self.reading = {}                   # (hash, index) -> when a stream last read it
+        self.buffers = {}                   # (hash, index) -> the pieces wanted before playing
         self._pieces = {}                   # (hash, piece) -> bytes, from read_piece
         self._piece_cond = threading.Condition()
         self._dirty = False
@@ -484,10 +577,19 @@ class Torrents:
             f = self._file(rec, index)
             rec["priorities"][str(index)] = 7
             rec["finished"].pop(str(index), None)
+            # This episode alone, as fast as it can come: other episodes wait (the
+            # next one comes once this one is all here).
+            progress = self._progress(h)
             for other, prio in list(rec["priorities"].items()):
-                if prio == 7 and other != str(index) and kind_of(self._file(rec, int(other))["path"]) == "video":
-                    rec["priorities"][other] = 4                # the one before keeps coming, after this
-                    handle.file_priority(int(other), 4)
+                if other == str(index) or not prio:
+                    continue
+                try:
+                    of = self._file(rec, int(other))
+                except TorrentError:
+                    continue
+                if kind_of(of["path"]) == "video" and not self.complete(rec, of, progress):
+                    rec["priorities"][other] = 0
+                    handle.file_priority(int(other), 0)
             if rec.get("paused"):
                 rec["paused"] = False
                 handle.resume()
@@ -495,6 +597,45 @@ class Torrents:
             handle.set_flags(lt.torrent_flags.sequential_download)
             self._save_soon()
             return rec, f
+
+    def buffer(self, h, index, at=0.0):
+        """Get a file ready to start playing at `at` (0-1 of the way through):
+        those parts first, urgently. {"need", "have" (bytes), "ready", "rate",
+        "peers", "seeds", "done" (0-1 of the whole file)}."""
+        with self.lock:
+            rec = self._rec(h)
+            handle = self.handles.get(h)
+            if handle is None:
+                raise TorrentError("that torrent isn't loaded")
+            f = self._file(rec, index)
+            ti = handle.torrent_file()
+            if ti is None:
+                raise TorrentError("the torrent's list of files isn't here yet")
+            fs = ti.files()
+            offset, plen, size = fs.file_offset(index), ti.piece_length(), f["size"]
+
+            def pieces(a, b):
+                a, b = max(0, a), min(size, b)
+                return set(range((offset + a) // plen, (offset + max(a + 1, b) - 1) // plen + 1)) if b > a else set()
+            start = int(size * max(0.0, min(float(at or 0), 0.97)))
+            want = sorted(pieces(0, BUFFER_START) | pieces(start, start + BUFFER_AHEAD) | pieces(size - BUFFER_END, size))
+            key = (h, index)
+            if self.buffers.get(key, {}).get("at") != at:
+                # The end and the start first (the player looks at both before anything plays).
+                head = pieces(0, BUFFER_START)
+                tail = pieces(size - BUFFER_END, size)
+                order = sorted(want, key=lambda p: (0 if p in head else 1 if p in tail else 2, p))
+                for n, piece in enumerate(order):
+                    if not handle.have_piece(piece):
+                        handle.set_piece_deadline(piece, 100 + 40 * n)
+                self.buffers[key] = {"at": at, "pieces": want}
+            have = sum(1 for p in want if handle.have_piece(p))
+            st = handle.status()
+            progress = self._progress(h)
+        whole = min(size, len(want) * plen)
+        return {"need": whole, "have": min(whole, have * plen), "ready": have == len(want),
+                "rate": st.download_rate, "peers": st.num_peers, "seeds": st.num_seeds,
+                "done": round((progress[index] if index < len(progress) else 0) / size, 3) if size else 0}
 
     def _wait_for_files(self, h, rec):
         deadline = time.time() + METADATA_WAIT
@@ -613,6 +754,8 @@ class Torrents:
             here = next((k for k, v in eps.items() if v["hash"] == h and v["index"] == index), None)
             if not here:
                 continue
+            if not eps[here]["complete"]:
+                continue                     # this one first, all of it
             s, e = (int(x) for x in here.split(":"))
             nxt = eps.get(f"{s}:{e + 1}") or eps.get(f"{s + 1}:1")
             if nxt and not nxt["complete"]:
@@ -729,78 +872,25 @@ class Torrents:
         each one's list of files, fetched from the people sharing it (nothing
         else is downloaded), then let go. Seeds is what its trackers say, or
         how many were reached; None when unknown."""
-        if not lt:
-            return {}
-        out, mine = {}, {}
-        folder = self.dir / "peek"
-        folder.mkdir(parents=True, exist_ok=True)
-        with self.lock:
-            self._start()
-            for m in magnets:
-                try:
-                    p = lt.parse_magnet_uri(m)
-                except Exception:  # noqa: BLE001 - a broken magnet: skipped
-                    continue
-                h = _hash_of(p)
-                rec = self.records.get(h)
-                if rec and rec.get("files"):
-                    out[h] = {"files": rec["files"], "seeds": None, "name": rec.get("name") or ""}
-                    continue
-                if h in self.handles or h in mine:
-                    continue
-                meta = folder / f"{h}.torrent"
-                if meta.exists():
-                    try:
-                        p = lt.add_torrent_params()
-                        p.ti = lt.torrent_info(str(meta))
-                        p.file_priorities = [0] * p.ti.num_files()
-                    except Exception:  # noqa: BLE001 - fetched again
-                        p = lt.parse_magnet_uri(m)
-                p.save_path = str(folder)
-                p.flags |= lt.torrent_flags.upload_mode
-                p.flags &= ~lt.torrent_flags.auto_managed
-                p.flags &= ~lt.torrent_flags.paused
-                try:
-                    mine[h] = self.ses.add_torrent(p)
-                except Exception:  # noqa: BLE001
-                    continue
-        seeds = {}
-        deadline = time.time() + wait
-        settle = None
+        peeker = self.peeker()
         try:
-            while mine and time.time() < deadline:
-                for h, handle in mine.items():
-                    st = handle.status()
-                    if h not in out and st.has_metadata:
-                        ti = handle.torrent_file()
-                        fs = ti.files()
-                        out[h] = {"name": ti.name(), "seeds": None,
-                                  "files": [{"index": i, "path": fs.file_path(i), "size": fs.file_size(i)}
-                                            for i in range(fs.num_files()) if not _is_pad(fs, i)]}
-                        try:
-                            (folder / f"{h}.torrent").write_bytes(lt.bencode({"info": lt.bdecode(ti.metadata())}))
-                        except Exception:  # noqa: BLE001
-                            pass
-                        handle.scrape_tracker()
-                    if st.num_complete >= 0 or st.list_seeds:
-                        seeds[h] = max(st.num_complete, st.list_seeds)
-                if all(h in out for h in mine):
-                    # Everything's in: a few seconds more for the trackers' seeder counts.
-                    settle = settle or time.time() + 6
-                    if time.time() > settle or all(h in seeds for h in mine):
-                        break
-                time.sleep(0.5)
+            for m in magnets:
+                peeker.add(m)
+            deadline = time.time() + wait
+            settle = None
+            while time.time() < deadline and peeker.waiting():
+                time.sleep(0.3)
+            while peeker.handles and not peeker.all_seeded():
+                settle = settle or time.time() + 6
+                if time.time() > min(settle, deadline + 6):
+                    break
+                time.sleep(0.3)
+            return peeker.poll()
         finally:
-            with self.lock:
-                for handle in mine.values():
-                    try:
-                        self.ses.remove_torrent(handle)
-                    except Exception:  # noqa: BLE001
-                        pass
-        for h, n in seeds.items():
-            if h in out:
-                out[h]["seeds"] = n
-        return out
+            peeker.close()
+
+    def peeker(self):
+        return _Peeker(self)
 
     # ---- packs: which title each file is, worked out across the franchise
 

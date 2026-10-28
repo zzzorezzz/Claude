@@ -128,14 +128,43 @@ async function checkForChanges() {
 setInterval(checkForChanges, 6000);
 window.addEventListener('focus', checkForChanges);
 
-// Broken poster images fall back to the title text behind them.
+// Pictures: a shimmer while they load, then they fade in. One that fails (an image
+// server busy with a page of posters at once) is asked for again a few times,
+// the last time in MyAnimeList's other size; only then does the title text
+// behind it show instead.
+const IMG_RETRIES = [900, 2500, 6000];
 document.addEventListener('error', (e) => {
-  if (e.target.tagName === 'IMG') e.target.classList.add('broken');
+  const img = e.target;
+  if (img.tagName !== 'IMG') return;
+  const src = img.dataset.src0 || img.getAttribute('src');
+  const tries = Number(img.dataset.tries || 0);
+  if (!src || tries >= IMG_RETRIES.length) { img.classList.remove('retrying'); img.classList.add('broken'); return; }
+  img.dataset.src0 = src;
+  img.dataset.tries = String(tries + 1);
+  img.classList.add('retrying');            // no broken-picture icon while it waits
+  let next = src;
+  if (tries === IMG_RETRIES.length - 1 && /cdn\.myanimelist\.net/.test(src)) {
+    next = /l\.(jpe?g|webp)$/i.test(src) ? src.replace(/l\.(jpe?g|webp)$/i, '.$1') : src.replace(/\.(jpe?g|webp)$/i, 'l.$1');
+  } else if (tries > 0) {
+    next = `${src}${src.includes('?') ? '&' : '?'}retry=${tries}`;
+  }
+  setTimeout(() => { if (img.isConnected && !img.classList.contains('loaded')) img.src = next; }, IMG_RETRIES[tries]);
 }, true);
-// Pictures fade in once they've loaded, instead of popping in.
 document.addEventListener('load', (e) => {
-  if (e.target.tagName === 'IMG') e.target.classList.add('loaded');
+  if (e.target.tagName === 'IMG') { e.target.classList.add('loaded'); e.target.classList.remove('broken', 'retrying'); }
 }, true);
+// Pictures already loaded (from the cache) by the time they're on the page.
+const settleImages = (root) => root.querySelectorAll?.('img:not(.loaded)').forEach((img) => {
+  if (img.complete && img.naturalWidth) img.classList.add('loaded');
+});
+new MutationObserver((changes) => {
+  for (const c of changes) {
+    for (const n of c.addedNodes) {
+      if (n.nodeType !== 1) continue;
+      if (n.tagName === 'IMG') { if (n.complete && n.naturalWidth) n.classList.add('loaded'); } else settleImages(n);
+    }
+  }
+}).observe(document.documentElement, { childList: true, subtree: true });
 // A card's slide-in plays once, not again whenever the card is moved.
 document.addEventListener('animationend', (e) => {
   if (e.target.classList?.contains('enter')) e.target.classList.remove('enter');
@@ -2917,14 +2946,20 @@ function openFinder(item, onAdded = () => {}) {
   const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>${ICON.search} Get magnet</h2><p class="sub">${esc(item.title)}</p>
     <div id="finder-body"><div class="spinner"></div></div></div>`, 'finder-modal');
-  m.st = { open: new Set() };
+  m.st = { open: new Set(), seen: new Set() };
   const draw = (st) => {
     const body = $('#finder-body', m);
     if (!body) return;
-    if (st.running) {
+    // While it works: what's found so far, best first, each one's check as it happens.
+    const sig = JSON.stringify([st.running, st.stage, st.error, st.added, (st.choices || []).map((c) => [c.key, c.status, c.has, c.seeders, c.magnet ? 1 : 0, c.why]), [...m.st.open]]);
+    clearTimeout(m.timer);
+    if (st.running) m.timer = setTimeout(load, 600);
+    if (sig === m.st.sig) return;
+    m.st.sig = sig;
+    if (st.running && !(st.choices || []).length) {
       body.innerHTML = `<div class="center finder-wait"><div class="spinner"></div><h3>${esc(st.stage || 'Working…')}</h3>
-        <p class="muted small">It searches your site, opens the results that are about this anime, then gets the best few's list of files from the people sharing them to check they really have every episode. Usually under a minute.</p></div>`;
-      m.timer = setTimeout(load, 1200);
+        <p class="muted small">Searching your site. Results show here as they're found, and each one's files are checked to make sure it really has every episode.</p></div>`;
+      m.st.last = st;
       return;
     }
     const choices = st.choices || [];
@@ -2933,26 +2968,31 @@ function openFinder(item, onAdded = () => {}) {
       const cover = c.checked
         ? (c.complete ? `<span class="ok">✓ All ${c.wanted > 1 ? `${c.wanted} episodes` : 'of it'}</span>` : `<span class="bad">${c.has || 0} of ${c.wanted} episodes</span>`)
           + (c.others ? ` <span class="muted">+ ${c.others} other title${c.others === 1 ? '' : 's'} of the series (only what you play downloads)</span>` : '')
+        : c.status === 'page' ? '<span class="muted"><span class="spin-dot"></span> Reading its page for the magnet…</span>'
+        : c.status === 'files' || c.status === 'queued' ? '<span class="muted"><span class="spin-dot"></span> Checking its files with the people sharing it…</span>'
         : '<span class="muted">Not checked: nobody sharing it answered in time</span>';
-      return `<div class="fd-card ${added && c.key === added.key ? 'chosen' : ''}" data-key="${esc(c.key)}">
+      const fresh = !m.st.seen.has(c.key);
+      m.st.seen.add(c.key);
+      return `<div class="fd-card ${fresh ? 'fresh' : ''} ${added && c.key === added.key ? 'chosen' : ''}" data-key="${esc(c.key)}">
         <div class="fd-name" title="${esc(c.name)}">${esc(c.name)}</div>
         <div class="fd-chips">${c.resolution ? `<span class="chip">${c.resolution === 2160 ? '4K' : `${c.resolution}p`}</span>` : ''}${c.bd ? '<span class="chip">Blu-ray</span>' : ''}${c.others ? '<span class="chip">Pack</span>' : c.pack ? '<span class="chip">Batch</span>' : ''}
           ${c.size ? `<span class="chip">${fmtBytes(c.size)}</span>` : ''}<span class="chip ${c.seeders ? '' : 'bad'}">${c.seeders == null ? '? seeders' : `${c.seeders} seeder${c.seeders === 1 ? '' : 's'}`}</span><span class="muted small">${esc(c.site)}</span></div>
         <div class="small">${cover}</div>
         ${c.why ? `<div class="muted small">AI: ${esc(c.why)}</div>` : ''}
-        <div class="btns">${added && c.key === added.key ? '<span class="ok small">✓ Added</span>' : `<button class="btn ${i === 0 && !added ? 'btn-white' : 'btn-ghost'} btn-sm" data-f="use">Use this one</button>`}
+        <div class="btns">${added && c.key === added.key ? '<span class="ok small">✓ Added</span>' : `<button class="btn ${i === 0 && !added && !st.running ? 'btn-white' : 'btn-ghost'} btn-sm" data-f="use" ${c.magnet ? '' : 'disabled'}>Use this one</button>`}
           ${c.files.length ? `<button class="btn btn-ghost btn-sm" data-f="files">${m.st.open.has(c.key) ? 'Hide' : 'See'} its ${c.files.length} files</button>` : ''}</div>
         ${m.st.open.has(c.key) ? `<div class="fd-files">${c.files.map((f) => `<div><span>${esc(f.path.split('/').slice(1).join('/') || f.path)}</span><span class="muted">${fmtBytes(f.size)}</span></div>`).join('')}</div>` : ''}
       </div>`;
     };
-    const head = st.error ? `<div class="warn">${esc(st.error)}</div>`
+    const head = st.running ? `<div class="fd-working"><span class="spin-dot"></span> ${esc(st.stage || 'Working…')}<span class="muted small"> - you can pick one already</span></div>`
+      : st.error ? `<div class="warn">${esc(st.error)}</div>`
       : added ? `<div class="fd-done"><b>Added the best one:</b> ${esc(added.name)}<div class="muted small">Its episodes are on this page now, matched like any torrent (with Season 2, films and OVAs going to their own titles). An episode downloads when you play it.</div></div>`
       : choices.length ? `<p class="muted">${choices.filter((c) => c.complete).length > 1 ? 'These are about as good as each other - choose one. Best first.' : 'None of them was clearly right - choose one, or none. Best first.'}${st.ai ? ` Compared by the app and ${esc(st.ai)}.` : ''}</p>` : '';
     body.innerHTML = `${head}
       ${choices.length ? `${added ? `<h4 style="margin-top:16px">Other options</h4>` : ''}<div class="fd-list">${choices.filter((c) => !added || c.key !== added.key).map(card).join('')}</div>` : ''}
       ${st.log?.length ? `<details class="fd-log small muted"><summary>What it did</summary>${st.log.map((x) => `<div>${esc(x)}</div>`).join('')}
         ${(st.searched || []).map((u) => `<div>${esc(u)}</div>`).join('')}</details>` : ''}
-      <div class="btns" style="margin-top:14px"><button class="btn btn-ghost btn-sm" data-f="again">Search again</button></div>`;
+      ${st.running ? '' : '<div class="btns" style="margin-top:14px"><button class="btn btn-ghost btn-sm" data-f="again">Search again</button></div>'}`;
     m.st.last = st;
   };
   const load = async () => {
@@ -2978,6 +3018,7 @@ function openFinder(item, onAdded = () => {}) {
         draw(st);
         onAdded();
       } else if (b.dataset.f === 'again') {
+        m.st.seen = new Set();
         draw(await api('POST', `/api/items/${item.id}/find-torrent`));
       }
     } catch (err) { fail(err); b.disabled = false; }
@@ -3396,6 +3437,9 @@ async function autoLocal(wrap) {
 
 async function playFile(wrap, video, sub, player = '', fromStart = false) {
   const item = findItem(wrap.st.id);
+  // A torrent's episode: its first minutes come first, with a real progress bar.
+  if (video.torrent && !video.torrent.complete && !(await bufferStream(wrap, item, video, fromStart))) return;
+  if (!wrap.isConnected) return;
   const res = await api('POST', `/api/items/${item.id}/play`, {
     path: video.path, subtitle: sub ? sub.path : '',
     season: wrap.st.ep.season, episode: wrap.st.ep.episode,
@@ -3403,6 +3447,59 @@ async function playFile(wrap, video, sub, player = '', fromStart = false) {
   });
   await reload();
   if (wrap.isConnected) drawPlaying(wrap, res, video, sub);
+}
+
+// Getting a streamed episode ready: the parts the player needs first (the start,
+// where you left off, and the end where an MKV keeps its index), all from this
+// one file. Resolves true to play, false if you stopped.
+function bufferStream(wrap, item, video, fromStart) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (go) => { if (!done) { done = true; clearTimeout(timer); resolve(go); } };
+    const body = watchBody(wrap, `<div class="center buffer-box">
+      <div class="result-icon">${ICON.download}</div>
+      <h2>Getting ${esc(whatLabel(wrap))} ready</h2>
+      <p class="sub small">${esc(video.name)}</p>
+      <div class="buf-bar"><i style="width:0%"></i></div>
+      <div class="buf-line"><b class="buf-pct">0%</b><span class="buf-info muted small">Finding the people sharing it…</span></div>
+      <div class="muted small buf-whole"></div>
+      <div class="btns" style="justify-content:center;margin-top:18px">
+        <button class="btn btn-ghost btn-sm" data-b="now">Play now anyway</button>
+        <button class="btn btn-ghost btn-sm" data-b="stop">Cancel</button></div></div>`);
+    let timer = null;
+    const rates = [];
+    body.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-b]')?.dataset.b;
+      if (b === 'now') finish(true);
+      else if (b === 'stop') { finish(false); watchChoice(wrap); }
+    });
+    const tick = async () => {
+      if (done) return;
+      if (!wrap.isConnected) { finish(false); return; }
+      let st;
+      try {
+        st = await api('POST', `/api/items/${item.id}/stream-buffer`, {
+          path: video.path, season: wrap.st.ep.season, episode: wrap.st.ep.episode, from_start: fromStart });
+      } catch (err) { fail(err); finish(false); watchChoice(wrap); return; }
+      if (done) return;
+      const pct = st.need ? Math.min(100, Math.floor((st.have / st.need) * 100)) : 0;
+      rates.push(st.rate); if (rates.length > 6) rates.shift();
+      const rate = rates.reduce((a, b) => a + b, 0) / rates.length;
+      const left = Math.max(0, st.need - st.have);
+      const eta = rate > 1024 ? Math.ceil(left / rate) : null;
+      $('.buf-bar i', body).style.width = `${pct}%`;
+      $('.buf-pct', body).textContent = `${pct}%`;
+      $('.buf-info', body).textContent = [
+        `${fmtBytes(st.have)} of ${fmtBytes(st.need)}`,
+        rate ? `${fmtBytes(rate)}/s` : '',
+        st.peers ? `${st.peers} ${st.peers === 1 ? 'person' : 'people'} sharing it` : 'looking for people sharing it',
+        st.ready ? 'ready' : eta != null ? `about ${eta < 60 ? `${eta} s` : `${Math.ceil(eta / 60)} min`} left` : ''].filter(Boolean).join(' · ');
+      $('.buf-whole', body).textContent = st.done > 0 ? `Whole episode: ${Math.floor(st.done * 100)}% downloaded - it keeps coming while you watch.` : '';
+      if (st.ready) { setTimeout(() => finish(true), 250); return; }
+      timer = setTimeout(tick, 500);
+    };
+    tick();
+  });
 }
 
 function drawPlaying(wrap, res, video, sub) {
