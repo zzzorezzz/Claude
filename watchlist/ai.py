@@ -587,6 +587,70 @@ def connected_titles(settings, item):
     return out[:40]
 
 
+GUIDE_CANON = ("canon", "anime original", "non-canon", "recap", "alternate version", "unknown")
+GUIDE_IMPORTANCE = ("essential", "recommended", "optional", "skippable")
+
+
+def story_guide(settings, item, entries):
+    """How everything connected to a title fits its story. `entries` are the
+    connected titles (facts from MyAnimeList / TMDB). Returns {"overview",
+    "overview_spoilers", "story_order": [n...], "entries": {n: {"connects",
+    "placement", "canon", "importance", "about", "spoilers"}}, "by"}, where n
+    is 0 for the title itself and i + 1 for entries[i]."""
+    anime = item.get("type") == "anime"
+
+    def fact(n, x, this=False):
+        listed = x.get("relation") or ""
+        if x.get("via"):
+            listed += f" (of {x['via']})"
+        return {"n": n, "title": x.get("title"), "kind": x.get("media_type") or x.get("media_kind") or x.get("type"),
+                "year": x.get("year"), "episodes": x.get("episodes_total"),
+                "listed_as": "the title they're asking about" if this else listed,
+                "summary": (x.get("overview") or "")[:280]}
+
+    rows = [fact(0, item, True)] + [fact(i + 1, x) for i, x in enumerate(entries[:40])]
+    prompt = (
+        f"Someone has \"{item['title']}\" ({item.get('year') or 'year unknown'}) in their watchlist and wants to "
+        "understand everything connected to it. Here is every connected title, from "
+        + ("MyAnimeList" if anime else "TMDB") + ". The facts (kind, year, episodes, how it's listed) are "
+        f"correct - rely on them:\n{json.dumps(rows, ensure_ascii=False)}\n\n"
+        "For EVERY entry above (by n, including n=0) give:\n"
+        "- connects: how it connects to the main story, 1-2 sentences, e.g. \"Direct sequel: picks up right "
+        "after season 1's finale\", \"Prequel set ten years earlier\", \"Recap film of season 1 with a few new "
+        "scenes\", \"Same story retold by a different studio\". No spoilers.\n"
+        "- placement: when to watch it, e.g. \"After season 1, before season 2\", \"Any time after episode 12\", "
+        "\"Last\".\n"
+        f"- canon: one of {', '.join(GUIDE_CANON)}.\n"
+        f"- importance: one of {', '.join(GUIDE_IMPORTANCE)} (for following the main story).\n"
+        "- about: what it's about, 1-2 sentences, with NO spoilers for it or anything before it.\n"
+        "- spoilers: 1-3 sentences on how it ties into the whole story, spoilers allowed.\n"
+        "Also give overview: 3-4 sentences without spoilers on how the whole franchise fits together and the "
+        "best way into it; overview_spoilers: the same with spoilers; and story_order: the n of every entry that "
+        "is part of the story, in the order the story happens (its timeline), not release order.\n"
+        "If you don't know an entry well, say so in connects and use \"unknown\" - never guess.\n"
+        'Reply as JSON: {"overview": "...", "overview_spoilers": "...", "story_order": [0, ...], '
+        '"entries": [{"n": 0, "connects": "...", "placement": "...", "canon": "...", "importance": "...", '
+        '"about": "...", "spoilers": "..."}]}')
+    reply, provider = ask(settings, prompt, timeout=90, budget=180)
+    if not isinstance(reply, dict):
+        raise AIError("the answer wasn't readable")
+    count = len(rows)
+    text = lambda v, n=600: str(v or "").strip()[:n]
+    out = {}
+    for e in reply.get("entries") or []:
+        if not isinstance(e, dict) or not isinstance(e.get("n"), int) or not 0 <= e["n"] < count:
+            continue
+        canon = text(e.get("canon"), 40).lower()
+        importance = text(e.get("importance"), 40).lower()
+        out[e["n"]] = {"connects": text(e.get("connects")), "placement": text(e.get("placement"), 200),
+                       "canon": canon if canon in GUIDE_CANON else "unknown",
+                       "importance": importance if importance in GUIDE_IMPORTANCE else "",
+                       "about": text(e.get("about")), "spoilers": text(e.get("spoilers"), 900)}
+    order = [n for n in reply.get("story_order") or [] if isinstance(n, int) and 0 <= n < count]
+    return {"overview": text(reply.get("overview"), 1200), "overview_spoilers": text(reply.get("overview_spoilers"), 1500),
+            "story_order": list(dict.fromkeys(order)), "entries": out, "by": NAMES[provider]}
+
+
 def mood(settings, conversation, my_list, may_ask=True):
     """"I'm in the mood for...": either one short follow-up question
     ({"question"}) or picks: {"intro", "from_list": [{"id", "why"}],

@@ -15,16 +15,27 @@ Two things are optional, and everything works without them:
 - **Collections:** these can mix TV shows, anime and movies, and a title can be in several. Find them on the **Collections** page.
 - **Continue watching:** the first row on the home screen. Click a poster to carry on where you stopped.
 - **Title page:** backdrop, summary, ratings and an episode list. The trailer only plays when you click it.
-  - **Everything connected**, on the right: press **Find everything connected** to list every season, sequel, prequel, OVA, ONA, special, film and spin-off, grouped by kind. Each one shows whether it's in your list, how many of its episodes are on your computer, or that it's waiting in your downloads; the summary says what's missing. Add them one at a time, or with **Add all**.
-    - Anime come from MyAnimeList (the whole franchise, following its relations), and film series from TMDB.
-    - With an AI key, the AI adds the ones with other names (each one checked on MyAnimeList / TMDB first). Without one, TV shows list titles that share their name.
+  - **Everything connected**, on the right: press **Find everything connected** to find every season, sequel, prequel, OVA, ONA, special, film and spin-off. When it's done, the **story guide** opens (and **Open the story guide** brings it back):
+    - At the top, how the whole franchise fits together and the best way into it, and how many titles are complete on your computer, partly downloaded or missing.
+    - Every title in **Release order** or **Story order** (the order things happen in the story), numbered. Each one says how it connects to the main story, when to watch it, whether it's canon, anime-original, non-canon or a recap, and whether it's essential, recommended, optional or skippable, plus what it's about.
+    - Everything is spoiler-free; switch on **Show spoilers** to also see how each one ties into the story.
+    - Each title shows what's on your computer ("8 of 12 episodes", "All 12 episodes", waiting in your downloads, or not on your computer), with **+ Add to my list** or **Open**.
+    - The facts (kind, year, episodes, how it's linked) come from MyAnimeList for anime (the whole franchise, following its relations) and TMDB for film series. The explanations are written by your AI helper; without an AI key you get the facts and the release order. With one, the AI also finds connected titles with other names (each checked on MyAnimeList / TMDB first). Without one, TV shows list titles that share their name.
+    - The panel itself lists everything grouped by kind, with **Add all** for what's missing.
   - **Episodes:** each episode says whether it's on your PC (with its file name) or **Not downloaded**, and a line above the list says how many you have and which are missing.
     - **Move…** next to a file moves just that file: to another title, season or episode, out of the title (to sort later), or ignored. **Files…** in **On your PC** lists every file of the title, each with **Move…**.
   - **From the same folder:** films, OVAs, specials and extras that sit in the same folder as a series' files are shown on every page of that series, and on their own page. Click one to open it, or play it.
   - **Extras:** openings, endings, trailers and other bonus videos found with the show's files, kept apart from the episodes.
 - **Find Media** (in the top bar): new things to watch from the internet.
   - **Top by year:** pick TV shows, movies or anime, a year, and **Most popular** or **Highest rated**, for that year's top 100. TV shows come from TMDB (anime left out, they have their own list), anime from MyAnimeList's seasons.
-  - **Search & browse:** keywords, genre and type (for anime: TV, film, OVA, ONA, special), sorted by most popular, highest rated, box office (films), newest or oldest. TV shows and films come from TMDB, anime from MyAnimeList.
+  - **Search & browse:** every filter is optional, and they all work together:
+    - **TV shows / Movies / Anime:** pick one or more; none picked searches all three, mixed.
+    - **Keywords**, or none at all to browse by the filters alone.
+    - **Genres:** every genre TMDB and MyAnimeList have, adult anime genres included. With one type picked you get that type's own genres (for anime grouped into genres, themes, audience and adult); with several, the genres they share plus the rest. Pick as many as you like.
+    - **Year**, **anime format** (TV, film, OVA, ONA, special…) and **sort**: most popular, highest rated, newest, oldest, title A–Z, or box office for films.
+    - Results come 50 at a time, with **Show 50 more**. For example: Movies, Horror, 2025, Highest rated lists every horror film of 2025.
+    - TMDB has no Horror, Romance or Thriller genre for TV shows, so for those TV shows tagged with it on TMDB are shown.
+    - Anime come only from MyAnimeList's official API, with your Client ID. Its API can't search by genre, so the first time you open Find Media the app collects every anime from MyAnimeList's popularity ranking, with their genres (about 30,000, a minute or two in the background), keeps them in your data folder and refreshes them weekly. Anime results fill in while that runs. Like MyAnimeList's genre pages, every anime of a genre can then be sorted by popularity, score or date.
   - **I'm in the mood for…:** tell your AI helper what you feel like watching. It may ask one or two questions, then picks a few titles from your list and about a dozen new ones, each with a reason. New titles are checked on MyAnimeList / TMDB, so made-up ones don't show.
   - Click any poster for its summary; **+ Add** puts it in your list, and titles already in it say so.
 - **Import from MyAnimeList:** **Settings → Import my MyAnimeList list…** brings in your list by user name (if it's public) or from MyAnimeList's export file. Your watched episodes set where you're up to.
@@ -94,7 +105,7 @@ With a key:
 
 - Titles it names are checked on MyAnimeList / TMDB before anything is added or shown, and its sorting decisions are listed under **Sorted for you** like the others.
 - **✨ with AI** next to **Sort now** asks it about the downloads the rules and searches couldn't place.
-- **Find everything connected** on a title page also finds spin-offs, films and specials with other names.
+- **Find everything connected** on a title page writes the story guide (how each title connects, when to watch it, canon or not) and also finds spin-offs, films and specials with other names.
 - **Find Media → I'm in the mood for…** suggests what to watch, from your list and new titles.
 - **Previously on…** on a title page gives a short, spoiler-free recap up to the episode you're on.
 

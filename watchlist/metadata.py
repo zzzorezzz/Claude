@@ -152,6 +152,7 @@ class TMDB:
             "title": title,
             "original_title": r.get("original_title") or r.get("original_name") or "",
             "year": _year(r.get("release_date") or r.get("first_air_date")),
+            "date": r.get("release_date") or r.get("first_air_date") or "",
             "overview": r.get("overview") or "",
             "poster": self.image(r.get("poster_path"), "w342"),
             "rating": round(r["vote_average"], 1) if r.get("vote_count") else None,
@@ -189,6 +190,7 @@ class TMDB:
             "title": title, "original_title": original if original != title else "",
             "aliases": _unique([title, original]),
             "year": _year(d.get("release_date") or d.get("first_air_date")),
+            "date": d.get("release_date") or d.get("first_air_date") or "",
             "overview": d.get("overview") or "", "tagline": d.get("tagline") or "",
             "poster": self.image(d.get("poster_path")),
             "backdrop": self.image(d.get("backdrop_path"), "w1280"),
@@ -227,7 +229,7 @@ class TMDB:
         return [{
             "source": "tmdb", "source_id": f"movie/{p['id']}", "title": p.get("title") or "",
             "original_title": p.get("original_title") or "", "year": _year(p.get("release_date")),
-            "overview": p.get("overview") or "", "poster": self.image(p.get("poster_path"), "w342"),
+            "date": p.get("release_date") or "", "overview": p.get("overview") or "", "poster": self.image(p.get("poster_path"), "w342"),
             "format": "movie", "media_type": "MOVIE", "media_kind": "movie", "type": "movie",
             "relation": "Same film series",
         } for p in sorted(d.get("parts", []), key=lambda p: p.get("release_date") or "9999")]
@@ -368,7 +370,7 @@ class MAL:
         return {
             "source": "mal", "source_id": str(a["id"]), "title": title,
             "original_title": romaji if romaji != title else "",
-            "year": _year(a.get("start_date")),
+            "year": _year(a.get("start_date")), "date": a.get("start_date") or "",
             "overview": _clean_text(a.get("synopsis")),
             "poster": self._picture(a), "rating": a.get("mean"),
             "format": "movie" if a.get("media_type") == "movie" else "series",
@@ -501,7 +503,7 @@ class MAL:
             "source": "mal", "source_id": str(a["id"]), "format": fmt,
             "media_type": a.get("media_type") or "",
             "title": title, "original_title": romaji if romaji != title else "",
-            "aliases": aliases, "year": _year(a.get("start_date")),
+            "aliases": aliases, "year": _year(a.get("start_date")), "date": a.get("start_date") or "",
             "overview": _clean_text(a.get("synopsis")),
             "poster": self._picture(a),
             "genres": [g["name"] for g in a.get("genres", [])],

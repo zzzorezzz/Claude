@@ -30,7 +30,7 @@ METADATA_FIELDS = (
     "backdrop", "genres", "rating", "rating_source", "votes", "popularity",
     "revenue", "mal_members", "mal_rank", "runtime", "cast", "studios", "seasons",
     "episodes_total", "airing_status", "trailer", "links", "tmdb_ref", "format",
-    "media_type", "tmdb_collection",
+    "media_type", "tmdb_collection", "date",
 )
 
 # How often (seconds) to look for changes the other computer made.

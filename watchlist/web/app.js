@@ -1125,7 +1125,7 @@ const AI_NAME = { gemini: 'Gemini', groq: 'Groq', openrouter: 'OpenRouter', open
 const THIS_YEAR = new Date().getFullYear();
 S.find = {
   top: { type: 'anime', year: THIS_YEAR, order: 'popular', results: null, error: '' },
-  search: { type: 'anime', q: '', genre: '', kind: '', sort: 'popular', results: null, page: 1, more: false, error: '', meta: {} },
+  search: { types: [], q: '', genres: [], year: '', sort: 'popular', format: '', results: null, page: 1, more: false, error: '', notes: [], meta: null, panel: false },
   mood: { messages: [], result: null, error: '', busy: false },
 };
 const FIND_TABS = [['top', 'Top by year'], ['search', 'Search & browse'], ['mood', "I'm in the mood for…"]];
@@ -1224,51 +1224,112 @@ function drawFindTop(body) {
   if (st.results === null && !st.loading) findTopLoad();
 }
 
-async function findSearchLoad(more = false) {
+async function findSearchLoad(more = false, quiet = false) {
   const st = S.find.search;
   const ticket = (st.ticket = (st.ticket || 0) + 1);
   st.error = '';
-  if (!more) { st.page = 1; st.results = null; }
-  if (findShowing('search')) drawFind('search');
-  const q = new URLSearchParams({ type: st.type, q: st.q, genre: st.genre, kind: st.kind, sort: st.sort, page: st.page });
+  if (!more) { st.page = 1; if (!quiet) { st.results = null; st.notes = []; } }
+  st.loading = true;
+  if (findShowing('search') && !quiet) drawFind('search');
+  const q = new URLSearchParams({ types: st.types.join(','), q: st.q, genres: st.genres.join(','), year: st.year, sort: st.sort, format: st.format, page: st.page });
   try {
     const r = await api('GET', `/api/find/search?${q}`);
     if (ticket !== st.ticket) return;
     st.results = more ? [...(st.results || []), ...r.results] : r.results;
     st.more = r.more;
+    st.notes = r.notes || [];
+    // While MyAnimeList's anime are still being collected, look again in a while
+    // (only if you haven't moved on or loaded more).
+    if (r.building && !more) {
+      setTimeout(() => { if (st.ticket === ticket && st.page === 1 && findShowing('search')) findSearchLoad(false, true); }, 15000);
+    }
   } catch (e) {
     if (ticket !== st.ticket) return;
     st.error = e.message;
     if (more) st.page -= 1; else st.results = [];
   }
+  st.loading = false;
   if (findShowing('search')) drawFind('search');
 }
 
 async function findSearchMeta() {
   const st = S.find.search;
-  if (st.meta[st.type]) return st.meta[st.type];
-  try { st.meta[st.type] = await api('GET', `/api/find/genres?type=${st.type}`); } catch (e) { st.meta[st.type] = { genres: [], sorts: [['popular', 'Most popular']], kinds: [], error: e.message }; }
-  return st.meta[st.type];
+  try { st.meta = await api('GET', '/api/find/genres'); } catch (e) { st.metaError = e.message; }
+}
+
+// The genres to choose from: one type's own, or those for several types at once.
+function searchGenreList() {
+  const st = S.find.search;
+  if (!st.meta) return [];
+  if (st.types.length === 1) return st.meta[st.types[0]];
+  const kinds = st.types.length ? st.types : ['tv', 'anime', 'movie'];
+  return st.meta.all.filter((g) => g.types.some((t) => kinds.includes(t)));
+}
+
+const genreName = (key) => {
+  const meta = S.find.search.meta;
+  if (!meta) return key;
+  for (const list of [meta.all, meta.movie, meta.tv, meta.anime]) {
+    const g = list.find((x) => x.key === key);
+    if (g) return g.name;
+  }
+  return key;
+};
+
+function genreBarHTML() {
+  const st = S.find.search;
+  return `<div class="genre-bar">
+      <button class="btn btn-sm ${st.panel ? 'btn-white' : 'btn-ghost'}" data-f="genre-panel">Genres${st.genres.length ? ` (${st.genres.length})` : ''} <span class="caret">${st.panel ? '▴' : '▾'}</span></button>
+      ${st.genres.map((k) => `<span class="chip on">${esc(genreName(k))}<button data-f="genre-off" data-key="${esc(k)}" aria-label="Remove">×</button></span>`).join('')}
+      ${st.genres.length ? '<button class="linkish" data-f="genre-clear">Clear</button>' : '<span class="muted small">any genre</span>'}
+    </div>`;
 }
 
 function drawFindSearch(body) {
   const st = S.find.search;
-  const meta = st.meta[st.type];
-  if (!meta) { body.innerHTML = '<div class="spinner"></div>'; findSearchMeta().then(() => { if (findShowing('search')) drawFind('search'); }); return; }
+  if (!st.meta && !st.metaError) {
+    body.innerHTML = '<div class="spinner"></div>';
+    findSearchMeta().then(() => {
+      if (st.results === null && !st.loading) findSearchLoad();     // start with what's popular
+      else if (findShowing('search')) drawFind('search');
+    });
+    return;
+  }
+  const years = Array.from({ length: THIS_YEAR + 2 - 1900 }, (_, i) => THIS_YEAR + 1 - i);
+  const all = !st.types.length;
+  const sorts = (st.meta?.sorts || [['popular', 'Most popular']]).filter(([k]) => k !== 'grossing' || all || st.types.includes('movie'));
+  const showFormat = all || st.types.includes('anime');
+  const list = searchGenreList();
+  const groups = [];
+  for (const g of list) {
+    let grp = groups.find((x) => x.name === g.group);
+    if (!grp) groups.push((grp = { name: g.group, items: [] }));
+    grp.items.push(g);
+  }
+  const typeBtns = Object.entries(KIND_LABEL).map(([k, l]) => `<button type="button" class="${st.types.includes(k) ? 'on' : ''}" data-type="${k}">${l}</button>`).join('');
   body.innerHTML = `<form class="find-controls" data-f="search-form">
-      ${segmented('search-type', Object.entries(KIND_LABEL), st.type)}
+      <div class="seg multi" title="Choose one or more. None chosen searches everything.">${typeBtns}</div>
+      <span class="muted small">${all ? 'All types' : ''}</span>
       <input class="input find-q" name="q" value="${esc(st.q)}" placeholder="Keywords (optional)" autocomplete="off">
-      <select class="select" name="genre"><option value="">All genres</option>${meta.genres.map((g) => `<option value="${g.id}" ${String(g.id) === String(st.genre) ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
-      ${meta.kinds.length ? `<select class="select" name="kind">${meta.kinds.map(([k, l]) => `<option value="${k}" ${k === st.kind ? 'selected' : ''}>${l}</option>`).join('')}</select>` : ''}
-      <select class="select" name="sort">${meta.sorts.map(([k, l]) => `<option value="${k}" ${k === st.sort ? 'selected' : ''}>${l}</option>`).join('')}</select>
-      <button class="btn btn-white" type="submit">Search</button></form>
-    ${meta.error ? `<div class="warn">${esc(meta.error)}</div>` : ''}
+      <select class="select" name="year"><option value="">Any year</option>${years.map((y) => `<option ${String(y) === String(st.year) ? 'selected' : ''}>${y}</option>`).join('')}</select>
+      ${showFormat ? `<select class="select" name="format" title="Anime format">${(st.meta?.formats || []).map(([k, l]) => `<option value="${k}" ${k === st.format ? 'selected' : ''}>${k ? `Anime: ${l}` : 'Any anime format'}</option>`).join('')}</select>` : ''}
+      <select class="select" name="sort">${sorts.map(([k, l]) => `<option value="${k}" ${k === st.sort ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="btn btn-red" type="submit">Search</button>
+    </form>
+    ${genreBarHTML()}
+    ${st.panel ? `<div class="genre-panel">
+      <input class="input genre-filter" placeholder="Find a genre…" autocomplete="off">
+      ${st.metaError ? `<div class="warn">${esc(st.metaError)}</div>` : ''}
+      ${groups.map((grp) => `<div class="genre-group"><h5>${esc(grp.name)}</h5><div class="genre-chips">${grp.items.map((g) => `<button type="button" class="genre-chip ${st.genres.includes(g.key) ? 'on' : ''}" data-key="${esc(g.key)}" data-name="${esc(g.name.toLowerCase())}"
+        title="${g.types ? `For ${g.types.map((t) => KIND_LABEL[t]).join(', ')}${g.tagged?.length ? ' (TV shows by TMDB tag)' : ''}` : ''}">${esc(g.name)}</button>`).join('')}</div></div>`).join('')}
+      <p class="muted small">Pick as many as you like: titles must have all of them. Then press Search.</p></div>` : ''}
     ${st.error ? `<div class="warn">${esc(st.error)}</div>` : ''}
-    ${st.results === null ? (st.started ? `<div class="find-grid">${'<div class="find-card skeleton"><div class="find-poster sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(12)}</div>`
-    : '<p class="muted">Pick a type, add keywords or a genre if you like, and press Search.</p>')
+    ${st.notes.length ? `<div class="find-notes">${st.notes.map((n) => `<p>${esc(n)}</p>`).join('')}</div>` : ''}
+    ${st.results === null ? `<div class="find-grid">${'<div class="find-card skeleton"><div class="find-poster sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(12)}</div>`
     : st.results.length ? `<div class="find-grid">${st.results.map((r, i) => findCardHTML(r, 'search', i)).join('')}</div>
-      ${st.more ? '<div class="center"><button class="btn btn-ghost" data-f="more">Show more</button></div>' : ''}`
-      : '<p class="muted">Nothing found - try other keywords or another genre.</p>'}`;
+      <p class="muted small center">${st.results.length} shown</p>
+      ${st.more ? `<div class="center"><button class="btn btn-ghost" data-f="more" ${st.loading ? 'disabled' : ''}>${st.loading ? 'Loading…' : 'Show 50 more'}</button></div>` : ''}`
+      : st.error ? '' : '<p class="muted">Nothing found - try fewer filters, other keywords or another year.</p>'}`;
 }
 
 function drawFindMood(body) {
@@ -1304,6 +1365,15 @@ async function moodSend(text) {
   if (findShowing('mood')) drawFind('mood');
 }
 
+async function findOverview(r, wrap) {
+  try {
+    const { overview } = await api('GET', `/api/find/about?source=${r.source}&id=${encodeURIComponent(r.source_id)}`);
+    r.overview = overview || '';
+  } catch { r.overview = r.overview || ''; }
+  const p = wrap.querySelector('.find-overview');
+  if (p) p.textContent = r.overview || 'No summary available.';
+}
+
 function findPreview(r) {
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="find-preview">
     ${r.poster ? `<img src="${esc(r.poster)}" alt="">` : ''}
@@ -1311,8 +1381,9 @@ function findPreview(r) {
       <p class="muted">${[r.year, findKind(r), r.rating ? `★ ${fmtRating(r.rating)}` : ''].filter(Boolean).map(esc).join(' · ')}</p>
       ${r.original_title ? `<p class="muted small">${esc(r.original_title)}</p>` : ''}
       ${r.why ? `<p class="find-why">${esc(r.why)}</p>` : ''}
-      <p>${esc(r.overview || 'No summary available.')}</p>
+      <p class="find-overview">${r.overview ? esc(r.overview) : '<span class="spin-dot"></span> Loading the summary…'}</p>
       <div class="btns">${r.in_list ? `<button class="btn btn-white" data-p="open">Open in your list</button>` : '<button class="btn btn-red" data-p="add">+ Add to my list</button>'}</div></div></div>`, 'find-modal');
+  if (!r.overview) findOverview(r, wrap);
   wrap.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-p]')?.dataset.p;
     if (a === 'open') { closeModal(wrap); openTitle(r.in_list || r.id); }
@@ -1340,12 +1411,40 @@ $('#view').addEventListener('click', async (e) => {
     const v = segBtn.dataset.v;
     if (which === 'top-type') { S.find.top.type = v; findTopLoad(); }
     if (which === 'top-order') { S.find.top.order = v; findTopLoad(); }
-    if (which === 'search-type') { Object.assign(S.find.search, { type: v, genre: '', kind: '', sort: 'popular', results: null, started: false }); drawFind('search'); }
+    return;
+  }
+  const st = S.find.search;
+  const typeBtn = e.target.closest('.seg.multi [data-type]');
+  if (typeBtn) {
+    const k = typeBtn.dataset.type;
+    st.types = st.types.includes(k) ? st.types.filter((x) => x !== k) : [...st.types, k];
+    // Genres from another type's list don't carry over.
+    const still = new Set(searchGenreList().map((g) => g.key));
+    st.genres = st.genres.filter((g) => still.has(g));
+    if (st.sort === 'grossing' && st.types.length && !st.types.includes('movie')) st.sort = 'popular';
+    drawFind('search');
+    return;
+  }
+  const chip = e.target.closest('.genre-chip');
+  if (chip) {
+    const k = chip.dataset.key;
+    st.genres = st.genres.includes(k) ? st.genres.filter((x) => x !== k) : [...st.genres, k];
+    chip.classList.toggle('on', st.genres.includes(k));
+    $('.genre-bar').outerHTML = genreBarHTML();
     return;
   }
   const f = e.target.closest('[data-f]')?.dataset.f;
   const card = e.target.closest('.find-card');
-  if (f === 'more') { S.find.search.page += 1; findSearchLoad(true); return; }
+  if (f === 'more') { st.page += 1; findSearchLoad(true); return; }
+  if (f === 'genre-panel') { st.panel = !st.panel; drawFind('search'); if (st.panel) $('.genre-filter')?.focus(); return; }
+  if (f === 'genre-off') {
+    const k = e.target.closest('[data-key]').dataset.key;
+    st.genres = st.genres.filter((x) => x !== k);
+    $$('.genre-chip').forEach((c) => { if (c.dataset.key === k) c.classList.remove('on'); });
+    $('.genre-bar').outerHTML = genreBarHTML();
+    return;
+  }
+  if (f === 'genre-clear') { st.genres = []; $$('.genre-chip.on').forEach((c) => c.classList.remove('on')); $('.genre-bar').outerHTML = genreBarHTML(); return; }
   if (f === 'settings') { openSettings(); return; }
   if (f === 'mood-again') { S.find.mood = { messages: [], result: null, error: '', busy: false }; drawFind('mood'); return; }
   if (card && !card.classList.contains('skeleton')) {
@@ -1360,14 +1459,29 @@ $('#view').addEventListener('click', async (e) => {
 });
 $('#view').addEventListener('change', (e) => {
   if (e.target.dataset.f === 'top-year') { S.find.top.year = Number(e.target.value); findTopLoad(); }
+  const form = e.target.closest('[data-f="search-form"]');
+  if (form && e.target.name && e.target.name !== 'q') {
+    S.find.search[e.target.name] = e.target.value;
+    if (e.target.name === 'sort' || e.target.name === 'year' || e.target.name === 'format') findSearchLoad();
+  }
 });
+$('#view').addEventListener('input', (e) => {
+  if (e.target.name === 'q' && e.target.closest('[data-f="search-form"]')) S.find.search.q = e.target.value;
+  if (e.target.classList.contains('genre-filter')) filterGenres(e.target.value);
+});
+
+function filterGenres(text) {
+  const want = text.trim().toLowerCase();
+  $$('.genre-chip').forEach((c) => c.classList.toggle('hidden', !!want && !c.dataset.name.includes(want)));
+  $$('.genre-group').forEach((g) => g.classList.toggle('hidden', !g.querySelector('.genre-chip:not(.hidden)')));
+}
 $('#view').addEventListener('submit', (e) => {
   const form = e.target.closest('[data-f]');
   if (!form) return;
   e.preventDefault();
   const data = new FormData(form);
   if (form.dataset.f === 'search-form') {
-    Object.assign(S.find.search, { q: data.get('q') || '', genre: data.get('genre') || '', kind: data.get('kind') || '', sort: data.get('sort') || 'popular', started: true });
+    Object.assign(S.find.search, { q: String(data.get('q') || ''), year: data.get('year') || '', sort: data.get('sort') || 'popular', format: data.get('format') || '', panel: false });
     findSearchLoad();
   } else if (form.dataset.f === 'mood-form') {
     const text = String(data.get('text') || '').trim();
@@ -1853,10 +1967,135 @@ async function loadRelated(wrap, run = false) {
   if (run) { wrap.st.related = { running: true, entries: wrap.st.related?.entries || null }; drawRelated(wrap); }
   try {
     wrap.st.related = await api(run ? 'POST' : 'GET', `/api/items/${item.id}/connected`);
+    // Asked for it: show the whole guide as soon as it's ready.
+    if (run && wrap.isConnected && wrap.st.related.entries) openGuide(wrap);
   } catch (e) {
     wrap.st.related = { entries: wrap.st.related?.entries || null, note: e.message, failed: true };
   }
   if (wrap.isConnected) drawRelated(wrap);
+}
+
+/* ---- the story guide: everything connected, in watch order, explained */
+
+const prefGet = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
+const prefSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private window */ } };
+const IMPORTANCE = { essential: 'Essential', recommended: 'Recommended', optional: 'Optional', skippable: 'Skippable' };
+const CANON = { canon: 'Canon', 'anime original': 'Anime original', 'non-canon': 'Non-canon', recap: 'Recap', 'alternate version': 'Alternate version' };
+const guideKey = (x) => (x.self ? 'self' : `${x.source}:${x.source_id}`);
+
+function guideStatus(x) {
+  const pc = pcName();
+  if (x.in_list && x.files) {
+    if (x.episodes_total > 1) {
+      return x.episodes_here >= x.episodes_total
+        ? `<span class="rel-pill in">${ICON.check} All ${x.episodes_total} episodes on your ${pc}</span>`
+        : `<span class="rel-pill part">${x.episodes_here} of ${x.episodes_total} episodes on your ${pc}</span>`;
+    }
+    return `<span class="rel-pill in">${ICON.check} On your ${pc}</span>`;
+  }
+  if (x.in_list) return '<span class="rel-pill">In your list · not downloaded</span>';
+  if (x.waiting) return `<span class="rel-pill dl">In your downloads · ${x.waiting} file${x.waiting === 1 ? '' : 's'} waiting for Sort now</span>`;
+  return `<span class="rel-pill miss">Not on your ${pc}</span>`;
+}
+
+function openGuide(wrap) {
+  const m = openModal('<button class="modal-close" aria-label="Close">×</button><div class="guide"></div>', 'guide-modal');
+  m.st = { order: prefGet('guideOrder', 'release'), spoilers: false };
+  drawGuide(m, wrap);
+  m.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-g]');
+    if (!b) return;
+    const all = guideAll(wrap);
+    const x = all[Number(b.dataset.i)];
+    if (b.dataset.g === 'order') { m.st.order = b.dataset.v; prefSet('guideOrder', m.st.order); drawGuide(m, wrap); }
+    else if (b.dataset.g === 'spoilers') { m.st.spoilers = !m.st.spoilers; drawGuide(m, wrap); }
+    else if (b.dataset.g === 'refresh') { closeModal(m); loadRelated(wrap, true); }
+    else if (b.dataset.g === 'open' && x) { closeModal(m); openTitle(x.in_list); }
+    else if (b.dataset.g === 'add' && x) {
+      b.disabled = true;
+      try {
+        await addRelated(wrap, x);
+        await reload();
+        await loadRelated(wrap);
+        drawGuide(m, wrap);
+      } catch (err) { fail(err); b.disabled = false; }
+    }
+  });
+}
+
+function guideAll(wrap) {
+  const data = wrap.st.related || {};
+  return [...(data.self ? [data.self] : []), ...(data.entries || [])];
+}
+
+function drawGuide(m, wrap) {
+  const box = $('.guide', m);
+  if (!box) return;
+  const item = findItem(wrap.dataset.itemId);
+  const data = wrap.st.related || {};
+  const guide = data.guide;
+  const all = guideAll(wrap);
+  const notes = guide?.entries || {};
+  const order = m.st.order === 'story' && guide?.story_order?.length ? 'story' : 'release';
+  const when = (x) => x.date || (x.year ? `${x.year}-99` : '9999');
+  let main = all.map((x, i) => i);
+  let aside = [];
+  if (order === 'story') {
+    const pos = new Map(guide.story_order.map((k, n) => [k, n]));
+    main = main.filter((i) => pos.has(guideKey(all[i]))).sort((a, b) => pos.get(guideKey(all[a])) - pos.get(guideKey(all[b])));
+    aside = all.map((x, i) => i).filter((i) => !pos.has(guideKey(all[i]))).sort((a, b) => when(all[a]).localeCompare(when(all[b])));
+  } else {
+    main.sort((a, b) => when(all[a]).localeCompare(when(all[b])));
+  }
+  const full = all.filter((x) => x.in_list && x.files && !(x.episodes_total > 1 && x.episodes_here < x.episodes_total)).length;
+  const partly = all.filter((x) => x.in_list && x.files && x.episodes_total > 1 && x.episodes_here < x.episodes_total).length;
+  const missing = all.filter((x) => !x.files).length;
+  const card = (i, n) => {
+    const x = all[i];
+    const g = notes[guideKey(x)] || {};
+    const kind = (x.media_kind || '').toLowerCase() === 'ona' ? 'ONA' : kindName(x);
+    const meta = [kind, x.year, x.episodes_total > 1 ? `${x.episodes_total} episodes` : '',
+      x.self ? '' : `${x.relation || ''}${x.via ? ` (of ${x.via})` : ''}`].filter(Boolean);
+    return `<div class="g-card${x.self ? ' self' : ''}" style="--i:${Math.min(n, 16)}">
+      <div class="g-num">${n === null ? '•' : n + 1}</div>
+      ${x.poster ? `<img class="g-poster" src="${esc(x.poster)}" alt="" loading="lazy">` : '<span class="g-poster rel-ph"></span>'}
+      <div class="g-body">
+        <div class="g-title"><b>${esc(x.title)}</b>${x.self ? '<span class="g-you">This title</span>' : ''}</div>
+        <div class="g-meta">${meta.map(esc).join(' · ')}</div>
+        ${g.importance || (g.canon && g.canon !== 'unknown') ? `<div class="g-tags">
+          ${g.importance ? `<span class="g-imp ${g.importance}">${IMPORTANCE[g.importance]}</span>` : ''}
+          ${g.canon && g.canon !== 'unknown' ? `<span class="g-canon">${CANON[g.canon] || esc(g.canon)}</span>` : ''}</div>` : ''}
+        ${g.connects ? `<p><span class="g-label">How it connects</span>${esc(g.connects)}</p>` : ''}
+        ${g.placement ? `<p><span class="g-label">When to watch</span>${esc(g.placement)}</p>` : ''}
+        ${g.about ? `<p><span class="g-label">What it's about</span>${esc(g.about)}</p>` : ''}
+        ${m.st.spoilers && g.spoilers ? `<p class="g-spoil"><span class="g-label">Spoilers</span>${esc(g.spoilers)}</p>` : ''}
+        <div class="g-status">${guideStatus(x)}
+          ${x.self ? '' : x.in_list ? `<button class="btn btn-sm btn-ghost" data-g="open" data-i="${i}">Open</button>`
+    : `<button class="btn btn-sm btn-white" data-g="add" data-i="${i}">+ Add to my list</button>`}</div>
+      </div></div>`;
+  };
+  const aiNames = data.ai || S.status.ai || [];
+  box.innerHTML = `<div class="g-head">
+      <h2>Everything connected to ${esc(item.title)}</h2>
+      <p class="g-count"><b>${all.length}</b> titles · <span class="ok">${full} complete on your ${pcName()}</span>${partly ? ` · <span class="warn-text">${partly} partly downloaded</span>` : ''} · <span class="${missing ? 'bad' : ''}">${missing} not on your ${pcName()}</span></p>
+    </div>
+    ${guide?.overview ? `<div class="g-overview${m.st.spoilers ? ' spoil' : ''}">${esc(m.st.spoilers && guide.overview_spoilers ? guide.overview_spoilers : guide.overview)}
+      <span class="muted small"> - ${esc(guide.by || 'AI')}</span></div>`
+    : `<div class="g-overview muted">${aiNames.length
+      ? `This was found before the story guide existed. <button class="linkish" data-g="refresh">Find again</button> to have ${esc(aiNames[0])} explain how each one connects, when to watch it and whether it's canon.`
+      : 'Add a free AI key in Settings to see how each one connects to the story, when to watch it, and whether it\'s canon. The facts below come from MyAnimeList / TMDB.'}</div>`}
+    <div class="g-tools">
+      <div class="seg"><button class="${order === 'release' ? 'on' : ''}" data-g="order" data-v="release">Release order</button>
+        <button class="${order === 'story' ? 'on' : ''}" data-g="order" data-v="story" ${guide?.story_order?.length ? '' : 'disabled title="Needs the AI guide"'}>Story order</button></div>
+      ${guide ? `<button class="g-switch ${m.st.spoilers ? 'on' : ''}" data-g="spoilers"><i></i> Show spoilers</button>` : ''}
+      <span class="spacer"></span>
+      <button class="btn btn-sm btn-ghost" data-g="refresh">↻ Find again</button>
+    </div>
+    <div class="g-list">${main.map((i, n) => card(i, n)).join('')}</div>
+    ${aside.length ? `<h4 class="g-aside">Not part of the story's timeline <span class="muted small">recaps, music videos, extras</span></h4>
+      <div class="g-list">${aside.map((i) => card(i, null)).join('')}</div>` : ''}
+    ${data.note ? `<p class="muted small">${esc(data.note)}</p>` : ''}
+    ${data.at ? `<p class="muted small">Looked ${esc(ago(data.at))}.</p>` : ''}`;
 }
 
 const KIND_GROUPS = [['tv', 'TV seasons & series'], ['movie', 'Films'], ['ova', 'OVAs & ONAs'],
@@ -1907,6 +2146,7 @@ function drawRelated(wrap) {
   const groups = KIND_GROUPS.map(([k, label]) => [label, entries.filter((x) => connectedKind(x) === k)])
     .filter(([, list]) => list.length);
   box.innerHTML = head
+    + `<button class="btn btn-red rel-guide" data-r="guide">📖 Open the story guide</button>`
     + `<div class="rel-summary"><b>${entries.length}</b> connected · <span class="ok">${here.length} on your ${pcName()}</span>
         ${listed.length ? ` · ${listed.length} in your list, not downloaded` : ''} · <span class="${missing.length ? 'bad' : ''}">${missing.length} not in your list</span></div>`
     + (missing.length > 1 ? `<button class="btn btn-sm btn-white rel-all" data-r="all">+ Add all ${missing.length} missing</button>` : '')
@@ -1928,6 +2168,7 @@ async function relatedClick(wrap, e) {
   if (r) {
     const entries = wrap.st.related?.entries || [];
     if (r.dataset.r === 'find') { loadRelated(wrap, true); return true; }
+    if (r.dataset.r === 'guide') { openGuide(wrap); return true; }
     try {
       if (r.dataset.r === 'add') {
         r.disabled = true;

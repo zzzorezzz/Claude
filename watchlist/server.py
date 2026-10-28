@@ -47,6 +47,12 @@ def item_kind_is_single(item):
     return (item.get("episodes_total") or 0) <= 1 and library.item_kind(item) in ("ova", "special", "movie")
 
 
+def _entry(result, item_type):
+    """A connected title, with what the story guide needs to know about it."""
+    return dict(sorter._suggestion(result, item_type), via=result.get("via") or "", date=result.get("date") or "",
+                episodes_total=result.get("episodes_total"), overview=(result.get("overview") or "")[:400])
+
+
 class App:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
@@ -61,6 +67,7 @@ class App:
         self._related_path = self.data_dir / "related.json"
         self._related = read_json(self._related_path, {})
         self._related_lock = threading.Lock()
+        self.anime_index = discover.AnimeIndex(self.data_dir / "anime_index.json")
         self.party = None
         self.party_last = None
         self._party_lock = threading.Lock()
@@ -337,8 +344,20 @@ class App:
         with self._related_lock:
             cached = self._related.get(cache_key)
         if run:
+            if not item.get("date") and item["source"] in ("tmdb", "mal"):
+                try:                                    # its first air date, for the release order
+                    item = self.refresh_metadata(item)
+                except (metadata.MetadataError, KeyError):
+                    pass
             entries, note = self._find_connected(item)
-            cached = {"at": time.time(), "entries": entries, "note": note}
+            guide = None
+            s = self.settings.get()
+            if ai.available(s):
+                try:
+                    guide = self._story_guide(item, entries, s)
+                except ai.AIError as e:
+                    note = (note + " " if note else "") + f"The story guide couldn't be written: {e}"
+            cached = {"at": time.time(), "entries": entries, "note": note, "guide": guide}
             with self._related_lock:
                 self._related[cache_key] = cached
                 for k in sorted(self._related, key=lambda k: self._related[k]["at"])[:-300]:
@@ -349,7 +368,10 @@ class App:
         lib = self.library.state()
         waiting = [q for q in lib["questions"] if q["kind"] == "title"]
         out = []
-        for e in cached["entries"]:
+        this = {k: item.get(k) for k in ("title", "type", "source", "source_id", "year", "poster", "format",
+                                          "media_type", "media_kind", "episodes_total")}
+        this.update(self=True, relation="This title", date=item.get("date") or "")
+        for e in [this] + cached["entries"]:
             e = dict(e)
             mine = self.store.find_source(e["source"], e["source_id"])
             e["in_list"] = mine["id"] if mine else None
@@ -364,8 +386,17 @@ class App:
                     if library.score_file(as_item, sorter._guess(q), q["file_kind"]) >= 85:
                         e["waiting"] += len(q["files"])
             out.append(e)
-        return {"entries": out, "note": cached.get("note", ""), "at": cached["at"],
-                "ai": [ai.NAMES[p] for p in ai.available(self.settings.get())]}
+        return {"self": out[0], "entries": out[1:], "note": cached.get("note", ""), "at": cached["at"],
+                "guide": cached.get("guide"), "ai": [ai.NAMES[p] for p in ai.available(self.settings.get())]}
+
+    @staticmethod
+    def _story_guide(item, entries, s):
+        """The AI's guide, keyed by "self" or "source:source_id"."""
+        g = ai.story_guide(s, item, entries)
+        keys = ["self"] + [f'{e["source"]}:{e["source_id"]}' for e in entries]
+        return {"overview": g["overview"], "overview_spoilers": g["overview_spoilers"], "by": g["by"],
+                "story_order": [keys[n] for n in g["story_order"] if n < len(keys)],
+                "entries": {keys[n]: v for n, v in g["entries"].items() if n < len(keys)}}
 
     def _find_connected(self, item):
         s = self.settings.get()
@@ -377,9 +408,9 @@ class App:
 
         try:
             if item["source"] == "mal" and s["mal_client_id"]:
-                add([sorter._suggestion(r, "anime") for r in metadata.MAL(s["mal_client_id"]).franchise(item["source_id"])])
+                add([_entry(r, "anime") for r in metadata.MAL(s["mal_client_id"]).franchise(item["source_id"])])
             elif item["format"] == "movie" and item.get("tmdb_collection") and s["tmdb_api_key"]:
-                add([sorter._suggestion(r, "movie")
+                add([_entry(r, "movie")
                      for r in metadata.TMDB(s["tmdb_api_key"]).collection(item["tmdb_collection"])])
         except metadata.MetadataError as e:
             notes.append(str(e))
@@ -410,7 +441,7 @@ class App:
                 for r in self._search_safely(s, search_type, row["title"]):
                     names = {library.norm(n) for n in (r["title"], r.get("original_title"), *(r.get("aliases") or [])) if n}
                     if want in names and (not row["year"] or not r.get("year") or abs(r["year"] - row["year"]) <= 1):
-                        return sorter._suggestion(dict(r, relation=row["relation"]), item_type)
+                        return _entry(dict(r, relation=row["relation"]), item_type)
             return None
 
         with ThreadPoolExecutor(4) as pool:
@@ -433,7 +464,7 @@ class App:
             for r in self._search_safely(s, media, item["title"]):
                 other = library.norm(r["title"])
                 if other != name and re.search(rf"(^|\s){re.escape(name)}(\s|$)", other):
-                    out.append(sorter._suggestion(dict(r, relation="Shares the name"), media))
+                    out.append(_entry(dict(r, relation="Shares the name"), media))
         return out
 
     def refresh_stale(self):
@@ -754,6 +785,7 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/find/top", "find_top"),
         ("GET", r"/api/find/search", "find_search"),
         ("GET", r"/api/find/genres", "find_genres"),
+        ("GET", r"/api/find/about", "find_about"),
         ("POST", r"/api/find/mood", "find_mood"),
         ("POST", r"/api/import/mal", "import_mal"),
         ("GET", r"/api/import/status", "import_status"),
@@ -986,19 +1018,47 @@ class Handler(BaseHTTPRequestHandler):
         return {"results": self._mark_listed([dict(r) for r in discover.top_by_year(s, kind, year, order)])}
 
     def api_find_search(self, body):
-        kind, s = self._find_kind()
-        sort = self.query.get("sort") or "popular"
-        if sort not in {k for k, _ in discover.SORTS[kind]}:
-            sort = "popular"
-        out = discover.browse(s, kind, self.query.get("q", ""), self.query.get("genre", ""), sort,
-                              self.query.get("kind", ""), max(1, int(self.query.get("page") or 1)))
+        """Search & browse: any mix of types (none means all), keywords, genres,
+        year, format and sort, 50 at a time."""
+        s = self.app.settings.get()
+        q = self.query
+        kinds = [k for k in (q.get("types") or "").split(",") if k in TYPES]
+        sort = q.get("sort") if q.get("sort") in {k for k, _ in discover.SORT_NAMES} else "popular"
+        year = q.get("year") or ""
+        year = int(year) if year.isdigit() and 1900 <= int(year) <= 2100 else None
+        try:
+            page = max(1, min(int(q.get("page") or 1), 200))
+        except ValueError:
+            page = 1
+        keys = [k for k in (q.get("genres") or "").split(",") if k][:12]
+        try:
+            out = discover.search(s, self.app.anime_index, kinds, q.get("q", "")[:100], keys, year, sort,
+                                  q.get("format", ""), page)
+        except metadata.MetadataError as e:
+            raise ApiError(str(e)) from e
         out["results"] = self._mark_listed(out["results"])
         return out
 
     def api_find_genres(self, body):
-        kind, s = self._find_kind()
-        return {"genres": discover.genres(s, kind), "sorts": discover.SORTS[kind],
-                "kinds": discover.ANIME_KINDS if kind == "anime" else []}
+        """Every genre to filter by. Opening Find Media also starts collecting
+        MyAnimeList's anime (for genre searches), if that's not done yet."""
+        self.app.anime_index.ensure(self.app.settings.get())
+        out = discover.genres(self.app.anime_index)
+        out["index"] = self.app.anime_index.state()
+        return out
+
+    def api_find_about(self, body):
+        """The summary of a search result that came without one."""
+        s = self.app.settings.get()
+        source, sid = self.query.get("source", ""), self.query.get("id", "")
+        try:
+            if source == "mal" and sid.isdigit() and s["mal_client_id"]:
+                return {"overview": metadata.MAL(s["mal_client_id"]).details(sid).get("overview", "")}
+            if source == "tmdb" and s["tmdb_api_key"]:
+                return {"overview": metadata.TMDB(s["tmdb_api_key"]).details(sid).get("overview", "")}
+        except metadata.MetadataError as e:
+            raise ApiError(str(e)) from e
+        return {"overview": ""}
 
     def api_find_mood(self, body):
         """"I'm in the mood for...": the AI asks up to two questions, then picks

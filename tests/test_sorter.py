@@ -473,9 +473,40 @@ class ConnectedTest(_Base):
         named = [{"title": "Frieren Recap", "year": 2023, "kind": "special", "relation": "Recap"},
                  {"title": "Frieren Season 2", "year": 2026, "kind": "tv", "relation": "Sequel"},
                  {"title": "Made Up Film", "year": 2030, "kind": "movie", "relation": "Film"}]
-        with mock.patch.object(ai, "connected_titles", return_value=named):
+        with mock.patch.object(ai, "connected_titles", return_value=named), \
+                mock.patch.object(ai, "story_guide", side_effect=ai.AIError("offline")):
             out = self.app.connected(self.app.store.get(self.frieren["id"]), run=True)
         self.assertEqual(sorted(e["source_id"] for e in out["entries"]), ["59978", "60001"])
+
+    def test_story_guide_explains_how_each_one_connects(self):
+        self.app.settings.update({"gemini_api_key": "g"})
+        self.related[self.frieren["source_id"]] = [
+            result("anime", "Frieren Season 2", "59978", relation="Sequel"),
+            result("anime", "Frieren Mini", "56885", media_kind="ova", relation="Side story")]
+        guide = {"overview": "Start with season 1.", "overview_spoilers": "Himmel dies.",
+                 "story_order": [0, 2, 1, 7],
+                 "entries": [
+                     {"n": 0, "connects": "The main story", "placement": "First", "canon": "canon",
+                      "importance": "essential", "about": "An elf mage", "spoilers": "x"},
+                     {"n": 1, "connects": "Direct sequel", "placement": "After season 1", "canon": "canon",
+                      "importance": "essential", "about": "More journey", "spoilers": "y"},
+                     {"n": 2, "connects": "Shorts", "placement": "Any time", "canon": "made up",
+                      "importance": "very", "about": "Chibi", "spoilers": "z"},
+                     {"n": 9, "connects": "nothing"}]}
+        prompts = []
+        with mock.patch.object(ai, "connected_titles", return_value=[]), \
+                mock.patch.object(ai, "ask", side_effect=lambda s, p, **kw: prompts.append(p) or (guide, "gemini")):
+            out = self.app.connected(self.app.store.get(self.frieren["id"]), run=True)
+        self.assertTrue(out["self"]["self"])
+        self.assertEqual(out["self"]["in_list"], self.frieren["id"])
+        g = out["guide"]
+        self.assertEqual(g["overview"], "Start with season 1.")
+        self.assertEqual(g["story_order"], ["self", "mal:56885", "mal:59978"])
+        self.assertEqual(g["entries"]["mal:59978"]["placement"], "After season 1")
+        # Answers outside the allowed values aren't shown as if they were facts.
+        self.assertEqual((g["entries"]["mal:56885"]["canon"], g["entries"]["mal:56885"]["importance"]), ("unknown", ""))
+        self.assertIn("Frieren Season 2", prompts[-1])
+        self.assertEqual(self.app.connected(self.app.store.get(self.frieren["id"]))["guide"], g)   # remembered
 
     def test_tv_spinoffs_without_ai_go_by_name(self):
         bb = add(self.app, "tv", "Breaking Bad", source_id="tv/1396")
@@ -491,7 +522,8 @@ class ConnectedTest(_Base):
         self.searches[("tv", "Better Call Saul")] = [result("tv", "Better Call Saul", "tv/60059", year=2015)]
         named = [{"title": "Better Call Saul", "year": 2015, "kind": "tv", "relation": "Spin-off"},
                  {"title": "Breaking Good", "year": 2030, "kind": "tv", "relation": "Sequel"}]
-        with mock.patch.object(ai, "connected_titles", return_value=named):
+        with mock.patch.object(ai, "connected_titles", return_value=named), \
+                mock.patch.object(ai, "story_guide", side_effect=ai.AIError("offline")):
             out = self.app.connected(self.app.store.get(bb["id"]), run=True)
         self.assertEqual([(e["title"], e["relation"]) for e in out["entries"]], [("Better Call Saul", "Spin-off")])
 
