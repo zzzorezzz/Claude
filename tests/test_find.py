@@ -20,7 +20,11 @@ def mal_node(i, title, members, mean, start="2023-04-07", kind="tv", genres=()):
                      "genres": [{"id": g, "name": GENRE_NAMES[g]} for g in genres]}}
 
 
-GENRE_NAMES = {14: "Horror", 4: "Comedy", 62: "Isekai"}
+GENRE_NAMES = {14: "Horror", 4: "Comedy", 62: "Isekai", 32: "Vampire"}
+
+
+def keyword_id(word):
+    return 9000 + sum(map(ord, word))
 
 
 def ranked(i):
@@ -61,7 +65,11 @@ class FindTest(test_server.ServerBase):
                 rows[0] = tmdb_row(page * 100, f"Anime {page}", genre_ids=[16], original_language="ja")
             return {"results": rows, "total_pages": 3, "total_results": 60}
         if parts.path == "/3/search/keyword":
-            return {"results": [{"id": 315058, "name": "horror"}, {"id": 1, "name": "horror movie"}]}
+            word = q["query"]
+            if word in ("space western",):                   # a tag TMDB doesn't have
+                return {"results": [{"id": 1, "name": f"{word} movie"}]}
+            return {"results": [{"id": 1, "name": f"{word} movie"},
+                                {"id": 315058 if word == "horror" else keyword_id(word), "name": word}]}
         if parts.path == "/v2/anime/ranking":
             offset = int(q["offset"])
             nodes = [ranked(i) for i in range(offset + 1, min(offset + 500, 520) + 1)]
@@ -167,12 +175,64 @@ class FindTest(test_server.ServerBase):
         tv_url = next(u for u in self.urls if "/discover/tv" in u)
         self.assertIn("with_genres=27", movie_url)
         self.assertIn("with_keywords=315058", tv_url)                     # TMDB has no horror TV genre
-        self.assertTrue(any("tagged" in n for n in data["notes"]))
+        self.assertTrue(any("TMDB tags" in n for n in data["notes"]))
         anime = [r for r in data["results"] if r["type"] == "anime"]
         self.assertTrue(all(14 in r["genre_ids"] for r in anime))
         # Mixed and sorted by rating: one list, highest first.
         rated = self.find(genres="all:horror", sort="rated")["results"]
         self.assertEqual([r["rating"] for r in rated], sorted((r["rating"] for r in rated), reverse=True))
+
+    def query_of(self, part):
+        url = next(u for u in reversed(self.urls) if part in u)
+        return dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+
+    def test_detailed_genres_are_tmdb_tags(self):
+        data = self.build_index()
+        movie = {g["key"]: g for g in data["movie"]}
+        tv = {g["key"]: g for g in data["tv"]}
+        self.assertIn("tag:zombie", movie)
+        self.assertIn("tag:sitcom", tv)
+        self.assertNotIn("tag:sitcom", movie)                             # TV only
+        self.assertTrue(movie["tag:zombie"]["tag"])
+        self.assertEqual(tv["lang:ko"]["name"], "K-drama (Korean)")
+        self.assertEqual(movie["lang:ko"]["name"], "K-movie (Korean)")
+        self.assertIn("tag:tvhorror", tv)                                 # TV horror, by tag
+        # One tagged genre: any of its tags.
+        self.find(types="movie", genres="tag:zombie")
+        q = self.query_of("/discover/movie")
+        self.assertEqual(q["with_keywords"], f"{keyword_id('zombie')}|{keyword_id('zombie apocalypse')}")
+        # Several: each one's main tag, all of them; with a genre and a year.
+        self.find(types="tv", genres="tag:zombie,tag:sitcom,tv:35", year=2020)
+        q = self.query_of("/discover/tv")
+        self.assertEqual(q["with_keywords"], f"{keyword_id('zombie')},{keyword_id('sitcom')}")
+        self.assertEqual((q["with_genres"], q["first_air_date_year"]), ("35", "2020"))
+        # A genre made of TMDB genres needs no tags.
+        self.find(types="movie", genres="tag:animfamily")
+        q = self.query_of("/discover/movie")
+        self.assertEqual(q["with_genres"], "16,10751")
+        self.assertNotIn("with_keywords", q)
+
+    def test_k_dramas_and_k_movies(self):
+        data = self.find(types="tv", genres="lang:ko", sort="rated")
+        self.assertTrue(data["results"])
+        self.assertEqual(self.query_of("/discover/tv")["with_original_language"], "ko")
+        self.find(genres="lang:ko")                                       # all types: no anime
+        self.assertEqual(self.query_of("/discover/movie")["with_original_language"], "ko")
+        self.find(types="movie", genres="lang:hi|ta|te|ml|kn|bn|mr")
+        self.assertEqual(self.query_of("/discover/movie")["with_original_language"], "bn|hi|kn|ml|mr|ta|te")
+
+    def test_a_tag_tmdb_doesnt_have(self):
+        status, data = self.call("GET", "/api/find/search?types=movie&genres=tag:spacewestern")
+        self.assertEqual(status, 400)
+        self.assertIn("Space western", data["error"])
+
+    def test_a_detailed_genre_also_finds_anime(self):
+        self.build_index()
+        data = self.find(genres="tag:vampire")
+        self.assertEqual({r["type"] for r in data["results"]}, {"movie", "tv"})   # no vampire anime made up here
+        names = {g["key"]: g for g in self.call("GET", "/api/find/genres")[1]["all"]}
+        self.assertEqual(sorted(names["tag:vampire"]["types"]), ["anime", "movie", "tv"])
+        self.assertEqual(sorted(names["tag:sitcom"]["types"]), ["tv"])
 
     def test_a_genre_only_one_type_has(self):
         self.build_index()

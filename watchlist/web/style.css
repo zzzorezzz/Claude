@@ -790,3 +790,5 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 .g-status .rel-pill { font-size: 11px; padding: 3px 8px; }
 .g-aside { margin: 22px 0 10px; }
 @media (max-width: 640px) { .g-card { grid-template-columns: 24px 1fr; } .g-poster { display: none; } .guide { padding: 20px 16px; } }
+.tag-dot { font-style: normal; color: #9cc3ff; margin-left: 4px; }
+.genre-chip.on .tag-dot { color: #fff; }

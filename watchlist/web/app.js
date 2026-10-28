@@ -1321,8 +1321,9 @@ function drawFindSearch(body) {
       <input class="input genre-filter" placeholder="Find a genre…" autocomplete="off">
       ${st.metaError ? `<div class="warn">${esc(st.metaError)}</div>` : ''}
       ${groups.map((grp) => `<div class="genre-group"><h5>${esc(grp.name)}</h5><div class="genre-chips">${grp.items.map((g) => `<button type="button" class="genre-chip ${st.genres.includes(g.key) ? 'on' : ''}" data-key="${esc(g.key)}" data-name="${esc(g.name.toLowerCase())}"
-        title="${g.types ? `For ${g.types.map((t) => KIND_LABEL[t]).join(', ')}${g.tagged?.length ? ' (TV shows by TMDB tag)' : ''}` : ''}">${esc(g.name)}</button>`).join('')}</div></div>`).join('')}
-      <p class="muted small">Pick as many as you like: titles must have all of them. Then press Search.</p></div>` : ''}
+        title="${[g.types ? `For ${g.types.map((t) => KIND_LABEL[t]).join(', ')}` : '', g.tag ? 'a TMDB tag' : g.tagged?.length ? 'TV shows by TMDB tag' : ''].filter(Boolean).join(' - ')}">${esc(g.name)}${g.tag ? '<i class="tag-dot">•</i>' : ''}</button>`).join('')}</div></div>`).join('')}
+      <p class="muted small">Pick as many as you like: titles must have all of them. Then press Search.
+        ${list.some((g) => g.tag) ? 'Genres marked • are TMDB tags: added by its users, so popular titles have them and obscure ones less often.' : ''}</p></div>` : ''}
     ${st.error ? `<div class="warn">${esc(st.error)}</div>` : ''}
     ${st.notes.length ? `<div class="find-notes">${st.notes.map((n) => `<p>${esc(n)}</p>`).join('')}</div>` : ''}
     ${st.results === null ? `<div class="find-grid">${'<div class="find-card skeleton"><div class="find-poster sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(12)}</div>`

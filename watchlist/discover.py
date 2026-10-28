@@ -159,6 +159,178 @@ SHARED = [
     ("war", "War", 10752, 10768, "Military"),
     ("western", "Western", 37, 37, None),
 ]
+
+
+def _tag(key, name, group, kinds, words, anime=None, genres=None):
+    """A more detailed genre: TMDB keyword tags (any of `words`), for films
+    ("m") and/or TV shows ("t"), with the MyAnimeList genre that matches (for
+    searching anime too) and any TMDB genres it also needs."""
+    return {"key": key, "name": name, "group": group, "kinds": kinds, "words": words, "anime": anime,
+            "genres": genres or {}}
+
+
+# TMDB's tags are added by its users: popular titles have them, obscure ones
+# less often. A tag TMDB doesn't have is reported when it's searched for.
+TAGS = [
+    _tag("tvhorror", "Horror", "TV genres TMDB lacks", "t", ["horror"], "Horror"),
+    _tag("tvromance", "Romance", "TV genres TMDB lacks", "t", ["romance"], "Romance"),
+    _tag("tvthriller", "Thriller", "TV genres TMDB lacks", "t", ["thriller"], "Suspense"),
+    _tag("tvfantasy", "Fantasy", "TV genres TMDB lacks", "t", ["fantasy", "fantasy world"], "Fantasy"),
+    _tag("tvscifi", "Science fiction", "TV genres TMDB lacks", "t", ["science fiction", "sci-fi"], "Sci-Fi"),
+    # Action & adventure
+    _tag("superhero", "Superhero", "Action & adventure", "mt", ["superhero", "super power"], "Super Power"),
+    _tag("martialarts", "Martial arts", "Action & adventure", "mt", ["martial arts", "kung fu"], "Martial Arts"),
+    _tag("spy", "Spy / espionage", "Action & adventure", "mt", ["spy", "espionage", "secret agent"]),
+    _tag("heist", "Heist", "Action & adventure", "mt", ["heist", "robbery", "bank robbery"]),
+    _tag("disaster", "Disaster", "Action & adventure", "mt", ["disaster", "natural disaster"]),
+    _tag("survival", "Survival", "Action & adventure", "mt", ["survival"], "Survival"),
+    _tag("treasure", "Treasure hunt", "Action & adventure", "mt", ["treasure hunt", "treasure"]),
+    _tag("pirates", "Pirates", "Action & adventure", "mt", ["pirate"]),
+    _tag("racing", "Car chase & racing", "Action & adventure", "mt", ["car race", "street race", "car chase"], "Racing"),
+    _tag("militaryaction", "Military action", "Action & adventure", "mt", ["military", "soldier", "special forces"], "Military"),
+    _tag("revenge", "Revenge", "Action & adventure", "mt", ["revenge", "vengeance"]),
+    # Comedy
+    _tag("romcom", "Romantic comedy", "Comedy", "mt", ["romantic comedy"]),
+    _tag("sitcom", "Sitcom", "Comedy", "t", ["sitcom"]),
+    _tag("darkcomedy", "Dark comedy", "Comedy", "mt", ["dark comedy", "black comedy"]),
+    _tag("satire", "Satire", "Comedy", "mt", ["satire", "political satire"]),
+    _tag("parody", "Parody / spoof", "Comedy", "mt", ["parody", "spoof"], "Parody"),
+    _tag("mockumentary", "Mockumentary", "Comedy", "mt", ["mockumentary"]),
+    _tag("slapstick", "Slapstick", "Comedy", "mt", ["slapstick comedy", "slapstick"], "Gag Humor"),
+    _tag("buddy", "Buddy comedy", "Comedy", "mt", ["buddy comedy", "buddy cop"]),
+    _tag("teencomedy", "Teen comedy", "Comedy", "mt", ["teen comedy"]),
+    _tag("sketch", "Sketch comedy", "Comedy", "t", ["sketch comedy"]),
+    _tag("standup", "Stand-up", "Comedy", "mt", ["stand-up comedy", "stand up comedy"]),
+    # Crime & mystery
+    _tag("detective", "Detective", "Crime & mystery", "mt", ["detective", "private detective"], "Detective"),
+    _tag("procedural", "Police procedural", "Crime & mystery", "mt", ["police procedural", "police"]),
+    _tag("whodunit", "Whodunit / murder mystery", "Crime & mystery", "mt", ["whodunit", "murder mystery"]),
+    _tag("mafia", "Gangster & mafia", "Crime & mystery", "mt", ["gangster", "mafia", "organized crime"], "Organized Crime"),
+    _tag("serialkiller", "Serial killer", "Crime & mystery", "mt", ["serial killer"]),
+    _tag("courtroom", "Courtroom & legal", "Crime & mystery", "mt", ["courtroom", "legal drama", "lawyer"]),
+    _tag("neonoir", "Neo-noir", "Crime & mystery", "mt", ["neo-noir"]),
+    _tag("noir", "Film noir", "Crime & mystery", "m", ["film noir"]),
+    _tag("prison", "Prison", "Crime & mystery", "mt", ["prison", "prison escape"]),
+    # Drama
+    _tag("comingofage", "Coming of age", "Drama", "mt", ["coming of age"]),
+    _tag("period", "Period / costume drama", "Drama", "mt", ["period drama", "costume drama", "historical drama"], "Historical"),
+    _tag("biopic", "Biopic", "Drama", "mt", ["biography", "biopic"]),
+    _tag("truestory", "Based on a true story", "Drama", "mt", ["based on true story", "based on a true story"]),
+    _tag("medical", "Medical", "Drama", "mt", ["medical drama", "hospital", "doctor"], "Medical"),
+    _tag("political", "Political", "Drama", "mt", ["politics", "political drama"]),
+    _tag("familydrama", "Family drama", "Drama", "mt", ["family drama", "family relationships"]),
+    _tag("sportsdrama", "Sports drama", "Drama", "mt", ["sports", "sport"], "Sports"),
+    _tag("highschool", "Teen & high school", "Drama", "mt", ["high school", "teen drama", "teenager"], "School"),
+    _tag("workplace", "Workplace", "Drama", "mt", ["workplace", "office"], "Workplace"),
+    _tag("tragedy", "Tragedy", "Drama", "mt", ["tragedy"]),
+    # Horror
+    _tag("slasher", "Slasher", "Horror", "mt", ["slasher"]),
+    _tag("supernatural", "Supernatural", "Horror", "mt", ["supernatural", "supernatural horror"], "Supernatural"),
+    _tag("zombie", "Zombie", "Horror", "mt", ["zombie", "zombie apocalypse"]),
+    _tag("vampire", "Vampire", "Horror", "mt", ["vampire"], "Vampire"),
+    _tag("werewolf", "Werewolf", "Horror", "mt", ["werewolf"]),
+    _tag("ghost", "Ghost & haunted house", "Horror", "mt", ["ghost", "haunted house"]),
+    _tag("possession", "Possession & exorcism", "Horror", "mt", ["possession", "demonic possession", "exorcism"]),
+    _tag("pshorror", "Psychological horror", "Horror", "mt", ["psychological horror"], "Psychological"),
+    _tag("bodyhorror", "Body horror", "Horror", "mt", ["body horror"]),
+    _tag("foundfootage", "Found footage", "Horror", "mt", ["found footage"]),
+    _tag("folkhorror", "Folk horror", "Horror", "mt", ["folk horror"]),
+    _tag("monster", "Monster & creature", "Horror", "mt", ["monster", "creature", "giant monster"]),
+    _tag("cosmic", "Cosmic horror", "Horror", "mt", ["cosmic horror", "lovecraftian"]),
+    _tag("gore", "Splatter / gore", "Horror", "mt", ["splatter", "gore"], "Gore"),
+    # Thriller
+    _tag("psthriller", "Psychological thriller", "Thriller", "mt", ["psychological thriller"], "Psychological"),
+    _tag("conspiracy", "Conspiracy", "Thriller", "mt", ["conspiracy"]),
+    _tag("polthriller", "Political thriller", "Thriller", "mt", ["political thriller"]),
+    _tag("erotic", "Erotic thriller", "Thriller", "mt", ["erotic thriller"]),
+    _tag("survthriller", "Survival thriller", "Thriller", "mt", ["survival thriller"]),
+    _tag("techno", "Techno-thriller", "Thriller", "mt", ["techno-thriller", "hacker"]),
+    _tag("revthriller", "Revenge thriller", "Thriller", "mt", ["revenge thriller"]),
+    _tag("hostage", "Hostage", "Thriller", "mt", ["hostage", "kidnapping"]),
+    # Sci-fi
+    _tag("spaceopera", "Space opera", "Sci-fi", "mt", ["space opera", "space travel"], "Space"),
+    _tag("timetravel", "Time travel", "Sci-fi", "mt", ["time travel"], "Time Travel"),
+    _tag("timeloop", "Time loop", "Sci-fi", "mt", ["time loop"]),
+    _tag("dystopia", "Dystopia", "Sci-fi", "mt", ["dystopia"]),
+    _tag("postapoc", "Post-apocalyptic", "Sci-fi", "mt", ["post-apocalyptic future", "post-apocalyptic", "apocalypse"]),
+    _tag("cyberpunk", "Cyberpunk", "Sci-fi", "mt", ["cyberpunk"]),
+    _tag("aliens", "Aliens", "Sci-fi", "mt", ["alien", "alien invasion", "extraterrestrial"]),
+    _tag("ai", "AI & robots", "Sci-fi", "mt", ["artificial intelligence (a.i.)", "artificial intelligence", "robot", "android"]),
+    _tag("althistory", "Alternate history", "Sci-fi", "mt", ["alternate history"]),
+    _tag("multiverse", "Multiverse / parallel worlds", "Sci-fi", "mt", ["multiverse", "parallel world", "alternate universe"]),
+    _tag("vr", "Virtual reality", "Sci-fi", "mt", ["virtual reality"], "Video Game"),
+    # Fantasy
+    _tag("highfantasy", "High fantasy / sword & sorcery", "Fantasy", "mt", ["high fantasy", "sword and sorcery", "epic fantasy"]),
+    _tag("darkfantasy", "Dark fantasy", "Fantasy", "mt", ["dark fantasy"]),
+    _tag("urbanfantasy", "Urban fantasy", "Fantasy", "mt", ["urban fantasy"], "Urban Fantasy"),
+    _tag("fairytale", "Fairy tale", "Fantasy", "mt", ["fairy tale"]),
+    _tag("magic", "Magic", "Fantasy", "mt", ["magic", "witch", "wizard"]),
+    _tag("mythology", "Mythology", "Fantasy", "mt", ["mythology", "greek mythology", "norse mythology"], "Mythology"),
+    _tag("dragons", "Dragons", "Fantasy", "mt", ["dragon"]),
+    _tag("superpowers", "Superpowers", "Fantasy", "mt", ["superpower", "super power"], "Super Power"),
+    # Romance
+    _tag("romdrama", "Romantic drama", "Romance", "mt", ["romance", "love"], None, {"m": [10749, 18], "t": [18]}),
+    _tag("periodromance", "Period romance", "Romance", "mt", ["period romance", "historical romance"]),
+    _tag("teenromance", "Teen romance", "Romance", "mt", ["teen romance", "first love"]),
+    _tag("lgbtq", "LGBTQ+", "Romance", "mt", ["lgbt", "gay theme", "lesbian", "lgbtq+"]),
+    _tag("lovetriangle", "Love triangle", "Romance", "mt", ["love triangle"], "Love Polygon"),
+    _tag("secondchance", "Second chance", "Romance", "mt", ["second chance", "second chance romance"]),
+    # Family & kids
+    _tag("christmas", "Christmas & holidays", "Family & kids", "mt", ["christmas", "holiday"]),
+    _tag("animals", "Talking animals", "Family & kids", "mt", ["talking animal", "anthropomorphism"], "Anthropomorphic"),
+    _tag("retelling", "Fairy tale retellings", "Family & kids", "mt", ["fairy tale", "based on fairy tale"]),
+    _tag("animfamily", "Animated family", "Family & kids", "mt", [], None, {"m": [16, 10751], "t": [16, 10751]}),
+    # Real life
+    _tag("nature", "Nature & wildlife", "Real life", "mt", ["nature", "wildlife", "nature documentary"]),
+    _tag("truecrime", "True crime", "Real life", "mt", ["true crime"]),
+    _tag("musicdoc", "Music documentary", "Real life", "mt", ["music documentary", "concert"]),
+    _tag("sportsdoc", "Sports documentary", "Real life", "mt", ["sports documentary"], None, {"m": [99], "t": [99]}),
+    _tag("historydoc", "History documentary", "Real life", "mt", ["history", "historical"], None, {"m": [99], "t": [99]}),
+    _tag("docuseries", "Docuseries", "Real life", "t", ["docuseries", "docudrama"]),
+    # Reality TV
+    _tag("competition", "Competition", "Reality TV", "t", ["competition", "reality competition"]),
+    _tag("cooking", "Cooking", "Reality TV", "mt", ["cooking", "cooking competition", "food"], "Gourmet"),
+    _tag("dating", "Dating", "Reality TV", "t", ["dating", "dating show"]),
+    _tag("gameshow", "Game show", "Reality TV", "t", ["game show"]),
+    _tag("talkshow", "Talk show", "Reality TV", "t", ["talk show"]),
+    _tag("makeover", "Makeover", "Reality TV", "t", ["makeover", "home renovation"]),
+    _tag("travel", "Travel", "Reality TV", "mt", ["travel"]),
+    # Music
+    _tag("musical", "Musical", "Music", "mt", ["musical"], "Music"),
+    _tag("concertfilm", "Concert film", "Music", "m", ["concert film", "concert"]),
+    _tag("dance", "Dance", "Music", "mt", ["dance", "dancing"], "Performing Arts"),
+    # History & war
+    _tag("ww2", "World War II", "History & war", "mt", ["world war ii"]),
+    _tag("ww1", "World War I", "History & war", "mt", ["world war i"]),
+    _tag("vietnam", "Vietnam War", "History & war", "mt", ["vietnam war"]),
+    _tag("coldwar", "Cold War", "History & war", "mt", ["cold war"]),
+    _tag("epic", "Historical epic", "History & war", "mt", ["epic", "historical epic"], "Historical"),
+    _tag("samurai", "Samurai", "History & war", "mt", ["samurai"], "Samurai"),
+    _tag("spacewestern", "Space western", "History & war", "mt", ["space western"]),
+    # Format & source
+    _tag("miniseries", "Miniseries", "Format & source", "t", ["miniseries", "limited series"]),
+    _tag("anthology", "Anthology", "Format & source", "mt", ["anthology"]),
+    _tag("novel", "Based on a novel", "Format & source", "mt", ["based on novel or book", "based on novel"]),
+    _tag("comic", "Based on a comic", "Format & source", "mt", ["based on comic", "based on graphic novel"]),
+    _tag("videogame", "Based on a video game", "Format & source", "mt", ["based on video game"], "Video Game"),
+    _tag("remake", "Remake", "Format & source", "mt", ["remake"]),
+    _tag("indie", "Independent film", "Format & source", "m", ["independent film"]),
+    _tag("bw", "Black & white", "Format & source", "mt", ["black and white"]),
+    _tag("silent", "Silent film", "Format & source", "m", ["silent film"]),
+]
+TAG_BY_KEY = {t["key"]: t for t in TAGS}
+
+# Country / language (the language a title was made in), for TMDB.
+LANGUAGES = [
+    ("ko", "Korean", "K-drama (Korean)", "K-movie (Korean)"),
+    ("ja", "Japanese live action", "J-drama (Japanese)", "Japanese films"),
+    ("zh|cn", "Chinese", "C-drama (Chinese)", "Chinese films"),
+    ("th", "Thai", "Thai dramas", "Thai films"),
+    ("hi|ta|te|ml|kn|bn|mr", "Indian", "Indian shows", "Indian films (Bollywood & more)"),
+    ("tr", "Turkish", "Turkish dramas", "Turkish films"),
+]
+LANGUAGE_GROUP = "Country & language"
+
 SORT_NAMES = [("popular", "Most popular"), ("rated", "Highest rated"), ("newest", "Newest"),
               ("oldest", "Oldest"), ("title", "Title A-Z"), ("grossing", "Box office (films)")]
 ANIME_KINDS = [("", "Any format"), ("tv", "TV"), ("movie", "Film"), ("ova", "OVA"), ("ona", "ONA"),
@@ -291,40 +463,65 @@ def _anime_group(name):
 
 def genres(index=None):
     """Every genre to filter by: for each type on its own ("movie", "tv",
-    "anime") and for searching several types at once ("all")."""
+    "anime") and for searching several types at once ("all"). Entries with
+    "tag" are TMDB tags rather than TMDB genres."""
     anime = _anime_genres(index)
     anime_id = {n: i for i, n in anime}
+
+    def tags_for(letter):
+        return [{"key": f"tag:{t['key']}", "name": t["name"], "group": t["group"], "tag": bool(t["words"])}
+                for t in TAGS if letter in t["kinds"]]
+
+    def languages(kind):
+        return [{"key": f"lang:{code}", "name": tv if kind == "tv" else movie, "group": LANGUAGE_GROUP}
+                for code, _, tv, movie in LANGUAGES]
+
     out = {
-        "movie": [{"key": f"movie:{i}", "name": n, "group": "Movie genres"} for i, n in MOVIE_GENRES],
-        "tv": [{"key": f"tv:{i}", "name": n, "group": "TV genres"} for i, n in TV_GENRES],
+        "movie": [{"key": f"movie:{i}", "name": n, "group": "Genres"} for i, n in MOVIE_GENRES]
+                 + languages("movie") + tags_for("m"),
+        "tv": [{"key": f"tv:{i}", "name": n, "group": "Genres"} for i, n in TV_GENRES]
+              + languages("tv") + tags_for("t"),
         "anime": [{"key": f"anime:{i}", "name": n, "group": _anime_group(n)}
                   for i, n in sorted(anime, key=lambda x: x[1])],
     }
     shared, used = [], {"movie": set(), "tv": set(), "anime": set()}
     for key, name, movie, tv, an in SHARED:
         types = [t for t, v in (("movie", movie), ("tv", tv), ("anime", an)) if v]
-        shared.append({"key": f"all:{key}", "name": name, "group": "All types", "types": types,
+        shared.append({"key": f"all:{key}", "name": name, "group": "Main genres", "types": types,
                        "tagged": ["tv"] if isinstance(tv, tuple) else []})
         used["movie"].add(movie)
         used["tv"].add(tv)
         used["anime"].add(anime_id.get(an))
+    langs = [{"key": f"lang:{code}", "name": name, "group": LANGUAGE_GROUP, "types": ["tv", "movie"]}
+             for code, name, _, _ in LANGUAGES]
+    detailed = []
+    for t in TAGS:
+        if t["key"].startswith("tv"):          # the TV stand-ins for main genres are in "Main genres"
+            continue
+        types = [k for k, letter in (("movie", "m"), ("tv", "t")) if letter in t["kinds"]]
+        if t["anime"] and t["anime"] in anime_id:
+            types.append("anime")
+        detailed.append({"key": f"tag:{t['key']}", "name": t["name"], "group": t["group"], "types": types,
+                         "tag": bool(t["words"])})
     others = [dict(g, types=["movie"], group="Films only") for g, (i, _) in zip(out["movie"], MOVIE_GENRES)
               if i not in used["movie"]]
     others += [dict(g, types=["tv"], group="TV shows only") for g, (i, _) in zip(out["tv"], TV_GENRES)
                if i not in used["tv"]]
     others += [dict(g, types=["anime"], group=f"Anime only - {g['group'].lower()}") for g in out["anime"]
                if int(g["key"].split(":")[1]) not in used["anime"]]
-    out["all"] = shared + others
+    out["all"] = shared + langs + detailed + others
     out["sorts"] = SORT_NAMES
     out["formats"] = ANIME_KINDS
     return out
 
 
 def _resolve(keys, kind, index=None):
-    """What the chosen genres mean for one type: (genre ids, TMDB keyword tags),
+    """What the chosen genres mean for one type: {"ids": TMDB or MyAnimeList
+    genre ids, "tags": TMDB tags (each {"name", "words"}), "langs": languages},
     or None when that type doesn't have one of them."""
     anime_id = {n: i for i, n in _anime_genres(index)}
-    ids, tags = [], []
+    letter = {"movie": "m", "tv": "t"}.get(kind)
+    ids, tags, langs = [], [], []
     for key in keys:
         space, _, value = key.partition(":")
         if space == "all":
@@ -337,18 +534,36 @@ def _resolve(keys, kind, index=None):
             if v == ANY:
                 continue
             if isinstance(v, tuple):
-                tags.append(v[1])
+                tags.append({"name": row[1], "words": [v[1]]})
             elif kind == "anime":
                 if v not in anime_id:
                     return None
                 ids.append(anime_id[v])
             else:
                 ids.append(v)
+        elif space == "tag":
+            t = TAG_BY_KEY.get(value)
+            if not t:
+                continue
+            if kind == "anime":
+                if not t["anime"] or t["anime"] not in anime_id:
+                    return None
+                ids.append(anime_id[t["anime"]])
+            elif letter not in t["kinds"]:
+                return None
+            else:
+                ids += t["genres"].get(letter, [])
+                if t["words"]:
+                    tags.append({"name": t["name"], "words": t["words"]})
+        elif space == "lang":
+            if kind == "anime":
+                return None
+            langs += value.split("|")
         elif space == kind and value.isdigit():
             ids.append(int(value))
         elif space in KINDS:
             return None          # a genre only another type has
-    return sorted(set(ids)), sorted(set(tags))
+    return {"ids": sorted(set(ids)), "tags": tags, "langs": sorted(set(langs))}
 
 
 def _today():
@@ -396,22 +611,22 @@ def search(settings, index, kinds=(), query="", keys=(), year=None, sort="popula
         raise MetadataError(f"{TYPE_NAMES[kinds[0]]} don't have that genre")
     if sort == "grossing" and any(k != "movie" for k, _ in active):
         notes.append("Box office is only known for films; the rest are sorted by popularity.")
-    if any(w[1] for k, w in active if k == "tv"):
-        notes.append("TMDB has no Horror, Romance or Thriller genre for TV shows; TV shows tagged with it are shown."
-                     if not query else "With keywords, TV shows can't be checked for Horror, Romance or Thriller "
-                     "(TMDB has no such TV genre) - clear the keywords to filter them.")
+    if any(w["tags"] for k, w in active):
+        notes.append("Genres marked • are TMDB tags, added by its users: popular titles have them, obscure ones "
+                     "less often." if not query else
+                     "With keywords, genres marked • (TMDB tags) can't be checked - clear the keywords to filter by them.")
     if sort == "rated":
         notes.append(f"Highest rated counts titles with at least {MIN_VOTES} votes.")
 
     sizes = [PAGE // len(active) + (1 if i < PAGE % len(active) else 0) for i in range(len(active))]
 
     def one(job):
-        (kind, (ids, tags)), size = job
+        (kind, want), size = job
         kind_sort = sort if sort != "grossing" or kind == "movie" else "popular"
         start = (page - 1) * size
         if kind == "anime":
-            return _anime_slice(settings, index, query, ids, year, kind_sort, fmt, start, size)
-        return _tmdb_slice(settings, kind, query, ids, tags, year, kind_sort, start, size)
+            return _anime_slice(settings, index, query, want["ids"], year, kind_sort, fmt, start, size)
+        return _tmdb_slice(settings, kind, query, want, year, kind_sort, start, size)
 
     with ThreadPoolExecutor(3) as pool:
         parts = list(pool.map(_safely, [(one, job) for job in zip(active, sizes)]))
@@ -466,12 +681,13 @@ def _tmdb_keyword(tmdb, word):
     return found or 0
 
 
-def _tmdb_slice(settings, kind, query, ids, tags, year, sort, start, count):
+def _tmdb_slice(settings, kind, query, want, year, sort, start, count):
     tmdb = _tmdb(settings)
     media = "movie" if kind == "movie" else "tv"
+    ids, tags, langs = want["ids"], want["tags"], want["langs"]
     if query:
         rows = _tmdb_found(tmdb, media, query, year)
-        rows = [r for r in rows if set(ids) <= set(r["genre_ids"])]
+        rows = [r for r in rows if set(ids) <= set(r["genre_ids"]) and (not langs or r["language"] in langs)]
         rows = _order(rows, sort)
         return rows[start:start + count], start + count < len(rows)
     date = "primary_release_date" if media == "movie" else "first_air_date"
@@ -482,10 +698,17 @@ def _tmdb_slice(settings, kind, query, ids, tags, year, sort, start, count):
     if ids:
         params["with_genres"] = ",".join(map(str, ids))
     if tags:
-        found = [_tmdb_keyword(tmdb, t) for t in tags]
-        if not all(found):
-            return [], False
-        params["with_keywords"] = ",".join(map(str, found))
+        # One tagged genre: any of its tags ("zombie" or "zombie apocalypse");
+        # several: each one's main tag, all of them.
+        with ThreadPoolExecutor(4) as pool:
+            found = [[f for f in pool.map(lambda w: _tmdb_keyword(tmdb, w), t["words"]) if f] for t in tags]
+        missing = [t["name"] for t, f in zip(tags, found) if not f]
+        if missing:
+            raise MetadataError(f"TMDB has no tag for {', '.join(missing)}")
+        params["with_keywords"] = ("|".join(map(str, found[0])) if len(found) == 1
+                                   else ",".join(str(f[0]) for f in found))
+    if langs:
+        params["with_original_language"] = "|".join(langs)
     if year:
         params["primary_release_year" if media == "movie" else "first_air_date_year"] = int(year)
     if sort == "rated":
