@@ -29,6 +29,7 @@ class PlayerTest(unittest.TestCase):
         self.app.settings.update({"downloads_folder": str(dl)})
         self.show = add(self.app, "tv", "Breaking Bad", seasons=[{"number": 1, "episodes": 7}])
         self.app.library.scan(force=True)
+        self.app.sorter.run_now()
         patcher = mock.patch.object(player, "find_mpv", return_value=FAKE)
         patcher.start()
         self.addCleanup(patcher.stop)

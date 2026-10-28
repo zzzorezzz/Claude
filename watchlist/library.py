@@ -1,15 +1,18 @@
-"""Your downloads folder, sorted into the titles in your list automatically.
+"""Your downloads folder, sorted into the titles in your list when you say so.
 
 Every video's name (and, if that's not enough, its folder's name) is turned
 into a guessed title, season and episode, and a kind: an ordinary episode, an
 OVA, a special, a film, or an extra (openings, endings, trailers...). It is
-then matched against the titles, original titles and alternative names of
+matched against the titles, original titles and alternative names of
 everything in your list, taking into account what each title is (a TV series,
-an OVA, a film...). Files the app is sure about are connected straight away;
-the rest are passed on to the automatic sorter (searching MyAnimeList / TMDB,
-and Gemini if you added a key) and only then put in front of you as a
-question. Every answer is remembered, for that file and for every other file
-with the same guessed title.
+an OVA, a film...).
+
+A file only belongs to a title once you've said so, or Sort now has (that's
+remembered per file, and never changed afterwards). New files wait, grouped
+by guessed title with what they look like; Sort now sorts the clear ones and
+searches MyAnimeList / TMDB (and asks the AI, with Sort now with AI) for the
+rest. Files you take out of a title, or whose title you remove, are left for
+you to sort.
 """
 
 import difflib
@@ -20,7 +23,7 @@ import unicodedata
 from collections import Counter
 from pathlib import Path
 
-from . import ai, scanner
+from . import scanner
 from .config import read_json, write_json
 
 RESCAN_EVERY = 60  # seconds
@@ -305,12 +308,15 @@ class Library:
         answers = read_json(self.answers_path, {})
         self.answers = {"titles": dict(answers.get("titles") or {}),
                         "files": dict(answers.get("files") or {}),
-                        # Decisions made without asking you (searching, Gemini), for undo.
+                        # Decisions made by Sort now (rules, searching, AI), for undo.
                         "auto": list(answers.get("auto") or []),
                         # Ones you undid: never decided automatically again.
                         "rejected": list(answers.get("rejected") or []),
                         # What searching MyAnimeList / TMDB found for a guessed title.
-                        "lookups": dict(answers.get("lookups") or {})}
+                        "lookups": dict(answers.get("lookups") or {}),
+                        # 1: from before Sort now (what was sorted then is written down once).
+                        # A new install starts at 2: nothing is sorted until you say so.
+                        "v": answers.get("v") or (1 if app.settings.get()["downloads_folder"] else 2)}
         self.folder = ""
         self.videos = []        # every video found, with what it's connected to
         self.subs = []
@@ -322,7 +328,7 @@ class Library:
         self.subs_for = {}      # video path -> paired subtitle files, best first
         self.questions = []
         self.error = ""
-        self.busy = ""          # what the automatic sorter is doing right now
+        self.busy = ""          # what Sort now is doing right now
         self.gemini_error = ""
 
     def save_answers(self):
@@ -392,11 +398,7 @@ class Library:
             self._matched_for = None
             self._match_if_needed()
 
-    def _match(self, items):
-        by_id = {i["id"]: i for i in items}
-        index = _Index(items)
-        titles, files = self.answers["titles"], self.answers["files"]
-        by_item, questions, groups, extras_waiting = {}, [], {}, []
+    def _scorer(self, index):
         scored_for = {}
 
         def scored(v):
@@ -408,75 +410,127 @@ class Library:
                                 for i in index.candidates(g["title"], g["full"])), reverse=True)
                 scored_for[key] = [(s, i) for s, i in found if s >= 25]
             return scored_for[key]
+        return scored
+
+    @staticmethod
+    def _is_sure(found):
+        return bool(found) and found[0][0] >= 90 and (len(found) == 1 or found[1][0] < found[0][0] - 5)
+
+    def _migrate(self, items):
+        """Before version 2 the app sorted downloads by itself, again on every scan.
+        Now only answers count (yours, or Sort now's), so everything the old way had
+        sorted is written down once, as it is, and stays exactly where it was."""
+        by_id = {i["id"]: i for i in items}
+        scored = self._scorer(_Index(items))
+        files, titles = self.answers["files"], self.answers["titles"]
+        placed = {}
+        later = []
+        for v in self.videos:
+            answer = files.get(v["rel"])
+            if isinstance(answer, dict) and (answer.get("item") in by_id or answer.get("item") == "ignore"):
+                if answer.get("item") in by_id:
+                    placed.setdefault(str(Path(v["path"]).parent), Counter())[answer["item"]] += 1
+                continue
+            kind = "extra" if isinstance(answer, dict) and answer.get("item") == "extra" else v["kind"]
+            title = titles.get(self.title_key(v))
+            if title == "ignore":
+                files[v["rel"]] = {"item": "ignore", "by": "before"}
+                continue
+            owner = title if title in by_id else None
+            if not owner:
+                found = scored(v)
+                if self._is_sure(found):
+                    owner = found[0][1]
+                elif kind == "extra":
+                    later.append((v, found))
+                    continue
+            if owner:
+                files[v["rel"]] = {"item": owner, "by": "before", **({"kind": "extra"} if kind == "extra" else {})}
+                placed.setdefault(str(Path(v["path"]).parent), Counter())[owner] += 1
+        for v, found in later:
+            folder = Path(v["path"]).parent
+            owner = next((placed[str(d)].most_common(1)[0][0] for d in (folder, folder.parent) if placed.get(str(d))),
+                         None) or (found[0][1] if found and found[0][0] >= 60 else None)
+            if owner:
+                files[v["rel"]] = {"item": owner, "by": "before", "kind": "extra"}
+        self.answers["v"] = 2
+        self.save_answers()
+
+    def _match(self, items):
+        by_id = {i["id"]: i for i in items}
+        if self.answers.get("v", 1) < 2 and self.videos:
+            self._migrate(items)
+        scored = self._scorer(_Index(items))
+        titles, files = self.answers["titles"], self.answers["files"]
+        rejected = set(self.answers["rejected"])
+        by_item, questions, groups, extras_waiting = {}, [], {}, []
+
+        def add_to_group(v, reason, found, match=None, extra=None):
+            key = self.title_key(v)
+            group = groups.setdefault(key, {
+                "kind": "title", "key": key, "guess": v["guess"],
+                "season": v["name_season"] or v["season"], "file_kind": v["kind"],
+                "year": v["year"], "has_eps": bool(v["episodes"]),
+                "files": [], "candidates": [i for _, i in found[:5]], "reason": reason, "match": match})
+            if extra:
+                group.update(extra)
+            group["files"].append(v["rel"])
 
         for v in self.videos:
             v["item"], v["how"] = None, ""
             answer = files.get(v["rel"])
-            if isinstance(answer, dict) and answer.get("item"):
-                if answer["item"] == "ignore":
-                    v["how"] = "ignored"
-                    continue
-                if answer["item"] == "extra":
-                    v["kind"] = "extra"
-                elif answer["item"] in by_id:
-                    v["item"], v["how"] = answer["item"], "you"
-                    if answer.get("episode"):
-                        v["season"] = answer.get("season") or 1
-                        v["episodes"] = [answer["episode"]]
-                    if answer.get("kind"):
-                        v["kind"] = answer["kind"]
-            if not v["item"]:
-                key = self.title_key(v)
-                answer = titles.get(key)
-                if answer == "ignore":
-                    v["how"] = "ignored"
-                    continue
-                if answer in by_id:
-                    v["item"], v["how"] = answer, "you"
-                else:
-                    found = scored(v)
-                    sure = found and found[0][0] >= 90 and (len(found) == 1 or found[1][0] < found[0][0] - 5)
-                    if sure:
-                        v["item"], v["how"] = found[0][1], "auto"
-                    elif v["kind"] == "extra":
-                        extras_waiting.append((v, found))
-                        continue
-                    else:
-                        group = groups.setdefault(key, {
-                            "kind": "title", "key": key, "guess": v["guess"],
-                            "season": v["name_season"] or v["season"], "file_kind": v["kind"],
-                            "year": v["year"], "has_eps": bool(v["episodes"]),
-                            "files": [], "candidates": [i for _, i in found[:5]],
-                            "reason": "unsure" if found else "unknown"})
-                        group["files"].append(v["rel"])
-                        continue
-            by_item.setdefault(v["item"], []).append(v)
+            target = answer.get("item") if isinstance(answer, dict) else None
+            if target == "ignore":
+                v["how"] = "ignored"
+                continue
+            if target in by_id:
+                v["item"], v["how"] = target, answer.get("by") or "you"
+                if answer.get("episode"):
+                    v["season"] = answer.get("season") if answer.get("season") is not None else 1
+                    v["episodes"] = [answer["episode"]]
+                if answer.get("kind"):
+                    v["kind"] = answer["kind"]
+                by_item.setdefault(v["item"], []).append(v)
+                continue
+            if target == "extra":
+                v["kind"] = "extra"
+            found = scored(v)
+            if target == "unsorted" or (target and target not in by_id and target != "extra"):
+                # You took it out of a title (or removed the title): Sort now leaves it to you.
+                was = answer.get("was") if target == "unsorted" else target
+                add_to_group(v, "held", found, extra={"was": (by_id.get(was) or {}).get("title", "")})
+                continue
+            v["how"] = "waiting"
+            title = titles.get(self.title_key(v))
+            if self.title_key(v) in rejected:
+                add_to_group(v, "undone", found)
+            elif title == "ignore":
+                add_to_group(v, "ignore", found)
+            elif title in by_id:
+                add_to_group(v, "known", found, match=title)
+            elif self._is_sure(found):
+                add_to_group(v, "sure", found, match=found[0][1])
+            elif v["kind"] == "extra":
+                extras_waiting.append((v, found))
+            else:
+                add_to_group(v, "unsure" if found else "unknown", found)
 
-        # Extras (openings, endings...) without a clear name go with the show whose
-        # episodes are in the same folder, or the folder above.
+        # Extras (openings, endings...) without a clear name: likely the show whose
+        # episodes are in the same folder, or the folder above (sorted, or about to be).
         placed = {}
+        clear = {rel: g["match"] for g in groups.values() if g.get("match") for rel in g["files"]}
         for v in self.videos:
-            if v.get("item"):
-                placed.setdefault(str(Path(v["path"]).parent), Counter())[v["item"]] += 1
+            owner = v.get("item") or clear.get(v["rel"])
+            if owner and v["kind"] != "extra":
+                placed.setdefault(str(Path(v["path"]).parent), Counter())[owner] += 1
         for v, found in extras_waiting:
             folder = Path(v["path"]).parent
-            owner = None
-            for d in (folder, folder.parent):
-                if placed.get(str(d)):
-                    owner = placed[str(d)].most_common(1)[0][0]
-                    break
-            if not owner and found and found[0][0] >= 60:
-                owner = found[0][1]
+            owner = next((placed[str(d)].most_common(1)[0][0] for d in (folder, folder.parent) if placed.get(str(d))),
+                         None) or (found[0][1] if found and found[0][0] >= 60 else None)
             if owner:
-                v["item"], v["how"] = owner, "auto"
-                by_item.setdefault(owner, []).append(v)
+                add_to_group(v, "sure", found, match=owner)
             else:
-                key = self.title_key(v)
-                group = groups.setdefault(key, {
-                    "kind": "title", "key": key, "guess": v["guess"], "season": None,
-                    "file_kind": "extra", "year": v["year"], "has_eps": False, "files": [], "candidates": [i for _, i in found[:5]],
-                    "reason": "unsure" if found else "unknown"})
-                group["files"].append(v["rel"])
+                add_to_group(v, "unsure" if found else "unknown", found)
 
         questions.extend(groups.values())
 
@@ -546,22 +600,16 @@ class Library:
 
         for path in subs_for:
             subs_for[path].sort(key=lambda x: -x["score"])
-        # Questions already looked up show what the search found; ones the
-        # automatic sorter hasn't got to yet aren't put in front of you yet.
-        settings = self.app.settings.get()
-        searching = bool(settings.get("mal_client_id") or settings.get("tmdb_api_key"))
-        helpers = bool(ai.available(settings))
-        rejected = set(self.answers["rejected"])
+        # Questions already looked up show what the search found.
         for q in questions:
             found = self.answers["lookups"].get(q["key"]) or {}
-            q["sorting"] = q["kind"] == "title" and q["key"] not in rejected and (
-                (searching and "at" not in found)
-                or (helpers and "gemini_at" not in found))
             for field in ("suggest", "hint", "hint_item"):
                 if found.get(field):
                     q[field] = found[field]
             if q.get("hint_item") not in by_id:
                 q.pop("hint_item", None)
+            if q.get("match") not in by_id:
+                q.pop("match", None)
         self.by_item, self.subs_for, self.questions = by_item, subs_for, questions
 
     @staticmethod
@@ -582,8 +630,9 @@ class Library:
                               for v in main for e in v["episodes"]})
                 items[item_id] = {"files": len(main), "extras": len(vids) - len(main), "episodes": eps}
             unknown = sum(len(q["files"]) for q in self.questions if q.get("reason") == "unknown")
+            waiting = sum(1 for v in self.videos if v.get("how") == "waiting")
             return {"folder": self.folder, "error": self.error, "items": items,
-                    "questions": self.questions, "unknown_files": unknown,
+                    "questions": self.questions, "unknown_files": unknown, "waiting": waiting,
                     "auto": self.answers["auto"][-60:], "busy": self.busy,
                     "gemini_error": self.gemini_error,
                     "sort_now": dict(getattr(getattr(self.app, "sorter", None), "now", None) or {}),
@@ -592,6 +641,35 @@ class Library:
     def videos_for(self, item_id):
         with self._lock:
             return [dict(v) for v in self.by_item.get(item_id, [])]
+
+    def _show_folder(self, path):
+        """The folder a show's files live in: past "Season 1", "Extras", "Specials",
+        "Movies"... folders. None when that's the downloads folder itself (which
+        mixes everything)."""
+        folder = Path(path).parent
+        while folder != folder.parent and (_SEASON_DIR.match(norm(folder.name)) or norm(folder.name) in _EXTRA_DIRS
+                                          or norm(folder.name) in _KIND_DIRS):
+            folder = folder.parent
+        if not self.folder or folder == Path(self.folder) or Path(self.folder) not in [folder, *folder.parents]:
+            return None
+        return folder
+
+    def family(self, item_id):
+        """Other files in the same show folder as this title's files: the show's
+        films, OVAs and specials (sorted to their own entries), extras, and files
+        not sorted yet. [{"path", "name", "rel", "kind", "item"}]"""
+        with self._lock:
+            roots = {self._show_folder(v["path"]) for v in self.by_item.get(item_id, [])} - {None}
+            if not roots:
+                return []
+            out = []
+            for v in self.videos:
+                if v.get("item") == item_id or v.get("how") == "ignored":
+                    continue
+                if any(root in Path(v["path"]).parents for root in roots):
+                    out.append({"path": v["path"], "name": v["name"], "rel": v["rel"], "kind": v["kind"],
+                                "item": v.get("item")})
+            return out
 
     def unsorted_match(self, item, season, episode):
         """A download not sorted yet that looks like this episode of `item`
@@ -627,19 +705,27 @@ class Library:
 
     # ---- answers
 
+    def _group(self, key):
+        return next((q for q in self.questions if q["kind"] == "title" and q["key"] == key), None)
+
     def answer(self, body, by="you"):
-        """Remember an answer about a file (or a group of files). `by` is "you",
-        "search" or "gemini"; automatic ones are listed (and can be undone)."""
+        """Remember an answer about a file or a group of files. A group's files are
+        sorted there now; new files with the same name will be suggested there."""
         kind = body.get("kind")
         key = str(body.get("key") or "")
         target = str(body.get("item") or "")
         with self._lock:
             if kind == "title":
-                if target not in ("ignore",) and target not in {i["id"] for i in self.app.store.list()}:
+                if target != "ignore" and target not in {i["id"] for i in self.app.store.list()}:
                     raise ValueError("pick a title from your list")
+                group = self._group(key)
                 self.answers["titles"][key] = target
+                if key in self.answers["rejected"]:
+                    self.answers["rejected"].remove(key)
+                for rel in (group or {}).get("files", []):
+                    self.answers["files"][rel] = {"item": target, "by": by}
             elif kind in ("file", "episode"):
-                entry = {"item": target}
+                entry = {"item": target, "by": by}
                 if body.get("episode"):
                     entry["season"] = max(0, int(body.get("season") if body.get("season") is not None else 1))
                     entry["episode"] = max(1, int(body["episode"]))
@@ -650,17 +736,72 @@ class Library:
                 self.answers["files"][key] = {"video": str(body.get("video") or "ignore")}
             else:
                 raise ValueError("unknown kind of answer")
-            if by != "you":
-                self.answers["auto"].append({"key": key, "kind": kind, "item": target,
-                                             "video": body.get("video"), "by": by, "at": time.time(),
-                                             "label": body.get("label", ""), "why": body.get("why", ""),
-                                             "added": bool(body.get("added"))})
-                self.answers["auto"] = self.answers["auto"][-300:]
-            else:
-                self.answers["auto"] = [a for a in self.answers["auto"] if a["key"] != key]
             self.save_answers()
             self._matched_for = None
             self._match_if_needed()
+
+    def assign(self, key, rels, item_id, by, label="", why="", added=False):
+        """Sort now's decision: these files belong to `item_id` (listed under
+        Sorted for you, where it can be undone)."""
+        self.assign_many([{"key": key, "files": rels, "item": item_id, "by": by,
+                           "label": label, "why": why, "added": added}])
+
+    def assign_many(self, decisions):
+        """Several of Sort now's decisions, saved together."""
+        with self._lock:
+            for d in decisions:
+                for rel in d["files"]:
+                    current = self.answers["files"].get(rel)
+                    if isinstance(current, dict) and current.get("item") and current["item"] != "extra":
+                        continue   # sorted already (by you or before), or held by you: never changed
+                    extra = isinstance(current, dict) and current.get("item") == "extra"
+                    self.answers["files"][rel] = {"item": d["item"], "by": d["by"], **({"kind": "extra"} if extra else {})}
+                self.answers["auto"].append({"key": d["key"], "kind": "title", "item": d["item"],
+                                             "files": list(d["files"]), "by": d["by"], "at": time.time(),
+                                             "label": d.get("label", ""), "why": d.get("why", ""),
+                                             "added": bool(d.get("added"))})
+            self.answers["auto"] = self.answers["auto"][-300:]
+            self.save_answers()
+            self._matched_for = None
+            self._match_if_needed()
+
+    def route(self, rel, item, season=None, episode=None, kind=None):
+        """You moved one file: to a title (and episode), out of its title
+        ("unsorted": Sort now leaves it to you), or ignored."""
+        with self._lock:
+            if rel not in {v["rel"] for v in self.videos}:
+                raise ValueError("that file isn't in your downloads any more")
+            current = self.answers["files"].get(rel) or {}
+            if item == "unsorted":
+                self.answers["files"][rel] = {"item": "unsorted", "was": current.get("item")}
+            elif item == "ignore":
+                self.answers["files"][rel] = {"item": "ignore", "by": "you"}
+            else:
+                if item not in {i["id"] for i in self.app.store.list()}:
+                    raise ValueError("pick a title from your list")
+                entry = {"item": item, "by": "you"}
+                if episode:
+                    entry["season"] = max(0, int(season if season is not None else 1))
+                    entry["episode"] = max(1, int(episode))
+                if kind in ("episode", "ova", "special", "movie", "extra"):
+                    entry["kind"] = kind
+                self.answers["files"][rel] = entry
+            self.save_answers()
+            self._matched_for = None
+            self._match_if_needed()
+
+    def forget_item(self, item_id):
+        """A title was removed from your list: its files wait for you (Sort now
+        doesn't put them anywhere by itself)."""
+        with self._lock:
+            for rel, answer in list(self.answers["files"].items()):
+                if isinstance(answer, dict) and answer.get("item") == item_id:
+                    self.answers["files"][rel] = {"item": "unsorted", "was": item_id}
+            for key, target in list(self.answers["titles"].items()):
+                if target == item_id:
+                    del self.answers["titles"][key]
+            self.save_answers()
+            self._matched_for = None
 
     def remember_lookup(self, key, found):
         """Keep what the automatic sorter found for a question (shown with it)."""
@@ -678,10 +819,15 @@ class Library:
             self._match_if_needed()
 
     def undo(self, key):
-        """Undo an automatic decision: the file goes back to being a question,
-        and won't be decided automatically again. Returns the decisions undone."""
+        """Undo something Sort now did: its files wait for you again, and Sort now
+        leaves them to you from then on. Returns the decisions undone."""
         with self._lock:
             undone = [a for a in self.answers["auto"] if a["key"] == key]
+            for a in undone:
+                for rel in a.get("files") or []:
+                    answer = self.answers["files"].get(rel)
+                    if isinstance(answer, dict) and answer.get("item") == a["item"] and answer.get("by") != "you":
+                        del self.answers["files"][rel]
             self.answers["titles"].pop(key, None)
             self.answers["files"].pop(key, None)
             self.answers["auto"] = [a for a in self.answers["auto"] if a["key"] != key]
@@ -700,13 +846,11 @@ class Library:
 
 
 def watch(app, stop_event=None):
-    """Keep the downloads folder up to date (and sorted) in the background."""
+    """Keep the downloads folder up to date in the background. Nothing is sorted
+    here: new files wait until you press Sort now."""
     while not (stop_event and stop_event.is_set()):
         try:
             app.library.scan()
-            sorter = getattr(app, "sorter", None)
-            if sorter:
-                sorter.run_once()
         except Exception:  # noqa: BLE001 - never let the background thread die
             pass
         time.sleep(10)

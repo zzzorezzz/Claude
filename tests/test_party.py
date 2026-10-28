@@ -60,6 +60,7 @@ class PartyTest(unittest.TestCase):
         item = add(app, "anime", "Test Show", source_id="123", aliases=["Test Show"],
                    seasons=[{"number": 1, "episodes": 12}])
         app.library.scan(force=True)
+        app.sorter.run_now()
         return app, item
 
     def setUp(self):

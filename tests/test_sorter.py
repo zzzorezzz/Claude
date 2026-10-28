@@ -32,17 +32,20 @@ class _Base(unittest.TestCase):
         self.frieren = add(self.app, "anime", "Frieren: Beyond Journey's End",
                            aliases=["Sousou no Frieren"], seasons=[{"number": 1, "episodes": 28}])
         self.searches = {}
+        self.searched = []
         self.related = {}
         patches = [
             mock.patch.object(metadata, "search", side_effect=self.fake_search),
             mock.patch.object(metadata, "details", side_effect=self.fake_details),
             mock.patch.object(metadata, "related", side_effect=lambda s, item: self.related.get(item["source_id"], [])),
+            mock.patch.object(metadata.MAL, "franchise", side_effect=lambda mal_id, limit=45: self.related.get(mal_id, [])),
         ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
 
     def fake_search(self, settings, item_type, query):
+        self.searched.append(item_type)
         return [dict(r) for r in self.searches.get((item_type, query), [])]
 
     def fake_details(self, settings, item_type, source, source_id):
@@ -53,8 +56,7 @@ class _Base(unittest.TestCase):
         raise metadata.MetadataError("not found")
 
     def sort(self):
-        self.app.library.scan(force=True)
-        self.app.sorter.run_once()
+        self.app.sorter.run_now(with_ai=True)
         return self.app.library.state()
 
 
@@ -77,7 +79,7 @@ class SorterTest(_Base):
         # Undo: back to a question, never sorted automatically again.
         self.app.undo_sorted(auto["key"])
         self.assertIsNone(self.app.store.find_source("mal", "54492"))
-        self.app.sorter.run_once()
+        self.app.sorter.run_now()
         state = self.app.library.state()
         self.assertEqual(len(state["questions"]), 1)
         self.assertEqual(state["auto"], [])
@@ -102,15 +104,19 @@ class SorterTest(_Base):
         self.assertEqual([s["source_id"] for s in q["suggest"][:2]], ["136", "11061"])
         self.assertEqual(len(self.app.store.list()), 1)
 
-    def test_turned_off_it_only_suggests(self):
-        self.app.settings.update({"auto_sort": False})
-        touch(self.dl, "[Erai-raws] Kusuriya no Hitorigoto - 03 [1080p].mkv")
-        self.searches[("anime", "kusuriya no hitorigoto")] = [
-            result("anime", "The Apothecary Diaries", "54492", aliases=["Kusuriya no Hitorigoto"])]
-        state = self.sort()
-        [q] = state["questions"]
-        self.assertEqual(q["suggest"][0]["source_id"], "54492")
-        self.assertIsNone(self.app.store.find_source("mal", "54492"))
+    def test_myanimelist_first_and_no_duplicates(self):
+        # A file whose name is only close to a title in your list: a search hit that
+        # isn't that title is suggested, never added as a second entry.
+        burn = add(self.app, "anime", "Burn the Witch #0.8", source_id="58854")
+        touch(self.dl, "Burn the Witch.mkv")
+        self.searches[("anime", "burn the witch")] = [result("anime", "Burn the Witch", "41530", year=2020)]
+        self.searches[("tv", "burn the witch")] = [result("tv", "Burn the Witch", "tv/99999", year=2020)]
+        self.app.sorter.run_now()
+        self.assertEqual(self.searched[0], "anime")
+        self.assertEqual(len(self.app.store.list()), 2)        # Frieren and Burn the Witch #0.8 only
+        [q] = self.app.library.state()["questions"]
+        self.assertEqual(q["candidates"], [burn["id"]])
+        self.assertEqual(q["suggest"][0]["source_id"], "41530")
 
     def test_without_keys_nothing_is_looked_up(self):
         self.app.settings.update({"mal_client_id": "", "tmdb_api_key": ""})
@@ -122,7 +128,7 @@ class SorterTest(_Base):
     def test_offline_tries_again_soon(self):
         touch(self.dl, "Some Show - 01.mkv")
         with mock.patch.object(metadata, "search", side_effect=metadata.MetadataError("offline")):
-            self.sort()
+            self.app.sorter.run_now()
         found = self.app.library.answers["lookups"]["some show|"]
         self.assertLess(found["at"], 1e10)
         self.assertEqual(found["error"], "offline")
@@ -171,7 +177,7 @@ class SorterTest(_Base):
 
 class SortNowTest(_Base):
     def test_sort_now_asks_the_ai_about_everything_waiting(self):
-        self.app.settings.update({"gemini_api_key": "g", "auto_sort": False})
+        self.app.settings.update({"gemini_api_key": "g"})
         words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet",
                  "kilo", "lima", "mike", "november", "oscar"]
         for w in words:
@@ -180,7 +186,7 @@ class SortNowTest(_Base):
         replies = {"frirn|": {"decision": "in_list", "item_id": self.frieren["id"], "confidence": 0.9, "why": "typo"},
                    "mystery alpha|": {"decision": "in_list", "item_id": self.frieren["id"], "confidence": 0.3}}
         with mock.patch.object(ai, "sort_downloads", return_value=(replies, "groq")) as asked:
-            report = self.app.sorter.run_now()
+            report = self.app.sorter.run_now(with_ai=True)
         self.assertEqual(asked.call_count, 2)                 # 16 waiting: two batches
         self.assertTrue(all(c.kwargs.get("fresh") for c in asked.call_args_list))
         self.assertEqual((report["sorted"], report["ai"], report["error"]), (1, "Groq", ""))
@@ -190,13 +196,15 @@ class SortNowTest(_Base):
         self.assertEqual(state["items"][self.frieren["id"]]["episodes"], ["1:7"])
         self.assertFalse(state["sort_now"]["running"])
         self.assertEqual(state["sort_now"]["last"]["sorted"], 1)
-        # "Sort for me" being off doesn't stop the background sorter from asking first.
-        self.assertFalse(self.app.sorter._force)
+        # Plain Sort now doesn't ask the AI.
+        with mock.patch.object(ai, "sort_downloads", return_value=({}, "groq")) as asked:
+            self.app.sorter.run_now()
+        self.assertEqual(asked.call_count, 0)
 
     def test_sort_now_without_an_ai_key(self):
         self.app.settings.update({"mal_client_id": "", "tmdb_api_key": ""})
         touch(self.dl, "Mystery - 01.mkv")
-        report = self.app.sorter.run_now()
+        report = self.app.sorter.run_now(with_ai=True)
         self.assertIn("AI key", report["error"])
         self.assertEqual(report["left"], 1)
 
@@ -208,7 +216,7 @@ class SortNowTest(_Base):
         touch(self.dl, "Frirn - 07.mkv")
         answer = {"answers": [{"key": "frirn|", "decision": "in_list", "item_id": self.frieren["id"], "confidence": 0.9}]}
         with mock.patch.object(ai.Gemini, "ask", return_value=(answer, "gemini-flash-latest")) as asked:
-            report = self.app.sorter.run_now()
+            report = self.app.sorter.run_now(with_ai=True)
         self.assertEqual(asked.call_count, 1)
         self.assertEqual(report["sorted"], 1)
         # A helper that's out for the day is still left alone.
@@ -438,37 +446,76 @@ class AITest(unittest.TestCase):
         self.assertEqual(ai.available({"gemini_api_key": " ", "openrouter_api_key": "x"}), ["openrouter"])
 
 
-class RelatedTest(_Base):
-    def test_related_entries_show_where_each_one_is(self):
+class ConnectedTest(_Base):
+    def test_everything_connected_shows_where_each_one_is(self):
         self.related[self.frieren["source_id"]] = [
             result("anime", "Frieren: Beyond Journey's End Season 2", "59978", relation="Sequel",
                    aliases=["Sousou no Frieren 2nd Season"]),
             result("anime", "Frieren: The Little Adventures", "56885", media_kind="ova", relation="Side story")]
-        self.app.settings.update({"auto_sort": False})
         touch(self.dl, "[Group] Sousou no Frieren 2nd Season - 01 [1080p].mkv")
         self.app.library.scan(force=True)
         self.app.add_title("anime", "mal", "56885")
-        out = self.app.related(self.app.store.get(self.frieren["id"]))
+        item = self.app.store.get(self.frieren["id"])
+        self.assertIsNone(self.app.connected(item)["entries"])        # only looked for when you ask
+        out = self.app.connected(item, run=True)
         by_id = {e["source_id"]: e for e in out["entries"]}
         self.assertEqual(by_id["59978"]["relation"], "Sequel")
         self.assertIsNone(by_id["59978"]["in_list"])
         self.assertEqual(by_id["59978"]["waiting"], 1)
         self.assertIsNotNone(by_id["56885"]["in_list"])
+        self.assertIn("AI key", out["note"])
+        self.assertEqual(len(self.app.connected(item)["entries"]), 2)  # remembered
 
-    def test_tv_spinoffs_without_gemini_go_by_name(self):
+    def test_the_ai_adds_what_myanimelist_doesnt_link(self):
+        self.app.settings.update({"gemini_api_key": "g"})
+        self.related[self.frieren["source_id"]] = [result("anime", "Frieren Season 2", "59978", relation="Sequel")]
+        self.searches[("anime", "Frieren Recap")] = [result("anime", "Frieren Recap", "60001", media_kind="special")]
+        named = [{"title": "Frieren Recap", "year": 2023, "kind": "special", "relation": "Recap"},
+                 {"title": "Frieren Season 2", "year": 2026, "kind": "tv", "relation": "Sequel"},
+                 {"title": "Made Up Film", "year": 2030, "kind": "movie", "relation": "Film"}]
+        with mock.patch.object(ai, "connected_titles", return_value=named):
+            out = self.app.connected(self.app.store.get(self.frieren["id"]), run=True)
+        self.assertEqual(sorted(e["source_id"] for e in out["entries"]), ["59978", "60001"])
+
+    def test_tv_spinoffs_without_ai_go_by_name(self):
         bb = add(self.app, "tv", "Breaking Bad", source_id="tv/1396")
         self.searches[("tv", "Breaking Bad")] = [result("tv", "Breaking Bad", "tv/1396", year=2008)]
         self.searches[("movie", "Breaking Bad")] = [
             result("movie", "El Camino: A Breaking Bad Movie", "movie/559969", year=2019, media_kind="movie")]
-        out = self.app.related(self.app.store.get(bb["id"]))
+        out = self.app.connected(self.app.store.get(bb["id"]), run=True)
         self.assertEqual([e["title"] for e in out["entries"]], ["El Camino: A Breaking Bad Movie"])
 
-    def test_tv_spinoffs_with_gemini_are_checked_on_tmdb(self):
+    def test_tv_spinoffs_with_ai_are_checked_on_tmdb(self):
         self.app.settings.update({"gemini_api_key": "g"})
         bb = add(self.app, "tv", "Breaking Bad", source_id="tv/1396")
         self.searches[("tv", "Better Call Saul")] = [result("tv", "Better Call Saul", "tv/60059", year=2015)]
-        named = [{"title": "Better Call Saul", "year": 2015, "type": "tv", "relation": "Spin-off"},
-                 {"title": "Breaking Good", "year": 2030, "type": "tv", "relation": "Sequel"}]
-        with mock.patch.object(ai, "related_titles", return_value=named):
-            out = self.app.related(self.app.store.get(bb["id"]))
+        named = [{"title": "Better Call Saul", "year": 2015, "kind": "tv", "relation": "Spin-off"},
+                 {"title": "Breaking Good", "year": 2030, "kind": "tv", "relation": "Sequel"}]
+        with mock.patch.object(ai, "connected_titles", return_value=named):
+            out = self.app.connected(self.app.store.get(bb["id"]), run=True)
         self.assertEqual([(e["title"], e["relation"]) for e in out["entries"]], [("Better Call Saul", "Spin-off")])
+
+
+class FranchiseTest(unittest.TestCase):
+    def test_follows_links_through_the_franchise(self):
+        graph = {
+            "1": ("Show", 2020, "tv", [("2", "sequel"), ("3", "character")]),
+            "2": ("Show Season 2", 2022, "tv", [("1", "prequel"), ("4", "sequel"), ("5", "side_story")]),
+            "4": ("Show Season 3", 2024, "tv", [("2", "prequel")]),
+            "5": ("Show OVA", 2023, "ova", []),
+            "3": ("Crossover", 2019, "tv", []),
+        }
+
+        def fake(url, headers=None, service=""):
+            mal_id = url.split("/anime/")[1].split("?")[0]
+            title, year, kind, links = graph[mal_id]
+            return {"id": int(mal_id), "title": title, "start_date": f"{year}-01-01", "media_type": kind,
+                    "related_anime": [{"node": {"id": int(r), "title": graph[r][0]}, "relation_type": rel,
+                                       "relation_type_formatted": rel.replace("_", " ").title()} for r, rel in links]}
+        metadata._related_cache._data.clear()
+        with mock.patch.object(metadata, "_get_json", side_effect=fake):
+            found = metadata.MAL("cid").franchise("1")
+        by_id = {r["source_id"]: r for r in found}
+        self.assertEqual(sorted(by_id), ["2", "4", "5"])          # not the crossover
+        self.assertEqual((by_id["4"]["relation"], by_id["4"]["via"]), ("Sequel", "Show Season 2"))
+        self.assertEqual((by_id["5"]["media_kind"], by_id["5"]["year"]), ("ova", 2023))

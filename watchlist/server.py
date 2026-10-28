@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, importer, launcher, library, metadata, player, scanner, sorter, syncplay
+from . import ai, dialogs, discover, importer, launcher, library, metadata, player, scanner, sorter, syncplay
 from . import party as party_mod
 from .config import Settings, read_json, write_json
 from .store import TYPES, Store, new_item, next_episode
@@ -326,31 +326,37 @@ class App:
                     pass
         self.library.rematch()
 
-    # ---- related titles
+    # ---- everything connected to a title
 
-    def related(self, item, fresh=False):
-        """Seasons, sequels, spin-offs, OVAs, films... of a title, each marked as
-        in your list (and downloaded), waiting in your downloads, or missing."""
-        cache_key = f'{item["source"]}:{item["source_id"]}'
+    def connected(self, item, run=False):
+        """Everything connected to a title (seasons, films, OVAs, ONAs, specials,
+        sequels, prequels, spin-offs...), each marked as on your computer, in your
+        list, waiting in your downloads, or missing. Looked for when you ask
+        (`run`); otherwise what was found last time, or {"entries": None}."""
+        cache_key = f'connected:{item["source"]}:{item["source_id"]}'
         with self._related_lock:
             cached = self._related.get(cache_key)
-        if cached and not fresh and time.time() - cached["at"] < RELATED_TTL:
-            entries, note = cached["entries"], cached.get("note", "")
-        else:
-            entries, note = self._find_related(item)
+        if run:
+            entries, note = self._find_connected(item)
+            cached = {"at": time.time(), "entries": entries, "note": note}
             with self._related_lock:
-                self._related[cache_key] = {"at": time.time(), "entries": entries, "note": note}
+                self._related[cache_key] = cached
                 for k in sorted(self._related, key=lambda k: self._related[k]["at"])[:-300]:
                     del self._related[k]
                 write_json(self._related_path, self._related, compact=True)
+        if not cached:
+            return {"entries": None, "ai": [ai.NAMES[p] for p in ai.available(self.settings.get())]}
         lib = self.library.state()
         waiting = [q for q in lib["questions"] if q["kind"] == "title"]
         out = []
-        for e in entries:
+        for e in cached["entries"]:
             e = dict(e)
             mine = self.store.find_source(e["source"], e["source_id"])
             e["in_list"] = mine["id"] if mine else None
-            e["files"] = lib["items"].get(mine["id"], {}).get("files", 0) if mine else 0
+            got = lib["items"].get(mine["id"], {}) if mine else {}
+            e["files"] = got.get("files", 0)
+            e["episodes_here"] = len(got.get("episodes", []))
+            e["episodes_total"] = (mine or {}).get("episodes_total") or e.get("episodes_total")
             e["waiting"] = 0
             if not mine:
                 as_item = sorter._as_item(e, e["type"])
@@ -358,27 +364,57 @@ class App:
                     if library.score_file(as_item, sorter._guess(q), q["file_kind"]) >= 85:
                         e["waiting"] += len(q["files"])
             out.append(e)
-        return {"entries": out, "note": note}
+        return {"entries": out, "note": cached.get("note", ""), "at": cached["at"],
+                "ai": [ai.NAMES[p] for p in ai.available(self.settings.get())]}
 
-    def _find_related(self, item):
+    def _find_connected(self, item):
         s = self.settings.get()
-        entries, note = [], ""
+        entries, notes = [], []
+
+        def add(rows):
+            have = {e["source_id"] for e in entries} | {item["source_id"]}
+            entries.extend(r for r in rows if r["source_id"] not in have)
+
         try:
-            entries = [sorter._suggestion(r, r.get("type") if r.get("type") in TYPES else item["type"])
-                       for r in metadata.related(s, item)]
+            if item["source"] == "mal" and s["mal_client_id"]:
+                add([sorter._suggestion(r, "anime") for r in metadata.MAL(s["mal_client_id"]).franchise(item["source_id"])])
+            elif item["format"] == "movie" and item.get("tmdb_collection") and s["tmdb_api_key"]:
+                add([sorter._suggestion(r, "movie")
+                     for r in metadata.TMDB(s["tmdb_api_key"]).collection(item["tmdb_collection"])])
         except metadata.MetadataError as e:
-            note = str(e)
-        if item["type"] != "anime" and s["tmdb_api_key"]:
+            notes.append(str(e))
+        if ai.available(s):
             try:
-                extra = (self._related_by_ai(item, s) if ai.available(s)
-                         else self._related_by_name(item, s))
+                add(self._connected_by_ai(item, s))
             except ai.AIError as e:
-                note, extra = f"AI helper: {e}", self._related_by_name(item, s)
-            have = {e["source_id"] for e in entries}
-            entries += [e for e in extra if e["source_id"] not in have]
-        own = item["source_id"]
-        entries = [e for e in entries if e["source_id"] != own]
-        return entries, note
+                notes.append(f"AI helper: {e}")
+        else:
+            notes.append("With an AI key (Settings) this also finds connected titles that aren't linked directly.")
+            if item["type"] != "anime" and s["tmdb_api_key"]:
+                add(self._related_by_name(item, s))
+        return entries, " ".join(notes)
+
+    def _connected_by_ai(self, item, s):
+        """What the AI names, each checked on MyAnimeList (anime) or TMDB first."""
+        named = ai.connected_titles(s, item)
+
+        def check(row):
+            if item["type"] == "anime" or row["kind"] in ("ova", "ona"):
+                kinds = [("anime", "anime")] if s["mal_client_id"] else []
+            else:
+                kinds = []
+            if s["tmdb_api_key"]:
+                kinds.append(("movie", "movie") if row["kind"] == "movie" else ("tv", "tv"))
+            want = library.norm(row["title"])
+            for search_type, item_type in kinds:
+                for r in self._search_safely(s, search_type, row["title"]):
+                    names = {library.norm(n) for n in (r["title"], r.get("original_title"), *(r.get("aliases") or [])) if n}
+                    if want in names and (not row["year"] or not r.get("year") or abs(r["year"] - row["year"]) <= 1):
+                        return sorter._suggestion(dict(r, relation=row["relation"]), item_type)
+            return None
+
+        with ThreadPoolExecutor(4) as pool:
+            return [r for r in pool.map(check, named) if r]
 
     @staticmethod
     def _search_safely(s, item_type, title):
@@ -400,22 +436,6 @@ class App:
                     out.append(sorter._suggestion(dict(r, relation="Shares the name"), media))
         return out
 
-    def _related_by_ai(self, item, s):
-        """Spin-offs and films the AI helper knows of, each checked on TMDB."""
-        named = ai.related_titles(s, item)
-
-        def check(row):
-            want = library.norm(row["title"])
-            for r in self._search_safely(s, row["type"], row["title"]):
-                names = {library.norm(n) for n in (r["title"], r.get("original_title")) if n}
-                year = row["year"] if isinstance(row["year"], int) else None
-                if want in names and (not year or not r.get("year") or abs(r["year"] - year) <= 1):
-                    return sorter._suggestion(dict(r, relation=row["relation"]), row["type"])
-            return None
-
-        with ThreadPoolExecutor(4) as pool:
-            return [r for r in pool.map(check, named) if r]
-
     def refresh_stale(self):
         """Keep ratings and popularity current, quietly, in the background."""
         for item in self.store.list():
@@ -430,6 +450,8 @@ class App:
         """Every video for a title: from the downloads folder, plus its own folder if
         one was chosen. Returns (videos, subtitle-finder)."""
         videos = self.library.videos_for(item["id"])
+        for v in videos:
+            v["dl"] = True            # from the downloads folder: can be moved to another title
         folder_subs, folder_videos = [], []
         folder = item["local_folder"]
         if folder and os.path.isdir(folder):
@@ -471,10 +493,37 @@ class App:
             episodes = scanner.episode_map(item, videos)
             info["available"] = [f"{s}:{e}" for s, e in sorted(episodes)]
             target = episodes.get((season, episode))
+            # Which file each episode plays (files from the downloads folder can be moved).
+            in_downloads = {v["path"] for v in self.library.videos_for(item["id"])}
+            info["by_episode"] = {f"{s}:{e}": {"name": v["name"], "path": v["path"],
+                                               "rel": v["rel"] if v["path"] in in_downloads else None}
+                                  for (s, e), v in episodes.items()}
         info["target"] = target
         if target:
             info["subtitles"] = subtitles(target)
+        info["family"] = self._family(item)
         return info
+
+    def _family(self, item):
+        """The films, OVAs, specials and extras in the same folder as this title's
+        files, grouped: other titles in your list, and loose files."""
+        titles, loose = {}, []
+        for v in self.library.family(item["id"]):
+            other = None
+            if v["item"]:
+                try:
+                    other = self.store.get(v["item"])
+                except KeyError:
+                    other = None
+            if other:
+                entry = titles.setdefault(other["id"], {"id": other["id"], "title": other["title"],
+                                                        "type": other["type"], "poster": other.get("poster", ""),
+                                                        "kind": library.item_kind(other), "files": 0,
+                                                        "media_type": other.get("media_type", "")})
+                entry["files"] += 1
+            else:
+                loose.append({"name": v["name"], "path": v["path"], "rel": v["rel"], "kind": v["kind"]})
+        return {"titles": sorted(titles.values(), key=lambda t: t["title"]), "files": loose[:60]}
 
     def playable(self, item, path):
         """Only files from this title's folder or the downloads folder can be played."""
@@ -697,9 +746,15 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/library/answer", "library_answer"),
         ("POST", r"/api/library/undo", "library_undo"),
         ("POST", r"/api/library/sort", "library_sort"),
-        ("GET", r"/api/items/(\w+)/related", "related"),
+        ("POST", r"/api/library/route", "library_route"),
+        ("GET", r"/api/items/(\w+)/connected", "connected"),
+        ("POST", r"/api/items/(\w+)/connected", "find_connected"),
         ("POST", r"/api/items/(\w+)/recap", "recap"),
         ("POST", r"/api/settings/ai", "test_ai"),
+        ("GET", r"/api/find/top", "find_top"),
+        ("GET", r"/api/find/search", "find_search"),
+        ("GET", r"/api/find/genres", "find_genres"),
+        ("POST", r"/api/find/mood", "find_mood"),
         ("POST", r"/api/import/mal", "import_mal"),
         ("GET", r"/api/import/status", "import_status"),
         ("POST", r"/api/party/start", "party_start"),
@@ -873,15 +928,27 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.library.state()
 
     def api_library_sort(self, body):
-        """Sort now: search for and ask the AI about every waiting download,
-        in the background; the window follows it through /api/library."""
+        """Sort now (with the AI when body["ai"]), in the background; the window
+        follows it through /api/library."""
         if not self.app.sorter.now.get("running"):
             self.app.sorter.now = {"running": True, "last": self.app.sorter.now.get("last")}
-            threading.Thread(target=self.app.sorter.run_now, daemon=True).start()
+            threading.Thread(target=self.app.sorter.run_now, args=(bool(body.get("ai")),), daemon=True).start()
         return self.app.library.state()
 
-    def api_related(self, body, item_id):
-        return self.app.related(self.app.item(item_id), fresh=self.query.get("fresh") == "1")
+    def api_library_route(self, body):
+        """Move one file: to a title and episode, out of its title, or ignore it."""
+        try:
+            self.app.library.route(str(body.get("rel") or ""), str(body.get("item") or ""),
+                                   body.get("season"), body.get("episode"), body.get("kind"))
+        except ValueError as e:
+            raise ApiError(str(e)) from e
+        return self.app.library.state()
+
+    def api_connected(self, body, item_id):
+        return self.app.connected(self.app.item(item_id))
+
+    def api_find_connected(self, body, item_id):
+        return self.app.connected(self.app.item(item_id), run=True)
 
     def api_recap(self, body, item_id):
         item = self.app.item(item_id)
@@ -892,6 +959,73 @@ class Handler(BaseHTTPRequestHandler):
             return ai.recap(s, item, int(body.get("season") or 1), int(body.get("episode") or 1))
         except ai.AIError as e:
             raise ApiError(str(e)) from e
+
+    # ---- Find Media
+
+    def _find_kind(self):
+        kind = self.query.get("type", "")
+        if kind not in TYPES:
+            raise ApiError("type must be movie, tv or anime")
+        s = self.app.settings.get()
+        if kind != "anime" and not s["tmdb_api_key"]:
+            raise ApiError("add your TMDB token in Settings to find TV shows and films")
+        return kind, s
+
+    def _mark_listed(self, rows):
+        for r in rows:
+            mine = self.app.store.find_source(r["source"], r["source_id"])
+            r["in_list"] = mine["id"] if mine else None
+        return rows
+
+    def api_find_top(self, body):
+        kind, s = self._find_kind()
+        if kind == "anime" and not s["mal_client_id"]:
+            raise ApiError("add your MyAnimeList Client ID in Settings to find anime by year")
+        year = int(self.query.get("year") or time.strftime("%Y"))
+        order = "rated" if self.query.get("order") == "rated" else "popular"
+        return {"results": self._mark_listed([dict(r) for r in discover.top_by_year(s, kind, year, order)])}
+
+    def api_find_search(self, body):
+        kind, s = self._find_kind()
+        sort = self.query.get("sort") or "popular"
+        if sort not in {k for k, _ in discover.SORTS[kind]}:
+            sort = "popular"
+        out = discover.browse(s, kind, self.query.get("q", ""), self.query.get("genre", ""), sort,
+                              self.query.get("kind", ""), max(1, int(self.query.get("page") or 1)))
+        out["results"] = self._mark_listed(out["results"])
+        return out
+
+    def api_find_genres(self, body):
+        kind, s = self._find_kind()
+        return {"genres": discover.genres(s, kind), "sorts": discover.SORTS[kind],
+                "kinds": discover.ANIME_KINDS if kind == "anime" else []}
+
+    def api_find_mood(self, body):
+        """"I'm in the mood for...": the AI asks up to two questions, then picks
+        from your list and from the internet (each new one checked first)."""
+        s = self.app.settings.get()
+        if not ai.available(s):
+            raise ApiError("this needs an AI helper - add a free key in Settings")
+        conversation = [{"role": m.get("role"), "text": str(m.get("text") or "")[:1000]}
+                        for m in body.get("messages") or [] if m.get("role") in ("you", "ai")][-12:]
+        if not any(m["role"] == "you" and m["text"].strip() for m in conversation):
+            raise ApiError("tell me what you're in the mood for first")
+        asked = sum(1 for m in conversation if m["role"] == "ai")
+        items = self.app.store.list()
+        mine = [{"id": i["id"], "title": i["title"], "type": i["type"], "year": i.get("year"),
+                 "genres": (i.get("genres") or [])[:4],
+                 "status": "not started" if not i.get("last_played") else
+                           f'up to S{i["progress"]["season"]} E{i["progress"]["episode"]}'} for i in items[:300]]
+        try:
+            reply = ai.mood(s, conversation, mine, may_ask=asked < 2)
+        except ai.AIError as e:
+            raise ApiError(str(e)) from e
+        if reply.get("question"):
+            return reply
+        by_id = {i["id"]: i for i in items}
+        reply["from_list"] = [dict(by_id[r["id"]], why=r.get("why") or "") for r in reply["from_list"] if r.get("id") in by_id]
+        reply["new"] = self._mark_listed(discover.verify(s, reply["new"]))
+        return reply
 
     def api_import_mal(self, body):
         """Bring in a MyAnimeList list, by user name or from an export file."""
@@ -1013,6 +1147,8 @@ class Handler(BaseHTTPRequestHandler):
     def api_delete_item(self, body, item_id):
         self.app.item(item_id)
         self.app.store.delete(item_id)
+        # Its downloads wait for you; Sort now won't put them back by itself.
+        self.app.library.forget_item(item_id)
         return {"ok": True}
 
     def api_refresh_item(self, body, item_id):

@@ -1,26 +1,25 @@
-"""The automatic sorter: what happens to downloads the app couldn't place by
-their names alone, before you're asked about them.
+"""Sort now: what happens to waiting downloads when you press the button.
+Nothing here runs by itself.
 
-1. An OVA, special, film or later season of an anime in your list: its
-   MyAnimeList relations are checked for that exact entry.
-2. MyAnimeList and TMDB are searched for the guessed title.
-3. With an AI key (Gemini, Groq or OpenRouter), the AI looks at whatever is still left.
+1. Files that clearly match a title in your list (or a name you've answered
+   before) are sorted there; extras go with the show in the same folder.
+2. The rest are looked up: an OVA, special, film or later season of an anime in
+   your list through its MyAnimeList relations, otherwise by searching
+   MyAnimeList first and TMDB second (so anime ends up as anime).
+3. With "Sort now with AI", an AI helper looks at whatever is still left.
 
-A confident answer is applied straight away (adding the title to your list if
-needed) and shown under "Sorted for you", where it can be undone. Anything
-else stays a question, with what was found shown as a suggestion.
+Each decision is listed under "Sorted for you", where it can be undone. Files
+already sorted, files you took out of a title and decisions you undid are
+never touched.
 """
 
-import re
 import threading
 import time
-from pathlib import PurePosixPath
 
 from . import ai, metadata
-from .library import norm, score_file
+from .library import item_kind, norm, score_file
 from .store import new_item
 
-LOOKUPS_PER_PASS = 6
 RETRY_AFTER = 3 * 24 * 3600
 GEMINI_BATCH = 12
 NOW_LOOKUPS = 40          # Sort now: searches in one go
@@ -34,18 +33,12 @@ _MAL_KINDS = {"ova": {"ova", "ona"}, "special": {"special", "tv_special"}, "movi
 
 
 def _type_order(q, settings):
-    """Which lists to search, most likely first."""
-    names = [PurePosixPath(f).name for f in q["files"]]
-    anime_like = q["file_kind"] in ("ova", "special") or any(
-        n.startswith("[") or re.search(r"\s-\s\d{1,4}\b", n) for n in names)
-    if q["file_kind"] == "movie":
-        order = ["anime", "movie"] if anime_like else ["movie", "anime"]
-    elif anime_like:
-        order = ["anime", "tv", "movie"]
-    elif not q.get("has_eps") and q.get("year"):
-        order = ["movie", "tv", "anime"]
+    """Which lists to search: MyAnimeList first (anime always ends up as anime),
+    then TMDB, films first for what looks like a film."""
+    if q["file_kind"] == "movie" or (not q.get("has_eps") and q.get("year")):
+        order = ["anime", "movie", "tv"]
     else:
-        order = ["tv", "anime", "movie"]
+        order = ["anime", "tv", "movie"]
     have = {"anime": bool(settings.get("mal_client_id")), "tv": bool(settings.get("tmdb_api_key")),
             "movie": bool(settings.get("tmdb_api_key"))}
     return [t for t in order if have[t]]
@@ -87,60 +80,62 @@ class Sorter:
     def __init__(self, app):
         self.app = app
         self._running = threading.Lock()
-        self._force = False          # Sort now: apply decisions even with "sort for me" off
         self.now = {"running": False, "last": None}
 
-    def run_once(self):
-        if not self._running.acquire(blocking=False):
-            return
-        try:
-            self._run()
-        finally:
-            self.app.library.busy = ""
-            self._running.release()
-
-    # ---- Sort now
-
-    def run_now(self):
-        """Sort now: search for, and ask the AI about, every download that's
-        waiting, straight away. Returns what happened (also kept in self.now)."""
+    def run_now(self, with_ai=False):
+        """Sort every waiting download that can be sorted for sure. Returns what
+        happened (also kept in self.now, which the window follows)."""
         lib = self.app.library
         if not self._running.acquire(timeout=120):
-            return {"error": "the sorter is busy - try again in a minute"}
+            return {"error": "Sort now is already running"}
         self.now = {"running": True, "last": self.now.get("last")}
         auto_before = len(lib.answers["auto"])
-        report = {"at": time.time(), "sorted": 0, "left": 0, "suggested": 0, "ai": "", "error": ""}
+        report = {"at": time.time(), "sorted": 0, "left": 0, "suggested": 0, "ai": "", "error": "",
+                  "with_ai": with_ai}
         try:
-            self._force = True
             lib.busy = "Looking through your downloads…"
             lib.scan(force=True)
             settings = self.app.settings.get()
-            rejected = set(lib.answers["rejected"])
+            # 1. Clear matches, and names you've answered before (then the extras,
+            #    which can follow the files just sorted).
+            for why in ("clear match by name", "in the same folder as the show"):
+                decisions = []
+                for q in lib.pending():
+                    if q["kind"] != "title":
+                        continue
+                    if q["reason"] in ("sure", "known") and q.get("match"):
+                        decisions.append(self._decision(q, q["match"], "rules",
+                                                        "you said so before" if q["reason"] == "known" else why))
+                    elif q["reason"] == "ignore":
+                        lib.answer({"kind": "title", "key": q["key"], "item": "ignore"})
+                if decisions:
+                    lib.assign_many(decisions)
+            # 2. Searching.
             lookups = lib.answers["lookups"]
-            waiting = [q for q in lib.pending() if q["kind"] == "title" and q["key"] not in rejected]
+            open_ = lambda: [q for q in lib.pending() if q["kind"] == "title" and q["reason"] in ("unsure", "unknown")]
             if settings.get("mal_client_id") or settings.get("tmdb_api_key"):
-                todo = [q for q in waiting
+                todo = [q for q in open_()
                         if time.time() - (lookups.get(q["key"]) or {}).get("at", 0) > NOW_RESEARCH_AFTER]
                 for n, q in enumerate(todo[:NOW_LOOKUPS]):
                     lib.busy = f'Looking up "{q["guess"]}" ({n + 1} of {min(len(todo), NOW_LOOKUPS)})…'
                     self._look_up(q, settings)
-            helpers = ai.available(settings)
-            if helpers:
-                waiting = [q for q in lib.pending() if q["kind"] == "title" and q["key"] not in rejected]
-                batches = [waiting[i:i + GEMINI_BATCH] for i in range(0, len(waiting), GEMINI_BATCH)][:NOW_BATCHES]
-                for n, batch in enumerate(batches):
-                    lib.busy = (f"Asking the AI about {len(batch)} download{'s' if len(batch) != 1 else ''}"
-                                + (f" (batch {n + 1} of {len(batches)})" if len(batches) > 1 else "") + "…")
-                    used = self._ask_gemini(batch, settings, fresh=True)
-                    if used:
-                        report["ai"] = ai.NAMES[used]
-                    elif lib.gemini_error:
-                        report["error"] = lib.gemini_error
-                        break
-            elif waiting:
-                report["error"] = "no AI key - add a free one in Settings to let AI sort the rest"
+            # 3. The AI.
+            if with_ai:
+                waiting = open_()
+                if not ai.available(settings):
+                    report["error"] = "no AI key - add a free one in Settings"
+                elif waiting:
+                    batches = [waiting[i:i + GEMINI_BATCH] for i in range(0, len(waiting), GEMINI_BATCH)][:NOW_BATCHES]
+                    for n, batch in enumerate(batches):
+                        lib.busy = (f"Asking the AI about {len(batch)} download{'s' if len(batch) != 1 else ''}"
+                                    + (f" (batch {n + 1} of {len(batches)})" if len(batches) > 1 else "") + "…")
+                        used = self._ask_gemini(batch, settings, fresh=True)
+                        if used:
+                            report["ai"] = ai.NAMES[used]
+                        elif lib.gemini_error:
+                            report["error"] = lib.gemini_error
+                            break
         finally:
-            self._force = False
             lib.busy = ""
             state = lib.state()
             report["sorted"] = max(0, len(lib.answers["auto"]) - auto_before)
@@ -150,28 +145,6 @@ class Sorter:
             self.now = {"running": False, "last": report}
             self._running.release()
         return report
-
-    # ---- the passes
-
-    def _run(self):
-        lib = self.app.library
-        settings = self.app.settings.get()
-        rejected = set(lib.answers["rejected"])
-        lookups = lib.answers["lookups"]
-        now = time.time()
-        waiting = [q for q in lib.pending() if q["kind"] == "title" and q["key"] not in rejected]
-        if settings.get("mal_client_id") or settings.get("tmdb_api_key"):
-            todo = [q for q in waiting if now - (lookups.get(q["key"]) or {}).get("at", 0) > RETRY_AFTER]
-            for q in todo[:LOOKUPS_PER_PASS]:
-                lib.busy = f'Looking up "{q["guess"]}"…'
-                self._look_up(q, settings)
-        if ai.available(settings):
-            waiting = [q for q in lib.pending() if q["kind"] == "title" and q["key"] not in rejected]
-            todo = [q for q in waiting
-                    if now - (lookups.get(q["key"]) or {}).get("gemini_at", 0) > RETRY_AFTER]
-            if todo:
-                lib.busy = f"Asking {ai.NAMES[ai.available(settings)[0]]} about your downloads…"
-                self._ask_gemini(todo[:GEMINI_BATCH], settings)
 
     def _look_up(self, q, settings):
         lib = self.app.library
@@ -295,10 +268,30 @@ class Sorter:
 
     # ---- applying a decision
 
+    def _looks_like_a_duplicate(self, q, pick):
+        """A title the search found that isn't in your list, while something in your
+        list already looked like these files: the same kind of entry (or a TMDB
+        copy of an anime) would most likely be a second copy of it."""
+        kind = item_kind(_as_item(pick, pick["type"]))
+        for item_id in q.get("candidates") or []:
+            try:
+                mine = self.app.store.get(item_id)
+            except KeyError:
+                continue
+            if item_kind(mine) == kind or (mine["type"] == "anime" and pick["type"] != "anime"):
+                return True
+        return False
+
+    def _decision(self, q, item_id, by, why, added=False):
+        title = self.app.store.get(item_id)["title"]
+        count = len(q["files"])
+        return {"key": q["key"], "files": q["files"], "item": item_id, "by": by, "why": why, "added": added,
+                "label": f'{count} file{"s" if count != 1 else ""} → {title}' + (" (added to your list)" if added else "")}
+
     def _apply(self, q, pick, by, why):
-        """Connect the files to a title, adding it to your list first if needed."""
-        if not self._force and not self.app.settings.get().get("auto_sort", True):
-            return False   # you'd rather decide: it's shown as a suggestion instead
+        """Sort a group of files to a title, adding it to your list first if needed.
+        A title that isn't in your list yet is only added when nothing in your
+        list looked like it (that would most likely be a duplicate)."""
         lib = self.app.library
         added = False
         item_id = pick.get("item_id")
@@ -307,15 +300,13 @@ class Sorter:
                 existing = self.app.store.find_source(pick["source"], pick["source_id"])
                 if existing:
                     item_id = existing["id"]
+                elif self._looks_like_a_duplicate(q, pick):
+                    return False
                 else:
                     info = metadata.details(self.app.settings.get(), pick["type"], pick["source"], pick["source_id"])
                     item_id = self.app.store.add(new_item(pick["type"], info))["id"]
                     added = True
-            title = self.app.store.get(item_id)["title"]
-            count = len(q["files"])
-            lib.answer({"kind": "title", "key": q["key"], "item": item_id, "added": added, "why": why,
-                        "label": f'{count} file{"s" if count != 1 else ""} → {title}'
-                                 + (" (added to your list)" if added else "")}, by=by)
+            lib.assign_many([self._decision(q, item_id, by, why, added)])
             return True
         except (metadata.MetadataError, KeyError, ValueError):
             return False

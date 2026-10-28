@@ -12,7 +12,9 @@ from watchlist import launcher, metadata, player
 from watchlist.server import App, make_server
 
 
-class ServerTest(unittest.TestCase):
+class ServerBase(unittest.TestCase):
+    """A running app with fake TMDB / MyAnimeList answers."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -57,6 +59,8 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200, item)
         return item
 
+
+class ServerTest(ServerBase):
     def test_ui_is_served(self):
         status, body = self.call("GET", "/")
         self.assertEqual(status, 200)
@@ -246,3 +250,8 @@ class ServerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_moving_a_file_that_isnt_there(self):
+        item = self.add("tv", "tmdb", "tv/1396")
+        status, data = self.call("POST", "/api/library/route", {"rel": "nope.mkv", "item": item["id"]})
+        self.assertEqual(status, 400, data)

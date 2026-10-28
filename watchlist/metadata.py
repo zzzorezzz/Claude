@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from . import net
 
@@ -141,20 +142,25 @@ class TMDB:
 
     def search(self, query, media):
         data = self._get(f"/search/{media}", query=query, include_adult="false")
-        out = []
-        for r in data.get("results", [])[:20]:
-            title = r.get("title") or r.get("name") or ""
-            out.append({
-                "source": "tmdb", "source_id": f"{media}/{r['id']}",
-                "title": title,
-                "original_title": r.get("original_title") or r.get("original_name") or "",
-                "year": _year(r.get("release_date") or r.get("first_air_date")),
-                "overview": r.get("overview") or "",
-                "poster": self.image(r.get("poster_path"), "w342"),
-                "rating": round(r["vote_average"], 1) if r.get("vote_count") else None,
-                "format": "movie" if media == "movie" else "series",
-            })
-        return out
+        return [self.result(r, media) for r in data.get("results", [])[:20]]
+
+    def result(self, r, media):
+        """A search or discover result, in the app's shape."""
+        title = r.get("title") or r.get("name") or ""
+        return {
+            "source": "tmdb", "source_id": f"{media}/{r['id']}",
+            "title": title,
+            "original_title": r.get("original_title") or r.get("original_name") or "",
+            "year": _year(r.get("release_date") or r.get("first_air_date")),
+            "overview": r.get("overview") or "",
+            "poster": self.image(r.get("poster_path"), "w342"),
+            "rating": round(r["vote_average"], 1) if r.get("vote_count") else None,
+            "votes": r.get("vote_count") or 0,
+            "popularity": r.get("popularity") or 0,
+            "format": "movie" if media == "movie" else "series",
+            "genre_ids": r.get("genre_ids") or [],
+            "language": r.get("original_language") or "",
+        }
 
     @staticmethod
     def pick_trailer(videos):
@@ -396,6 +402,59 @@ class MAL:
             out.append(entry)
         _related_cache.put(("mal", str(mal_id)), out)
         return out
+
+    # Links worth following through a franchise ("character" links lead to crossovers).
+    _FOLLOW = {"sequel", "prequel", "side_story", "parent_story", "full_story", "summary",
+               "alternative_setting", "alternative_version", "spin_off"}
+
+    def franchise(self, mal_id, limit=45):
+        """Everything connected to an anime, following MyAnimeList's links from
+        entry to entry (sequels of sequels, the OVAs of the second season...),
+        up to `limit` entries. Each found entry is a summary with its "relation"
+        (and "via": the entry it's linked from, when that isn't this one)."""
+        cached = _related_cache.get(("franchise", str(mal_id)))
+        if cached is not None:
+            return cached
+        fields = MAL_SEARCH_FIELDS + ",related_anime"
+        start = str(int(mal_id))
+        seen = {start}
+        found = {}                 # id -> summary
+        frontier = [(start, None)]
+        names = {}
+        while frontier and len(found) < limit:
+            batch, frontier = frontier[:8], frontier[8:]
+            with ThreadPoolExecutor(4) as pool:
+                pages = list(pool.map(lambda job: self._expand(job[0], fields), batch))
+            for (node_id, _parent), page in zip(batch, pages):
+                if not page:
+                    continue
+                if node_id in found:
+                    found[node_id].update({k: v for k, v in self._summary(page).items() if k != "relation"})
+                names[node_id] = self._titles(page)[0]
+                for row in page.get("related_anime") or []:
+                    node = row.get("node") or {}
+                    rid = str(node.get("id") or "")
+                    kind = row.get("relation_type") or ""
+                    if not rid or rid in seen or kind == "character":
+                        continue
+                    seen.add(rid)
+                    found[rid] = {"source": "mal", "source_id": rid, "title": node.get("title", ""),
+                                  "original_title": "", "year": None, "overview": "", "rating": None,
+                                  "poster": self._picture(node), "format": "series", "media_type": "",
+                                  "media_kind": "", "type": "anime", "episodes_total": None, "aliases": [],
+                                  "relation": row.get("relation_type_formatted") or kind.replace("_", " ").title(),
+                                  "via": names[node_id] if node_id != start else ""}
+                    if kind in self._FOLLOW and len(seen) <= limit:
+                        frontier.append((rid, node_id))
+        out = sorted(found.values(), key=lambda r: (r.get("year") or 9999, r["title"]))[:limit]
+        _related_cache.put(("franchise", str(mal_id)), out)
+        return out
+
+    def _expand(self, mal_id, fields):
+        try:
+            return self._get(f"/anime/{mal_id}", fields=fields)
+        except MetadataError:
+            return None
 
     def user_list(self, user):
         """A public MyAnimeList list: [{"mal_id", "title", "status", "watched"}]."""

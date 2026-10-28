@@ -50,9 +50,6 @@ DEFAULT_SETTINGS = {
     # run out or can't be reached, the next one is used.
     "groq_api_key": "",
     "openrouter_api_key": "",
-    # Search MyAnimeList / TMDB for downloads that aren't in your list, and
-    # add them when it's clear what they are.
-    "auto_sort": True,
     # Skip openings and endings in the built-in player (when the file marks them).
     "skip_intro": True,
     # Watch together (Syncplay): your name, the server and Syncplay's location.
@@ -65,7 +62,7 @@ OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
 TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "sync_folder",
              "downloads_folder", "last_folder", "gemini_api_key", "groq_api_key", "openrouter_api_key",
              "party_name", "party_server")
-BOOL_KEYS = ("queue_next_episodes", "auto_sort", "skip_intro")
+BOOL_KEYS = ("queue_next_episodes", "skip_intro")
 
 
 def default_data_dir() -> Path:

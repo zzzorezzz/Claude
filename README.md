@@ -5,7 +5,7 @@ A Netflix-style desktop app for Windows and Mac, for the TV shows, anime and mov
 Two things are optional, and everything works without them:
 
 - **A sync folder.** Without one, your list is saved on this computer only. With one (Google Drive, OneDrive...), your list stays the same on your Windows PC and your Mac.
-- **An AI key** (Gemini, Groq or OpenRouter, all free). Without one, the app's own rules and MyAnimeList / TMDB searches sort your downloads and find related titles. With one, the AI helps with the files those can't place, finds TV spin-offs and writes recaps.
+- **An AI key** (Gemini, Groq or OpenRouter, all free). Without one, the app's own rules and MyAnimeList / TMDB searches sort your downloads and find connected titles. With one, the AI helps with the files those can't place, finds everything connected to a title, suggests what to watch and writes recaps.
 
 - **Home screen:** three rows (TV Shows, Anime, Movies), each showing your 5–6 most popular titles and a **Show more** tile for the full list.
   - Movies are ordered by box office, TV shows by TMDB popularity, and anime by MyAnimeList members.
@@ -15,18 +15,30 @@ Two things are optional, and everything works without them:
 - **Collections:** these can mix TV shows, anime and movies, and a title can be in several. Find them on the **Collections** page.
 - **Continue watching:** the first row on the home screen. Click a poster to carry on where you stopped.
 - **Title page:** backdrop, summary, ratings and an episode list. The trailer only plays when you click it.
-  - **Related**, on the right: the other seasons, sequels, prequels, OVAs, specials, films and spin-offs. Each one shows whether it's in your list, on your computer, or waiting in your downloads. Add them one at a time, or with **Add all**.
-    - Anime come from MyAnimeList, and film series from TMDB.
-    - TV shows list titles that share their name; with an AI key, spin-offs with other names too (each one checked on TMDB).
+  - **Everything connected**, on the right: press **Find everything connected** to list every season, sequel, prequel, OVA, ONA, special, film and spin-off, grouped by kind. Each one shows whether it's in your list, how many of its episodes are on your computer, or that it's waiting in your downloads; the summary says what's missing. Add them one at a time, or with **Add all**.
+    - Anime come from MyAnimeList (the whole franchise, following its relations), and film series from TMDB.
+    - With an AI key, the AI adds the ones with other names (each one checked on MyAnimeList / TMDB first). Without one, TV shows list titles that share their name.
+  - **Episodes:** each episode says whether it's on your PC (with its file name) or **Not downloaded**, and a line above the list says how many you have and which are missing.
+    - **Move…** next to a file moves just that file: to another title, season or episode, out of the title (to sort later), or ignored. **Files…** in **On your PC** lists every file of the title, each with **Move…**.
+  - **From the same folder:** films, OVAs, specials and extras that sit in the same folder as a series' files are shown on every page of that series, and on their own page. Click one to open it, or play it.
   - **Extras:** openings, endings, trailers and other bonus videos found with the show's files, kept apart from the episodes.
+- **Find Media** (in the top bar): new things to watch from the internet.
+  - **Top by year:** pick TV shows, movies or anime, a year, and **Most popular** or **Highest rated**, for that year's top 100. TV shows come from TMDB (anime left out, they have their own list), anime from MyAnimeList's seasons.
+  - **Search & browse:** keywords, genre and type (for anime: TV, film, OVA, ONA, special), sorted by most popular, highest rated, box office (films), newest or oldest. TV shows and films come from TMDB, anime from MyAnimeList.
+  - **I'm in the mood for…:** tell your AI helper what you feel like watching. It may ask one or two questions, then picks a few titles from your list and about a dozen new ones, each with a reason. New titles are checked on MyAnimeList / TMDB, so made-up ones don't show.
+  - Click any poster for its summary; **+ Add** puts it in your list, and titles already in it say so.
 - **Import from MyAnimeList:** **Settings → Import my MyAnimeList list…** brings in your list by user name (if it's public) or from MyAnimeList's export file. Your watched episodes set where you're up to.
 - **Downloads:** choose the one folder your downloads go into (**Settings → Your downloads**).
   - The app reads each video's name, and its folder's name if needed, and connects it to the right show, season and episode or movie in your list.
   - It tells episodes, OVAs, specials, films and extras apart, using the file and folder names, the size, and what MyAnimeList says each title is.
-  - **Shows that aren't in your list are found for you.** It searches MyAnimeList and TMDB, and an OVA, special, film or second season of an anime you have is found through that anime's MyAnimeList relations. When it's clear what a file is, the title is added and the file sorted. Everything done this way is listed under **Sorted for you**, where **Undo** puts it back (and removes the title it added).
-    - To decide everything yourself, untick **Sort new downloads for me** in Settings. What was found is then shown as a suggestion.
-  - **Sort now** (in **Sort your downloads**, and in the banner above your downloads) does all of this straight away for everything waiting: it searches again and asks your AI helper about the rest, then says how many it sorted. Pressing it also sorts when **Sort new downloads for me** is off, and gives an AI helper that's resting after being busy another go.
-  - When it still isn't sure (a typo, an unnumbered file, a subtitle without a video), it asks you in **Sort your downloads**, with what it found. Your answer is remembered, so new episodes of that show are sorted on their own.
+  - **Nothing is sorted until you press Sort now.** New downloads wait, and the banner above your downloads says how many. Files you've sorted, moved or taken out of a title, and files sorted earlier, are never changed.
+  - **Sort now** (in the banner, and in **Sort your downloads**) sorts only what's still waiting:
+    1. Files that clearly match a title in your list, and extras in the same folder as a show.
+    2. Shows that aren't in your list are searched for, **MyAnimeList first**: anything that's an anime goes to Anime, and TMDB is only used for what isn't on MyAnimeList. An OVA, special, film or second season of an anime you have is found through that anime's MyAnimeList relations. A title already in your list is never added twice.
+    3. **✨ with AI**, the small button above **Sort now**, also asks your AI helper about what's left.
+
+    It then says how many it sorted. Everything it did is listed under **Sorted for you**, where **Undo** puts it back (and removes the title it added); undone files are left for you.
+  - **Sort them myself** opens **Sort your downloads**: what's ready to sort, what it isn't sure of (a typo, an unnumbered file, a subtitle without a video), and what isn't in your list, each with what was found. Your answers are kept.
   - The home screen starts with **Downloaded**: rows for anime, TV shows and movies you have files for. **Your list** below it still shows everything.
 - **Watch now:** your files come first, then online.
   - **On your computer:** it plays the episode you're up to in the **built-in player** (mpv), followed by the next episodes in order, with matching `.srt`/`.ass` subtitles.
@@ -80,11 +92,13 @@ You can add one, two or all three. They're asked in that order:
 
 With a key:
 
-- The AI looks at the downloads that the rules and searches couldn't place. Titles it names are checked on MyAnimeList / TMDB before anything is added, and its decisions are listed under **Sorted for you** like the others.
-- The Related panel also finds TV spin-offs, films and specials with other names.
+- Titles it names are checked on MyAnimeList / TMDB before anything is added or shown, and its sorting decisions are listed under **Sorted for you** like the others.
+- **✨ with AI** next to **Sort now** asks it about the downloads the rules and searches couldn't place.
+- **Find everything connected** on a title page also finds spin-offs, films and specials with other names.
+- **Find Media → I'm in the mood for…** suggests what to watch, from your list and new titles.
 - **Previously on…** on a title page gives a short, spoiler-free recap up to the episode you're on.
 
-Only names are sent (file names, folder names and the titles in your list that could match), never the files.
+Only names are sent, never the files: file and folder names, the titles in your list that could match, and for **I'm in the mood for…** your list's titles with how far you've got.
 
 ### Your own sites
 
