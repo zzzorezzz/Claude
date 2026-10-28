@@ -75,9 +75,21 @@ class TorrentTest(test_server.ServerBase):
     def add(self):
         status, t = self.call("POST", f"/api/items/{self.item['id']}/torrents", {"magnet": self.magnet})
         self.assertEqual(status, 200, t)
-        self.connect(t["hash"])
-        self.assertTrue(wait_for(lambda: self.app.torrents.records[t["hash"]].get("files")), "no file list")
+        self.assertTrue(self.connected(t["hash"]), "no file list")
         return t["hash"]
+
+    def connected(self, h, timeout=40):
+        """Until the torrent has its list of files from the test's sharer. (Asked
+        again every second or so: on a busy computer a first try can be lost.)"""
+        end, last = time.time() + timeout, 0
+        while time.time() < end:
+            if self.app.torrents.records.get(h, {}).get("files"):
+                return True
+            if time.time() - last > 1 and h in self.app.torrents.handles:
+                self.connect(h)
+                last = time.time()
+            time.sleep(0.1)
+        return False
 
     def fetch(self, url, start=None, end=None):
         u = urllib.parse.urlsplit(url)
@@ -202,9 +214,9 @@ class TorrentTest(test_server.ServerBase):
         import threading
         # The guest has the show but no copy of the episode: the invite's magnet is used.
         def connect_when_added():
-            for _ in range(100):
+            for _ in range(400):
                 for h in list(self.app.torrents.handles):
-                    self.connect(h)
+                    self.connected(h)
                     return
                 time.sleep(0.05)
         threading.Thread(target=connect_when_added, daemon=True).start()
