@@ -949,9 +949,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 
 /* ---- Settings: your streaming services and sites */
 #svc-list { display: grid; gap: 8px; margin: 6px 0 10px; }
-.svc-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px; border-radius: var(--radius);
+.svc-row, .site-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px; border-radius: var(--radius);
   background: var(--panel-2); border: 1px solid #333; transition: opacity .2s; }
-.svc-row.off { opacity: .5; }
+.svc-row.off, .site-row.off { opacity: .5; }
 .svc-on input { width: 18px; height: 18px; accent-color: var(--red); margin-top: 8px; }
 .svc-main { display: grid; gap: 8px; min-width: 0; }
 .svc-line { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -966,7 +966,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 .svc-btn[disabled] { opacity: .35; cursor: default; }
 .svc-btn.danger:hover { border-color: #ff6b6b; color: #ff6b6b; }
 .svc-add .select { width: auto; }
-@media (max-width: 760px) { .svc-row { grid-template-columns: 26px 1fr; } .svc-tools { grid-column: 2; } }
+@media (max-width: 760px) { .svc-row, .site-row { grid-template-columns: 26px 1fr; } .svc-tools { grid-column: 2; } }
 
 /* ---- Surprise me */
 .surprise-modal { width: min(720px, 94vw); }

@@ -3787,7 +3787,7 @@ function drawServices(wrap) {
 }
 
 function readServices(wrap) {
-  $$('.svc-row', wrap).forEach((row) => {
+  $$('#svc-list .svc-row', wrap).forEach((row) => {
     const x = wrap.svc[Number(row.dataset.i)];
     if (!x) return;
     x.on = $('.svc-on-box', row).checked;
@@ -3822,7 +3822,7 @@ async function serviceAction(wrap, a, row) {
 function drawSites(wrap) {
   const box = $('#site-list', wrap);
   if (!box) return;
-  box.innerHTML = wrap.sites.length ? wrap.sites.map((x, i) => `<div class="svc-row ${x.on ? '' : 'off'}" data-i="${i}">
+  box.innerHTML = wrap.sites.length ? wrap.sites.map((x, i) => `<div class="site-row ${x.on ? '' : 'off'}" data-i="${i}">
       <label class="svc-on" title="Use it"><input type="checkbox" class="site-on" ${x.on ? 'checked' : ''}></label>
       <div class="svc-main">
         <div class="svc-line"><input class="input site-name" value="${esc(x.name)}" placeholder="Name">
@@ -3835,7 +3835,7 @@ function drawSites(wrap) {
 }
 
 function readSites(wrap) {
-  $$('#site-list .svc-row', wrap).forEach((row) => {
+  $$('#site-list .site-row', wrap).forEach((row) => {
     const x = wrap.sites[Number(row.dataset.i)];
     if (!x) return;
     x.on = $('.site-on', row).checked;
@@ -3850,7 +3850,7 @@ async function siteAction(wrap, a, row) {
   if (a === 'site-add') {
     wrap.sites.push({ id: '', name: '', url: '', on: true });
     drawSites(wrap);
-    $$('#site-list .svc-row', wrap).pop()?.querySelector('.site-name')?.focus();
+    $$('#site-list .site-row', wrap).pop()?.querySelector('.site-name')?.focus();
     return;
   }
   const i = Number(row?.dataset.i);
@@ -3981,7 +3981,7 @@ async function openSettings() {
     wrap.svc.push({ id: '', name: p.name, url: p.url, check: [...p.check], types: ['anime', 'tv', 'movie'], on: true });
     e.target.value = '';
     drawServices(wrap);
-    $$('.svc-row', wrap).pop()?.querySelector(v === 'site' ? '.svc-url' : '.svc-name')?.focus();
+    $$('#svc-list .svc-row', wrap).pop()?.querySelector(v === 'site' ? '.svc-url' : '.svc-name')?.focus();
   });
   const values = () => {
     const f = new FormData(form);
