@@ -19,6 +19,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Get libtorrent (torrent streaming)
+        run: |
+          python -m pip install libtorrent
+          python -c "import libtorrent; print('libtorrent', libtorrent.__version__)"
+
       - name: Run the tests on Windows
         run: python -m unittest discover -s tests -t . -v
 
@@ -45,6 +50,7 @@ jobs:
         run: >
           pyinstaller main.py --noconfirm --onefile --windowed
           --name Watchlist
+          --hidden-import libtorrent --collect-binaries libtorrent
           --icon packaging/watchlist.ico
           --add-data "watchlist/web;watchlist/web"
           --add-data "watchlist/mpv_scripts;watchlist/mpv_scripts"
@@ -60,6 +66,7 @@ jobs:
           if (-not $r.frozen) { throw "not running as a packaged exe" }
           if ($r.web_files -ne $true) { throw "the app's screens (HTML/JS/CSS) are missing from the exe" }
           if ($r.webview -ne $true) { throw "pywebview is missing: $($r.webview)" }
+          if ($r.libtorrent -ne $true) { throw "libtorrent (torrent streaming) is missing: $($r.libtorrent)" }
           if ($r.clr -ne $true) { throw "pythonnet (needed for the app window) is missing: $($r.clr)" }
           if ($r.https -ne $true) { throw "secure (HTTPS) connections don't work: $($r.https)" }
 
@@ -115,6 +122,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Get libtorrent (torrent streaming)
+        run: |
+          python -m pip install libtorrent
+          python -c "import libtorrent; print('libtorrent', libtorrent.__version__)"
+
       - name: Run the tests on macOS
         run: python -m unittest discover -s tests -t . -v
 
@@ -149,6 +161,7 @@ jobs:
         run: |
           pyinstaller main.py --noconfirm --windowed \
             --name Watchlist \
+            --hidden-import libtorrent --collect-binaries libtorrent \
             --icon packaging/watchlist.icns \
             --osx-bundle-identifier app.watchlist.desktop \
             --add-data "watchlist/web:watchlist/web" \

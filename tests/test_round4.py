@@ -72,12 +72,17 @@ class WatchedTest(test_server.ServerBase):
         item = self.add("tv", "tmdb", "tv/1396")
         status, data = self.call("PUT", f"/api/items/{item['id']}", {"watched": True})
         self.assertEqual(status, 200, data)
-        self.assertTrue(data["watched_at"])
-        first = data["watched_at"]
+        self.assertTrue(data["in_watched"])
+        first = data["in_watched"]
         _, data = self.call("PUT", f"/api/items/{item['id']}", {"watched": True})
-        self.assertEqual(data["watched_at"], first)                         # since when, kept
+        self.assertEqual(data["in_watched"], first)                         # since when, kept
         _, data = self.call("PUT", f"/api/items/{item['id']}", {"watched": False})
-        self.assertIsNone(data["watched_at"])
+        self.assertIsNone(data["in_watched"])
+
+    def test_films_played_to_the_end_arent_moved_to_watched(self):
+        film = self.add("movie", "tmdb", "movie/27205")
+        self.app._finished_entry(film["id"], {"key": "movie", "path": "x"})
+        self.assertIsNone(self.app.store.get(film["id"])["in_watched"])
 
 
 class ShareTest(test_server.ServerBase):
@@ -130,3 +135,17 @@ class ShareTest(test_server.ServerBase):
             self.assertEqual(status, 400, (code, data))
         status, _ = self.call("POST", "/api/collections/nope/share")
         self.assertEqual(status, 404)
+
+
+class WatchedUpgradeTest(test_server.ServerBase):
+    def test_films_finished_before_arent_moved_into_watched(self):
+        from watchlist.config import write_json
+        from watchlist.server import App
+        data = Path(self.tmp.name) / "older"
+        write_json(data / "watchlist.json", {"items": [
+            {"id": "s1", "title": "A show", "type": "tv", "format": "series", "watched_at": 100.0, "modified": 1},
+            {"id": "f1", "title": "A film", "type": "movie", "format": "movie", "watched_at": 200.0, "modified": 1}],
+            "collections": []})
+        app = App(data)
+        self.assertEqual(app.store.get("s1")["in_watched"], 100.0)      # marked by hand, in that version
+        self.assertIsNone(app.store.get("f1")["in_watched"])            # only played to the end

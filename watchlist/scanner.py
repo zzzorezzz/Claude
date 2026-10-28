@@ -7,7 +7,8 @@ from pathlib import Path
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".webm", ".flv", ".mpg",
               ".mpeg", ".ts", ".m2ts", ".ogv", ".3gp", ".divx", ".rmvb"}
 SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
-SKIP_DIRS = {"$recycle.bin", "system volume information", "@eadir", ".trash"}
+SKIP_DIRS = {"$recycle.bin", "system volume information", "@eadir", ".trash",
+             "watchlist torrents"}  # streamed episodes are the torrent's, not your downloads
 MAX_FILES = 20000
 
 _SXE = re.compile(r"\bs(\d{1,2})[ ._-]*((?:e\d{1,4}(?:[ ._-]*)?)+)\b", re.I)

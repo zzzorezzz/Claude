@@ -9,7 +9,8 @@ Two things are optional, and everything works without them:
 
 - **Home screen:** three rows (TV Shows, Anime, Movies), each showing your 5–6 most popular titles and a **Show more** tile for the full list.
   - Movies are ordered by box office, TV shows by TMDB popularity, and anime by MyAnimeList members.
-- **Top bar:** search, **Sort by year** (newest first, oldest first, then back to popular) and a **Genre** filter.
+- **Top bar:** the sections (folded into **Browse ▾** when the window is narrow, or while you search), the search (click the magnifier), **Popular / Newest / Oldest**, a **Genre** filter, **🎲 Surprise me**, **Torrents** (once you have one), **Watch together** and **Settings**.
+- **🎲 Surprise me:** picks something from your list for you. Narrow it down by type, the time you have (under 30 minutes, about an hour, a whole evening), something new or something to carry on with, genre, or only what's on your computer. **Pick another** rolls again.
 - **Adding titles:** use **+** in any row. The summary, ratings, cast, seasons and trailer are filled in automatically, from TMDB for movies and TV and from MyAnimeList for anime.
   - Anime always come from MyAnimeList: adding an anime from TMDB (say from TV Shows) adds its MyAnimeList entry instead.
   - An anime added from TMDB before this version shows **Use MyAnimeList instead** on its page (also in **⋯ → Use MyAnimeList info**). Pick the right entry: its files, where you're up to, folders and collections are kept, episode numbers are converted (TMDB's season 2 episode 3 becomes episode 10 when season 1 had 7), and it moves to Anime. If that entry is already in your list, the two become one.
@@ -59,21 +60,33 @@ Two things are optional, and everything works without them:
     It then says how many it sorted. Everything it did is listed under **Sorted for you**, where **Undo** puts it back (and removes the title it added); undone files are left for you.
   - **Sort them myself** opens **Sort your downloads**: what's ready to sort, what it isn't sure of (a typo, an unnumbered file, a subtitle without a video), and what isn't in your list, each with what was found. Your answers are kept.
   - The home screen starts with **Downloaded**: rows for anime, TV shows and movies you have files for. **Your list** below it still shows everything.
-- **Watch now:** your files come first, then online.
+- **Watch now:** a file on your computer plays straight away. When there isn't one, you choose: **Stream from the torrent** (or paste a magnet link right there), **Watch online**, or **Find the file on my PC**.
   - **On your computer:** it plays the episode you're up to in the **built-in player** (mpv), followed by the next episodes in order, with matching `.srt`/`.ass` subtitles.
     - The player handles MKV and HEVC files, several audio and subtitle tracks, and fully styled anime subtitles.
     - It remembers where you stopped, even on your other computer, and resumes from there. An episode counts as watched once you reach the end credits, and you move on to the next one.
     - **Play in VLC** on the title page, or **Open in VLC instead** while something is playing, switches to VLC at the same spot.
     - Click any episode in the episode list to play it, or use **Choose file…** to pick any file.
     - **Openings and endings are skipped** when the file marks them as chapters (most anime releases do). Press **Shift+S** while watching to turn this on or off, or change it in Settings.
-  - **Online, when you don't have it:**
-    1. **Netflix**, then **HBO Max**, if either has it in your country (Pakistan by default).
-    2. Otherwise, a search on **your own site**: one for anime and one for movies and TV, set in Settings.
-
-    These open in your browser (Opera GX or Chrome). The app only opens the search; it doesn't read or play anything from the site.
+  - **Online:** your own list of streaming services and sites (**Settings → Watching online**): add as many as you like (Netflix, HBO Max, Disney+, Prime Video, Crunchyroll, Hulu, Apple TV+ are ready-made, or any site with a search link), remove them, switch them off, put them in order, and choose which are for anime, TV and movies.
+    - A service you subscribe to can be ticked **Only when it has it**: it's then only used when TMDB says it has the title in your country. A site is searched every time.
+    - **Watch online** shows them all with whether each has it, and opens the one you pick; **Best match** opens the first in your order that fits.
+    - They open in your browser (Opera GX or Chrome). The app only opens the search; it doesn't read or play anything from the site.
+  - **Deleting an episode:** the bin button next to an episode's file. Your own files go to the Recycle Bin / Trash (so you can put them back); a torrent's is deleted. Your own files are never deleted by the app itself.
 - **When a file doesn't work:** press **Not working**. It's in the play window, and in the **On your PC** section of the title page.
   - Watch now then goes online for that title, and its poster shows **FILE ISSUE**.
   - Fix it later from the title page with **Choose file…** or **Use a different folder…**, or press **It works now**.
+
+### Streaming from a torrent
+
+On a show's page, under **Stream from a torrent**, paste its **magnet link**.
+
+- Only the torrent's list of files is fetched (from the people sharing it, usually in seconds). Each file is matched to its episode the same way your downloads are, and the episode list marks them **STREAM**.
+- Playing an episode downloads **just that file**, in order, and the built-in player starts within seconds and plays it while it downloads. Skipping ahead downloads that part first. Its subtitle, if the torrent has one, comes first. While you watch, the next episode downloads too, so moving on doesn't stop.
+- **Keep downloaded episodes** (on the show's page): off, an episode you watch to the end credits is deleted **5 minutes** later; one you stop part way through is kept. On, they stay. The bin button next to an episode deletes it any time.
+- **Torrents window** (the download icon at the top, or **Files & downloads…**): every torrent and file, live: progress, speed, peers. Choose which files download and how urgently (**Skip / Normal / High / Now**, for subtitles or extras too), say which episode a file is if it was matched wrong, delete files, pause, resume, open the folder, or remove a torrent.
+- Files go in **Watchlist torrents** inside your downloads folder (download sorting skips that folder). Episodes you've finished downloading count as on your computer.
+- It's as fast as the torrent: with few people sharing it, or a download slower than the video, it pauses to buffer. While a torrent downloads it also uploads to others in it, as torrents do. The first time, Windows may ask whether Watchlist may accept connections.
+- **Watch parties** work with streamed episodes: if the other person doesn't have the episode, their app adds the same torrent to the show and streams it, and moving on to the next episode loads it on both sides without leaving the party.
 
 ### Watch together
 
@@ -119,14 +132,14 @@ With a key:
 
 Only names are sent, never the files: file and folder names, the titles in your list that could match, and for **I'm in the mood for…** your list's titles with how far you've got.
 
-### Your own sites
+### Adding your own site
 
-In **Settings → Watching online**, paste a search link for your anime site and one for your movie and TV site:
+In **Settings → Watching online**, choose **+ Add a service or site… → Another site**, then:
 
 1. Search for any title on the site, for example "Frieren".
 2. Copy the address of the results page, for example `https://example-site/search?keyword=Frieren`.
-3. Replace the title with `{title}`, for example `https://example-site/search?keyword={title}`.
-4. Click **Try it** to check it opens a search.
+3. Replace the title with `{title}`, for example `https://example-site/search?keyword={title}`, and paste it in.
+4. Tick which kinds of titles it's for (Anime, TV, Movies), and click **Try** to check it opens a search.
 
 ## Setup (Windows)
 
@@ -197,7 +210,7 @@ If you'd rather run the Python code directly:
 
 ## Browser
 
-Netflix, HBO Max, your own sites and YouTube trailers open in **Opera GX** (or the browser you pick in Settings).
+Your streaming services, sites and YouTube trailers open in **Opera GX** (or the browser you pick in Settings).
 The app finds Opera GX automatically.
 If it isn't found, Settings says so: click **Browse** next to "Browser" and pick Opera GX.
 On Windows that's `launcher.exe`, usually in `C:\Users\<you>\AppData\Local\Programs\Opera GX\`; on a Mac it's **Opera GX** in Applications.
@@ -224,10 +237,8 @@ Back that folder up if you reinstall your computer.
 
   If an episode isn't recognised, pick the file from the list in the play window.
 - **Subtitles:** VLC loads a subtitle automatically when it has the same name as the video, like `Episode.srt` or `Episode.en.srt`. The app also checks `Subs` folders.
-- **HBO Max in Pakistan:** HBO Max may not be available in Pakistan. The app only uses what TMDB reports for your country.
-  - The HBO Max and Netflix links can be changed in Settings.
-  - If you use a VPN, you can change your country there too.
-- **Netflix and HBO Max play in your browser:** they use copy protection that only full browsers support, so they can't play inside this app.
+- **Which services have a title** is what TMDB reports for your country (**Settings → Your country**). If you use a VPN, change your country there too.
+- **Streaming services play in your browser:** they use copy protection that only full browsers support, so they can't play inside this app.
 
 ## For developers
 

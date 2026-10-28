@@ -396,8 +396,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 .toast.error { background: #e50914; color: #fff; }
 
 @media (max-width: 1100px) {
-  .nav-links { display: none; }
-  .search input { width: 130px; }
+  .nav-right .nav-btn { padding: 0 10px; }
 }
 @media (max-width: 760px) {
   :root { --side: 16px; }
@@ -826,3 +825,162 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 .shared-poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .shared-poster img.broken { display: none; }
 .shared-card.in .shared-poster { opacity: .55; }
+
+
+/* ==================================================================
+   Round 5: a calmer, more modern look, the top bar that never hides
+   its sections, and the torrent, services and Surprise me screens.
+   ================================================================== */
+:root { --radius: 10px; --radius-sm: 6px; --ease: cubic-bezier(.2, .8, .2, 1); --glass: rgba(18, 18, 18, .82); }
+
+/* ---- top bar: sections fold into a menu instead of hiding under the search */
+.nav { gap: 18px; transition: background .3s, box-shadow .3s, backdrop-filter .3s; }
+.nav.solid { background: var(--glass); -webkit-backdrop-filter: blur(16px) saturate(1.4); backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .06); }
+.nav-left { gap: 26px; flex: 1 1 auto; }
+.nav-right { flex: none; gap: 8px; }
+.nav-links { gap: 20px; }
+.nav-links a { position: relative; padding: 6px 0; }
+.nav-links a::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 2px;
+  background: var(--red); transform: scaleX(0); transition: transform .25s var(--ease); }
+.nav-links a.active::after { transform: scaleX(1); }
+.nav-more { display: none; }
+#browse-menu { left: 0; top: 42px; min-width: 200px; }
+/* When there isn't room (or while you search), the sections are under "Browse ▾". */
+@media (max-width: 1360px) { .nav-links { display: none; } .nav-more { display: block; } }
+.nav:has(.search:focus-within, .search.filled) .nav-links { display: none; }
+.nav:has(.search:focus-within, .search.filled) .nav-more { display: block; }
+.nav-btn { border-radius: 99px; border-color: rgba(255, 255, 255, .22); background: rgba(255, 255, 255, .06);
+  transition: background .2s, border-color .2s, color .2s; }
+.nav-btn:hover { background: rgba(255, 255, 255, .12); border-color: rgba(255, 255, 255, .5); }
+.search { width: 36px; padding: 0 9px; border-radius: 99px; border-color: transparent; background: transparent; cursor: pointer;
+  overflow: hidden; transition: width .35s var(--ease), background .2s, border-color .2s; }
+.search:hover { background: rgba(255, 255, 255, .1); }
+.search input { width: 100%; min-width: 0; opacity: 0; transition: opacity .2s; }
+.search:focus-within, .search.filled { width: 250px; cursor: text; background: rgba(0, 0, 0, .55); border-color: rgba(255, 255, 255, .35); }
+.search:focus-within input, .search.filled input { opacity: 1; }
+.icon-btn { transition: background .2s, transform .2s var(--ease); }
+.icon-btn:active { transform: scale(.92); }
+.icon-btn.in-party { color: var(--green); }
+.menu { border-radius: var(--radius); border-color: rgba(255, 255, 255, .12); background: rgba(16, 16, 16, .94);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); animation: menu-in .16s var(--ease); }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-6px) scale(.98); } }
+@media (max-width: 760px) { .search:focus-within, .search.filled { width: 100%; } .nav-left { flex: 0 1 auto; } }
+
+/* ---- softer, rounder surfaces and smoother motion */
+.card { border-radius: 8px; transition: transform .3s var(--ease), box-shadow .3s var(--ease); }
+.card:hover, .card:focus-visible { transform: scale(1.06) translateY(-2px); }
+.card:focus-visible { box-shadow: 0 0 0 2px #fff, 0 12px 28px rgba(0, 0, 0, .75); }
+.tile { border-radius: 8px; }
+.btn { border-radius: var(--radius-sm); transition: background .2s, color .2s, border-color .2s, transform .15s var(--ease), box-shadow .2s; }
+.btn:active:not([disabled]) { transform: scale(.97); }
+.btn-red:hover { box-shadow: 0 6px 20px rgba(229, 9, 20, .35); }
+.input, .select { border-radius: var(--radius-sm); transition: border-color .2s, background .2s; }
+#modal-root .overlay { background: rgba(0, 0, 0, .6); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.modal { border-radius: 14px; border: 1px solid rgba(255, 255, 255, .06); }
+.modal h2 svg { width: 24px; height: 24px; vertical-align: -4px; margin-right: 4px; }
+.modal-close { transition: background .2s, transform .2s var(--ease); }
+.modal-close:hover { transform: rotate(90deg); }
+.toast { border-radius: var(--radius); }
+.hero-img.broken, .tm-hero img.broken, .poster-side.broken { display: none; }
+.seg { flex-wrap: wrap; }
+.seg button { transition: background .2s, color .2s; }
+@media (prefers-reduced-motion: reduce) { .menu, .card, .surprise-card { animation: none !important; transition: none !important; } }
+
+/* ---- Watch now: choices */
+.choice { border-radius: var(--radius); transition: border-color .2s, background .2s, transform .2s var(--ease); }
+.choice:hover { transform: translateY(-2px); }
+.choice.primary { border-color: rgba(255, 255, 255, .55); background: #2a2a2a; }
+.choice-form { cursor: default; display: grid; gap: 10px; text-align: left; }
+.choice-form:hover { transform: none; }
+.choice-form > div:first-child { display: grid; gap: 2px; }
+.magnet-row { display: flex; gap: 8px; margin: 8px 0 4px; }
+.magnet-row .input { flex: 1; min-width: 0; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+
+/* ---- episode list: streaming and deleting */
+.tag-stream { background: rgba(91, 155, 255, .16); color: #9cc3ff; border: 1px solid rgba(91, 155, 255, .4); }
+.stream-note { color: #9cc3ff; }
+.ep-del { display: inline-grid; place-items: center; padding: 2px 6px; }
+.ep-del svg { width: 12px; height: 12px; }
+.ep-del:hover { border-color: #ff6b6b; color: #ff6b6b; }
+
+/* ---- the title page's torrent box */
+.tor-card { padding: 12px 14px; border-radius: var(--radius); background: var(--panel-2); border: 1px solid #333; margin-bottom: 10px; }
+.tor-top { display: flex; align-items: center; gap: 10px; }
+.tor-top b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tor-state { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 99px; background: #333; color: #ddd; white-space: nowrap; }
+.tor-state.downloading { background: rgba(91, 155, 255, .18); color: #9cc3ff; }
+.tor-state.finished, .tor-state.seeding { background: rgba(70, 211, 105, .15); color: var(--green); }
+.tor-state.loading, .tor-state.downloading_metadata { background: rgba(255, 184, 77, .14); color: #ffc46b; }
+.tor-state.paused { background: #2a2a2a; color: var(--dim); }
+.tor-meta { margin: 4px 0 8px; }
+.keep-row { margin-top: 10px; }
+
+/* ---- the Torrents window */
+.torrents-modal { width: min(1040px, 96vw); }
+.tw-card { border: 1px solid #333; border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; background: #1c1c1c; transition: border-color .3s; }
+.tw-card.focus { border-color: rgba(91, 155, 255, .6); box-shadow: 0 0 0 3px rgba(91, 155, 255, .12); }
+.tw-head { display: flex; gap: 14px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.tw-head b { font-size: 16px; word-break: break-word; }
+.tw-head .btns { flex: none; }
+.tw-head .linkish { background: none; border: 0; padding: 0; color: #9cc3ff; text-decoration: underline; cursor: pointer; font: inherit; }
+.tw-bar, .tw-fbar { display: block; height: 6px; border-radius: 99px; background: #2c2c2c; overflow: hidden; }
+.tw-bar { margin: 12px 0 10px; }
+.tw-bar i, .tw-fbar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #3d7bd9, #6fb0ff); transition: width .6s var(--ease); }
+.tw-files { display: grid; gap: 4px; max-height: 52vh; overflow: auto; }
+.tw-file { display: grid; grid-template-columns: 92px 26px minmax(0, 1fr) auto 72px 110px 40px 30px; gap: 10px; align-items: center;
+  padding: 6px 8px; border-radius: 8px; font-size: 13px; transition: background .2s, opacity .2s; }
+.tw-file:hover { background: #262626; }
+.tw-file.skipped { opacity: .55; }
+.tw-prio { padding: 4px 6px; font-size: 12.5px; }
+.tw-kind { font-size: 10px; font-weight: 800; color: var(--muted); text-align: center; }
+.tw-kind.video { color: #9cc3ff; }
+.tw-kind.subtitle { color: #ffc46b; }
+.tw-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.tw-ep { border: 1px solid #444; background: #222; color: #ddd; border-radius: 99px; padding: 2px 10px; font-size: 12px; white-space: nowrap; }
+.tw-ep:empty { visibility: hidden; }
+.tw-ep.set { border-color: rgba(91, 155, 255, .6); color: #9cc3ff; }
+.tw-ep:hover { border-color: #fff; color: #fff; }
+.tw-size, .tw-pct { color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.tw-del { border: 0; background: none; color: var(--muted); display: grid; place-items: center; padding: 4px; border-radius: 6px; }
+.tw-del svg { width: 14px; height: 14px; }
+.tw-del:hover { color: #ff6b6b; background: rgba(255, 107, 107, .1); }
+@media (max-width: 760px) { .tw-file { grid-template-columns: 80px minmax(0, 1fr) 60px 30px; } .tw-kind, .tw-size, .tw-fbar, .tw-ep { display: none; } }
+
+/* ---- Settings: your streaming services and sites */
+#svc-list { display: grid; gap: 8px; margin: 6px 0 10px; }
+.svc-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px; border-radius: var(--radius);
+  background: var(--panel-2); border: 1px solid #333; transition: opacity .2s; }
+.svc-row.off { opacity: .5; }
+.svc-on input { width: 18px; height: 18px; accent-color: var(--red); margin-top: 8px; }
+.svc-main { display: grid; gap: 8px; min-width: 0; }
+.svc-line { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.svc-name { width: 150px; flex: none; }
+.svc-url { flex: 1; min-width: 180px; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+.svc-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 99px; border: 1px solid #444; font-size: 12.5px; color: #ddd; cursor: pointer; }
+.svc-chip input { accent-color: var(--red); }
+.svc-chip.check { border-style: dashed; }
+.svc-tools { display: flex; gap: 4px; }
+.svc-btn { border: 1px solid #444; background: #222; color: #ddd; border-radius: 6px; padding: 4px 9px; font-size: 12.5px; }
+.svc-btn:hover:not([disabled]) { border-color: #fff; color: #fff; }
+.svc-btn[disabled] { opacity: .35; cursor: default; }
+.svc-btn.danger:hover { border-color: #ff6b6b; color: #ff6b6b; }
+.svc-add .select { width: auto; }
+@media (max-width: 760px) { .svc-row { grid-template-columns: 26px 1fr; } .svc-tools { grid-column: 2; } }
+
+/* ---- Surprise me */
+.surprise-modal { width: min(720px, 94vw); }
+.surprise-filters { display: grid; gap: 8px; margin-bottom: 16px; justify-items: start; }
+.surprise-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.surprise-row .check-row { margin: 0; }
+.surprise-stage { min-height: 230px; display: grid; align-items: center; }
+.surprise-card { display: grid; grid-template-columns: 150px 1fr; gap: 20px; align-items: start; }
+.surprise-card.landed { animation: spring .45s cubic-bezier(.18, 1.25, .4, 1) both; }
+.surprise-poster { position: relative; aspect-ratio: 2 / 3; border-radius: 10px; overflow: hidden; background: linear-gradient(135deg, #3b3b3b, #1c1c1c);
+  display: grid; place-items: center; text-align: center; padding: 10px; font-weight: 800; box-shadow: 0 14px 34px rgba(0, 0, 0, .6); }
+.surprise-poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.surprise-poster img.broken { display: none; }
+.surprise-info h3 { margin: 4px 0 4px; font-size: 22px; }
+.surprise-overview { line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.center-btns { justify-content: center; margin-top: 14px; }
+@media (max-width: 560px) { .surprise-card { grid-template-columns: 100px 1fr; } }

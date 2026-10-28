@@ -150,18 +150,47 @@ class ServerTest(ServerBase):
         self.assertEqual(res["services"], ["Amazon Prime Video"])
 
     def test_online_uses_your_own_site_for_each_type(self):
-        self.app.settings.update({"anime_site_url": "https://anime.example/search?keyword={title}",
-                                  "movie_tv_site_url": "https://films.example/find/{title}"})
+        listed = self.app.settings.get()["services"]
+        self.app.settings.update({"services": listed + [
+            {"name": "My anime site", "url": "https://anime.example/search?keyword={title}", "types": ["anime"]},
+            {"name": "", "url": "https://films.example/find/{title}", "types": ["tv", "movie"]}]})
         anime = self.add("anime", "mal", "52991")
         _, res = self.call("POST", f"/api/items/{anime['id']}/online")
-        self.assertEqual(res["service"], "anime.example")
-        self.assertTrue(res["own_site"])
+        self.assertEqual((res["service"], res["kind"]), ("My anime site", "search"))
         self.assertEqual(self.opened[-1], "https://anime.example/search?keyword=Frieren%3A+Beyond+Journey%27s+End")
         movie = self.add("movie", "tmdb", "movie/27205")
         _, res = self.call("POST", f"/api/items/{movie['id']}/online")
-        self.assertEqual(self.opened[-1], "https://films.example/find/Inception")
-        status, _ = self.call("PUT", "/api/settings", {"anime_site_url": "ftp://nope"})
+        self.assertEqual((res["service"], self.opened[-1]), ("films.example", "https://films.example/find/Inception"))
+        status, _ = self.call("PUT", "/api/settings", {"services": [{"name": "x", "url": "ftp://nope"}]})
         self.assertEqual(status, 400)
+
+    def test_your_list_of_services(self):
+        show = self.add("tv", "tmdb", "tv/1396")
+        _, opts = self.call("GET", f"/api/items/{show['id']}/online-options")
+        self.assertEqual([(o["name"], o["has_it"]) for o in opts["options"]], [("Netflix", True), ("HBO Max", False)])
+        # Pick one yourself, even one that doesn't have it.
+        hbo = opts["options"][1]["id"]
+        _, res = self.call("POST", f"/api/items/{show['id']}/online", {"service": hbo})
+        self.assertEqual(self.opened[-1], "https://play.hbomax.com/search?q=Breaking+Bad")
+        # Netflix removed, a new service added in front, one switched off.
+        _, presets = self.call("GET", "/api/services/presets")
+        crunchy = next(p for p in presets["presets"] if p["name"] == "Crunchyroll")
+        services = self.app.settings.get()["services"]
+        services = [dict(crunchy, types=["anime"])] + [dict(x, on=False) for x in services if x["name"] == "HBO Max"]
+        status, _ = self.call("PUT", "/api/settings", {"services": services})
+        self.assertEqual(status, 200)
+        _, opts = self.call("GET", f"/api/items/{show['id']}/online-options")
+        self.assertEqual(opts["options"], [])                                  # Crunchyroll: anime only
+        _, res = self.call("POST", f"/api/items/{show['id']}/online")
+        self.assertEqual(res["kind"], "fallback")
+
+    def test_old_settings_become_the_list(self):
+        from watchlist.config import Settings, write_json
+        path = Path(self.tmp.name) / "old.json"
+        write_json(path, {"anime_site_url": "https://anime.example/s?q={title}", "region": "TH"})
+        names = [(x["name"], x["types"], bool(x["check"])) for x in Settings(path).get()["services"]]
+        self.assertEqual(names, [("Netflix", ["anime", "tv", "movie"], True), ("HBO Max", ["anime", "tv", "movie"], True),
+                                 ("anime.example", ["anime"], False)])
 
     def test_online_without_token_goes_straight_to_fallback(self):
         movie = self.add("movie", "tmdb", "movie/27205")

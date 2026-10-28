@@ -19,8 +19,9 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, discover, importer, launcher, library, metadata, player, scanner, share, sorter, syncplay
+from . import ai, dialogs, discover, importer, launcher, library, metadata, player, scanner, services, share, sorter, syncplay
 from . import party as party_mod
+from . import torrents as torrents_mod
 from .config import Settings, read_json, write_json
 from .store import METADATA_FIELDS, TYPES, Store, new_item, next_episode
 
@@ -68,6 +69,7 @@ class App:
         self._related = read_json(self._related_path, {})
         self._related_lock = threading.Lock()
         self.anime_index = discover.AnimeIndex(self.data_dir / "anime_index.json")
+        self.torrents = torrents_mod.Torrents(self, self.data_dir)
         self.party = None
         self.party_last = None
         self._party_lock = threading.Lock()
@@ -117,7 +119,10 @@ class App:
                 "downloads": s["downloads_folder"], "player": s["player"],
                 "mpv": player.find_mpv(), "ai": [ai.NAMES[p] for p in ai.available(s)],
                 "ai_resting": ai.resting(s),
-                "party": bool(self.party and self.party.active)}
+                "party": bool(self.party and self.party.active),
+                "services": [{"name": x["name"], "types": x["types"], "on": x["on"]} for x in s["services"]],
+                "torrents": {"available": torrents_mod.available(), "count": len(self.torrents.records),
+                             "delete_after": torrents_mod.DELETE_AFTER}}
 
     def open_link(self, url):
         browser = launcher.find_browser(self.settings.get()["browser_path"])
@@ -289,8 +294,10 @@ class App:
         if not target:
             what = f"{item['title']} S{season} E{episode}" if item["format"] == "series" else item["title"]
             return {"ok": False, "need_file": True, "item_id": item["id"],
-                    "message": f"You don't have {what} in your downloads."}
+                    "message": f"You don't have {what} in your downloads, or in a torrent for it."}
         subs = info["subtitles"]
+        if target.get("stream"):
+            subs = self._ready_stream(target) or subs
         entries, patch = self._entries(item, target["path"], subs[0]["path"] if subs else None,
                                        season if item["format"] == "series" else None, episode,
                                        self.settings.get()["queue_next_episodes"])
@@ -379,15 +386,41 @@ class App:
                 item = None
         return item
 
-    def _party_entry(self, item, season, episode):
+    def _ready_stream(self, target):
+        """Get a torrent's episode ready to stream; its subtitles, if it has any."""
+        found = self.torrents.parse_url(target["path"])
+        if not found:
+            return []
+        try:
+            self.torrents.prepare(*found)
+            return [{"path": p, "name": Path(p).name} for p in self.torrents.subtitles(*found, wait=10)]
+        except torrents_mod.TorrentError as e:
+            raise ApiError(str(e)) from e
+
+    def _party_entry(self, item, season, episode, magnet=""):
         info = self.local_info(item, season, episode)
         target = info["target"]
         subs = info["subtitles"]
         if not target:
             target = self.library.unsorted_match(item, season, episode)
-            if not target:
+            if target:
+                subs = self.library.subtitles_for(target["path"])
+        if not target and magnet and torrents_mod.available():
+            # The host streams it from a torrent: stream the same one.
+            try:
+                self.torrents.add(item["id"], magnet)
+                self.torrents.wait_for_files(self.torrents.hash_of_magnet(magnet))
+            except torrents_mod.TorrentError:
                 return None
-            subs = self.library.subtitles_for(target["path"])
+            info = self.local_info(item, season, episode)
+            target, subs = info["target"], info["subtitles"]
+        if not target:
+            return None
+        if target.get("stream"):
+            try:
+                subs = self._ready_stream(target) or subs
+            except ApiError:
+                return None
         entries, _ = self._entries(item, target["path"], subs[0]["path"] if subs else None,
                                    season if item["format"] == "series" else None, episode, False)
         entry = entries[0]
@@ -403,7 +436,7 @@ class App:
             item = self._party_item(meta.get("src"), meta.get("id"), meta.get("title"), meta.get("type"))
             if not item:
                 return None
-            return self._party_entry(item, meta.get("season") or 1, meta.get("episode") or 1)
+            return self._party_entry(item, meta.get("season") or 1, meta.get("episode") or 1, meta.get("magnet") or "")
         name = (file_ or {}).get("name") or ""
         if not name:
             return None
@@ -601,12 +634,19 @@ class App:
                 library.Library.describe(v)
             known = {v["path"] for v in videos}
             videos += [v for v in folder_videos if v["path"] not in known]
-        # Episode order; when there are two copies of an episode, the better one first.
+        # Episodes from the title's torrents: finished ones by path, the rest streamed.
+        videos += self.torrents.videos(item)
+        # Episode order; when there are two copies of an episode, the better one
+        # first, and a file on your computer before a torrent's.
         videos.sort(key=lambda v: (v["season"] if v["season"] is not None else 1, v["episodes"][:1] or [0],
-                                   [-x for x in library.quality(v)], scanner.natural_key(v["rel"])))
+                                   bool(v.get("torrent")), [-x for x in library.quality(v)],
+                                   scanner.natural_key(v["rel"])))
         in_folder = {v["path"] for v in folder_videos}
 
         def subtitles(video):
+            if video.get("torrent"):
+                t = video["torrent"]
+                return [{"path": p, "name": Path(p).name} for p in self.torrents.ready_subtitles(t["hash"], t["index"])]
             if video["path"] in in_folder:
                 return scanner.subtitles_for(video, folder_subs, folder_videos)
             return self.library.subtitles_for(video["path"])
@@ -636,7 +676,8 @@ class App:
             # Which file each episode plays (files from the downloads folder can be moved).
             in_downloads = {v["path"] for v in self.library.videos_for(item["id"])}
             info["by_episode"] = {f"{s}:{e}": {"name": v["name"], "path": v["path"],
-                                               "rel": v["rel"] if v["path"] in in_downloads else None}
+                                               "rel": v["rel"] if v["path"] in in_downloads else None,
+                                               "torrent": v.get("torrent"), "stream": bool(v.get("stream"))}
                                   for (s, e), v in episodes.items()}
         info["target"] = target
         if target:
@@ -666,7 +707,10 @@ class App:
         return {"titles": sorted(titles.values(), key=lambda t: t["title"]), "files": loose[:60]}
 
     def playable(self, item, path):
-        """Only files from this title's folder or the downloads folder can be played."""
+        """Only files from this title's folder, the downloads folder or the title's
+        torrents can be played."""
+        if self.torrents.owns(item["id"], path):
+            return True
         return os.path.isfile(path) and (
             (item["local_folder"] and _inside(path, item["local_folder"]))
             or self.library.contains(path))
@@ -682,6 +726,16 @@ class App:
                 raise ApiError("that subtitle file can't be used")
         if body.get("extra"):
             return self._play_extra(item, path, subtitle, body.get("player") or s["player"])
+        found = self.torrents.parse_url(path)
+        if found:
+            # A torrent's episode: wanted now, and its subtitle fetched first.
+            try:
+                self.torrents.prepare(*found)
+                if not subtitle and body.get("subtitles", True):
+                    subs = self.torrents.subtitles(*found)
+                    subtitle = subs[0] if subs else None
+            except torrents_mod.TorrentError as e:
+                raise ApiError(str(e)) from e
         entries, patch = self._entries(item, path, subtitle, body.get("season"), body.get("episode"),
                                        s["queue_next_episodes"])
         start = 0 if body.get("from_start") else player.resume_point(item["positions"].get(entries[0]["key"]))
@@ -692,8 +746,9 @@ class App:
             if mpv:
                 self.player.play(self._session(mpv, item, entries, start))
                 self.store.update(item["id"], patch)
-                return {"ok": True, "player": "mpv", "file": Path(path).name,
-                        "queued": len(entries) - 1, "resumed_at": start}
+                return {"ok": True, "player": "mpv", "file": entries[0].get("name") or Path(path).name,
+                        "queued": len(entries) - 1, "resumed_at": start, "stream": bool(found),
+                        "subtitle": Path(entries[0]["sub"]).name if entries[0].get("sub") else ""}
             note = "The built-in player is missing, so VLC was used."
         self._play_vlc(entries, start)
         self.store.update(item["id"], patch)
@@ -701,6 +756,10 @@ class App:
                 "resumed_at": start, "note": note}
 
     def _session(self, mpv, item, entries, start=0, extra=()):
+        if self.torrents.records or any(self.torrents.parse_url(e["path"]) for e in entries):
+            # Streams: wait patiently for data, and keep plenty of it ahead.
+            extra = ["--network-timeout=180", "--cache=yes", "--demuxer-max-bytes=200MiB",
+                     "--demuxer-readahead-secs=90"] + list(extra)
         return player.Session(
             mpv, item["id"], entries, start=start,
             extra_args=player.script_args(self.settings.get()["skip_intro"]) + list(extra),
@@ -723,12 +782,23 @@ class App:
                 keys.setdefault(v["path"], f"{season}:{episode}")
             entries[0]["key"] = first_key or keys.get(path, path)
             first = next((v for v in videos if v["path"] == path), None)
+            if first and first.get("torrent"):
+                entries[0]["torrent"] = first["torrent"]
             if first and queue:
-                for v in scanner.episode_queue(videos, first)[1:]:
+                # The episodes after it, in episode order (files on your computer and
+                # a torrent's episodes mixed, one copy of each).
+                ordered = list(dict.fromkeys(v["path"] for _, v in sorted(scanner.episode_map(item, videos).items())))
+                by_path = {v["path"]: v for v in videos}
+                after = ordered[ordered.index(path) + 1:] if path in ordered else []
+                for p in after[:50]:
+                    v = by_path[p]
                     subs = subtitles(v)
                     # Keep using the same kind of subtitle (none / auto) for the queue.
                     sub = subs[0]["path"] if subs and subtitle else None
-                    entries.append({"path": v["path"], "sub": sub, "key": keys.get(v["path"], v["path"])})
+                    entry = {"path": v["path"], "sub": sub, "key": keys.get(v["path"], v["path"])}
+                    if v.get("torrent"):
+                        entry["torrent"] = v["torrent"]
+                    entries.append(entry)
             if first_key:
                 patch["progress"] = {"season": int(first_key.split(":")[0]),
                                      "episode": int(first_key.split(":")[1])}
@@ -737,6 +807,11 @@ class App:
         for e in entries:
             e["label"] = self._label(item, e["key"])
             e["party"] = self._party_meta(item, e["key"])
+            if e.get("torrent"):
+                # The other side of a watch party can stream the same torrent.
+                e["party"]["magnet"] = self.torrents.magnet(e["torrent"]["hash"])
+            if self.torrents.parse_url(e["path"]):
+                e["name"] = Path(urllib.parse.unquote(urllib.parse.urlsplit(e["path"]).path)).name
         return entries, patch
 
     @staticmethod
@@ -794,6 +869,8 @@ class App:
         positions.pop(entry["key"], None)
         patch = {"positions": positions}
         key = entry["key"]
+        if entry.get("torrent"):
+            self.torrents.finished_watching(entry["torrent"]["hash"], entry["torrent"]["index"])
         if item["format"] == "series" and ":" in key and key.replace(":", "").isdigit():
             season, episode = (int(x) for x in key.split(":"))
             nxt = next_episode(dict(item, progress={"season": season, "episode": episode}))
@@ -812,43 +889,63 @@ class App:
         self._play_vlc(entries, session.pos or 0)
         return {"ok": True, "file": Path(entries[0]["path"]).name}
 
-    def watch_online(self, item):
+    def streaming_on(self, item):
+        """Where TMDB says a title streams in your country: ([names], message)."""
+        s = self.settings.get()
+        if not s["tmdb_api_key"]:
+            return [], "No TMDB token in Settings, so which services have it couldn't be checked."
+        try:
+            tmdb = metadata.TMDB(s["tmdb_api_key"])
+            ref = item["tmdb_ref"]
+            if not ref and item["type"] == "anime":
+                ref = tmdb.find_anime(item["aliases"] or [item["title"]], item["year"], item["format"])
+                if ref:
+                    self.store.update(item["id"], {"tmdb_ref": ref})
+            if not ref:
+                return [], "Couldn't match this anime on TMDB to check which services have it."
+            providers = tmdb.providers(ref, s["region"])
+            return [p["name"] for p in providers["services"] if p["kind"] in ("flatrate", "free", "ads")], ""
+        except metadata.MetadataError as e:
+            return [], f"Couldn't check which services have it: {e}."
+
+    def online_options(self, item):
+        """Your services for this kind of title, in order, each with whether it has it."""
+        s = self.settings.get()
+        names, message = self.streaming_on(item)
+        options = []
+        for x in s["services"]:
+            if not x["on"] or item["type"] not in x["types"]:
+                continue
+            options.append({"id": x["id"], "name": x["name"], "kind": "check" if x["check"] else "search",
+                            "has_it": services.has_it(x, names) if x["check"] else None})
+        return {"region": s["region"], "streaming": names, "message": message, "options": options}
+
+    def watch_online(self, item, service_id=None):
+        """Open a service: the one asked for, or the first in your list that fits
+        (a subscription service only when it has the title), else the fallback site."""
         s = self.settings.get()
         title = item["title"]
-        region = s["region"]
-        result = {"region": region, "services": [], "service": "", "url": "", "message": ""}
-        on = {"netflix": False, "hbomax": False}
-        if not s["tmdb_api_key"]:
-            result["message"] = "No TMDB token in Settings, so Netflix and HBO Max couldn't be checked."
+        info = self.online_options(item)
+        result = {"region": s["region"], "services": info["streaming"], "message": info["message"],
+                  "service": "", "url": "", "kind": ""}
+        chosen = None
+        by_id = {x["id"]: x for x in s["services"]}
+        if service_id:
+            chosen = by_id.get(service_id)
+            if not chosen:
+                raise ApiError("that service isn't in your list any more")
         else:
-            try:
-                tmdb = metadata.TMDB(s["tmdb_api_key"])
-                ref = item["tmdb_ref"]
-                if not ref and item["type"] == "anime":
-                    ref = tmdb.find_anime(item["aliases"] or [title], item["year"], item["format"])
-                    if ref:
-                        self.store.update(item["id"], {"tmdb_ref": ref})
-                if ref:
-                    providers = tmdb.providers(ref, region)
-                    result["services"] = [p["name"] for p in providers["services"]
-                                          if p["kind"] in ("flatrate", "free", "ads")]
-                    for p in providers["services"]:
-                        service = metadata.service_of(p)
-                        if service and p["kind"] in ("flatrate", "free", "ads"):
-                            on[service] = True
-                else:
-                    result["message"] = "Couldn't match this anime on TMDB to check streaming services."
-            except metadata.MetadataError as e:
-                result["message"] = f"Couldn't check streaming services: {e}."
-        if on["netflix"]:
-            result.update(service="Netflix", url=launcher.fill_link(s["netflix_url"], title))
-        elif on["hbomax"]:
-            result.update(service="HBO Max", url=launcher.fill_link(s["hbomax_url"], title))
+            for o in info["options"]:
+                if o["kind"] == "search" or o["has_it"]:
+                    chosen = by_id[o["id"]]
+                    break
+        if chosen:
+            result.update(service=chosen["name"], url=services.fill(chosen, title),
+                          kind="check" if chosen["check"] else "search", has_it=bool(chosen["check"]) and
+                          services.has_it(chosen, info["streaming"]))
         else:
-            own = s["anime_site_url"] if item["type"] == "anime" else s["movie_tv_site_url"]
-            url = launcher.fill_link(own or s["fallback_url"], title)
-            host = urllib.parse.urlsplit(url).hostname or url
-            result.update(service=host.removeprefix("www."), url=url, own_site=bool(own))
+            url = launcher.fill_link(s["fallback_url"], title)
+            result.update(service=services.host_name(url), url=url, kind="fallback")
         self.open_link(result["url"])
         self.store.update(item["id"], {"last_played": time.time()})
         return result
@@ -872,6 +969,8 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/items/(\w+)/local", "local"),
         ("POST", r"/api/items/(\w+)/play", "play"),
         ("POST", r"/api/items/(\w+)/online", "online"),
+        ("GET", r"/api/items/(\w+)/online-options", "online_options"),
+        ("GET", r"/api/services/presets", "service_presets"),
         ("POST", r"/api/items/(\w+)/watched", "watched"),
         ("PUT", r"/api/items/(\w+)/collections", "item_collections"),
         ("PUT", r"/api/items/(\w+)/folder", "move_to_folder"),
@@ -899,6 +998,16 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/find/search", "find_search"),
         ("GET", r"/api/find/genres", "find_genres"),
         ("GET", r"/api/find/about", "find_about"),
+        ("GET", r"/api/torrents", "torrents"),
+        ("GET", r"/api/items/(\w+)/torrents", "item_torrents"),
+        ("POST", r"/api/items/(\w+)/torrents", "add_torrent"),
+        ("POST", r"/api/items/(\w+)/torrent-keep", "torrent_keep"),
+        ("POST", r"/api/items/(\w+)/delete-file", "delete_file"),
+        ("POST", r"/api/torrents/(\w+)/pause", "torrent_pause"),
+        ("POST", r"/api/torrents/(\w+)/folder", "torrent_folder"),
+        ("POST", r"/api/torrents/(\w+)/files/(\d+)", "torrent_file"),
+        ("POST", r"/api/torrents/(\w+)/files/(\d+)/delete", "torrent_file_delete"),
+        ("DELETE", r"/api/torrents/(\w+)", "remove_torrent"),
         ("GET", r"/api/items/(\w+)/mal-matches", "mal_matches"),
         ("POST", r"/api/items/(\w+)/use-mal", "use_mal"),
         ("POST", r"/api/find/mood", "find_mood"),
@@ -959,6 +1068,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed_host():
             return self._send(HTTPStatus.FORBIDDEN, b"forbidden", "text/plain")
         url = urllib.parse.urlsplit(self.path)
+        if url.path.startswith("/stream/") and method in ("GET", "HEAD"):
+            return self._stream(url.path)
         if not url.path.startswith("/api/"):
             if method in ("GET", "HEAD"):
                 return self._static(url.path)
@@ -976,12 +1087,55 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": str(e)}, e.status)
                 except metadata.MetadataError as e:
                     return self._json({"error": str(e)}, HTTPStatus.BAD_GATEWAY)
+                except torrents_mod.TorrentError as e:
+                    return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
                 except (ValueError, TypeError) as e:
                     return self._json({"error": str(e) or "invalid request"}, HTTPStatus.BAD_REQUEST)
                 except Exception as e:  # keep the app alive whatever happens
                     return self._json({"error": f"unexpected error: {e}"},
                                       HTTPStatus.INTERNAL_SERVER_ERROR)
         return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    STREAM_TYPES = {".mkv": "video/x-matroska", ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
+                    ".avi": "video/x-msvideo", ".mov": "video/quicktime", ".ts": "video/mp2t"}
+
+    def _stream(self, path):
+        """A torrent's file for the player, as it downloads (with seeking)."""
+        found = self.app.torrents.parse_url(f"http://127.0.0.1:{self.server.server_address[1]}{path}")
+        if not found:
+            return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+        torrents = self.app.torrents
+        try:
+            torrents.prepare(*found)
+            size = torrents.size(*found)
+        except torrents_mod.TorrentError as e:
+            return self._send(HTTPStatus.SERVICE_UNAVAILABLE, str(e).encode(), "text/plain")
+        start, end = 0, size - 1
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range", "").strip())
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2)))
+            if start >= size or start > end:
+                return self._send(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, b"", "text/plain",
+                                  {"Content-Range": f"bytes */{size}"})
+        self.send_response(HTTPStatus.PARTIAL_CONTENT if m and (m.group(1) or m.group(2)) else HTTPStatus.OK)
+        self.send_header("Content-Type", self.STREAM_TYPES.get(Path(path).suffix.lower(), "application/octet-stream"))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if m and (m.group(1) or m.group(2)):
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if self.command == "HEAD":
+            return None
+        try:
+            for chunk in torrents.read(found[0], found[1], start, end):
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, torrents_mod.TorrentError):
+            pass      # the player moved on (or seeked), or the torrent stalled
+        return None
 
     def do_GET(self):
         self._dispatch("GET")
@@ -1348,7 +1502,7 @@ class Handler(BaseHTTPRequestHandler):
             patch["local_file"] = path
         if "watched" in body:
             # "Watched": kept as part of your collection, out of the everyday rows.
-            patch["watched_at"] = (item.get("watched_at") or time.time()) if body["watched"] else None
+            patch["in_watched"] = (item.get("in_watched") or time.time()) if body["watched"] else None
         if "local_broken" in body:
             patch["local_broken"] = bool(body["local_broken"])
         elif "local_folder" in patch or "local_file" in patch:
@@ -1368,7 +1522,77 @@ class Handler(BaseHTTPRequestHandler):
         self.app.store.delete(item_id)
         # Its downloads wait for you; Sort now won't put them back by itself.
         self.app.library.forget_item(item_id)
+        self.app.torrents.forget_item(item_id)
         return {"ok": True}
+
+    # ---- torrents
+
+    def api_torrents(self, body):
+        return self.app.torrents.all()
+
+    def api_item_torrents(self, body, item_id):
+        item = self.app.item(item_id)
+        out = self.app.torrents.all(item_id)
+        out["keep"] = bool(self.app.torrents.keep.get(item_id))
+        out["episodes"] = self.app.torrents.episodes(item)
+        return out
+
+    def api_add_torrent(self, body, item_id):
+        self.app.item(item_id)
+        return self.app.torrents.add(item_id, str(body.get("magnet") or ""))
+
+    def api_torrent_keep(self, body, item_id):
+        self.app.item(item_id)
+        self.app.torrents.set_keep(item_id, bool(body.get("keep")))
+        return {"keep": bool(body.get("keep"))}
+
+    def api_torrent_pause(self, body, h):
+        self.app.torrents.pause(h, bool(body.get("paused", True)))
+        return self.app.torrents.view(h)
+
+    def api_torrent_file(self, body, h, index):
+        if "priority" in body:
+            self.app.torrents.set_priority(h, int(index), int(body["priority"]))
+        if "episode" in body:
+            self.app.torrents.set_episode(h, int(index), body["episode"])
+        return self.app.torrents.view(h)
+
+    def api_torrent_file_delete(self, body, h, index):
+        self.app.torrents.delete_file(h, int(index))
+        return self.app.torrents.view(h)
+
+    def api_remove_torrent(self, body, h):
+        return self.app.torrents.remove(h, delete_files=self.query.get("files", "1") != "0")
+
+    def api_torrent_folder(self, body, h):
+        rec = self.app.torrents.records.get(h)
+        if not rec:
+            raise ApiError("that torrent isn't added any more", HTTPStatus.NOT_FOUND)
+        folder = Path(rec["save_path"]) / Path((rec.get("files") or [{"path": ""}])[0]["path"]).parts[0] \
+            if rec.get("files") else Path(rec["save_path"])
+        try:
+            launcher.reveal(str(folder if folder.exists() else rec["save_path"]))
+        except launcher.LaunchError as e:
+            raise ApiError(str(e)) from e
+        return {"ok": True}
+
+    def api_delete_file(self, body, item_id):
+        """Delete one episode's file: a torrent's is deleted (and not downloaded
+        again unless you play it), your own goes to the Recycle Bin / Trash."""
+        item = self.app.item(item_id)
+        path = str(body.get("path") or "")
+        found = self.app.torrents.find_file(path)
+        if found and self.app.torrents.owns(item_id, path):
+            self.app.torrents.delete_file(*found)
+            return {"ok": True, "where": "torrent"}
+        if not self.app.playable(item, path):
+            raise ApiError("that file isn't one of this title's")
+        try:
+            launcher.trash(path)
+        except launcher.LaunchError as e:
+            raise ApiError(str(e)) from e
+        self.app.library.scan(force=True)
+        return {"ok": True, "where": "trash"}
 
     def api_refresh_item(self, body, item_id):
         return self.app.refresh_metadata(self.app.item(item_id))
@@ -1394,7 +1618,13 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.play(self.app.item(item_id), body)
 
     def api_online(self, body, item_id):
-        return self.app.watch_online(self.app.item(item_id))
+        return self.app.watch_online(self.app.item(item_id), str(body.get("service") or "") or None)
+
+    def api_online_options(self, body, item_id):
+        return self.app.online_options(self.app.item(item_id))
+
+    def api_service_presets(self, body):
+        return {"presets": services.PRESETS}
 
     def api_watched(self, body, item_id):
         item = self.app.item(item_id)
@@ -1488,6 +1718,7 @@ def make_server(app: App, port: int):
     handler = type("BoundHandler", (Handler,), {"app": app})
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     server.daemon_threads = True
+    app.torrents.port = server.server_address[1]     # for the stream links the player opens
     return server
 
 

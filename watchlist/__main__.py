@@ -48,6 +48,12 @@ def _self_test(path):
             report[module] = True
         except Exception as e:  # noqa: BLE001 - report whatever went wrong
             report[module] = f"{type(e).__name__}: {e}"
+    # Torrent streaming (libtorrent, with the libraries it needs).
+    try:
+        import libtorrent
+        report["libtorrent"] = bool(libtorrent.__version__)
+    except Exception as e:  # noqa: BLE001
+        report["libtorrent"] = f"{type(e).__name__}: {e}"
     # A real HTTPS request: TMDB answers 401 without a key, which still proves
     # the secure connection (and its certificates) work.
     from .metadata import ssl_context

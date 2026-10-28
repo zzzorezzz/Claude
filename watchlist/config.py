@@ -30,6 +30,11 @@ DEFAULT_SETTINGS = {
     "netflix_url": "https://www.netflix.com/search?q={title}",
     "hbomax_url": "https://play.hbomax.com/search?q={title}",
     "fallback_url": "https://everythingmoe.com",
+    # Where to watch online, in order: [{"id", "name", "url" with {title},
+    # "check": TMDB's names for it (only used when it has the title) or [] (a
+    # site that's always searched), "types": ["anime", "tv", "movie"], "on"}].
+    # None until first used: then made from the older settings above and below.
+    "services": None,
     # Your own sites, searched when Netflix and HBO Max don't have a title.
     # {title} is replaced with the title. Empty means use fallback_url.
     "anime_site_url": "",
@@ -117,6 +122,9 @@ class Settings:
         data = copy.deepcopy(DEFAULT_SETTINGS)
         if isinstance(stored, dict):
             data.update({k: v for k, v in stored.items() if k in data})
+        if not isinstance(data.get("services"), list):
+            from .services import from_old_settings
+            data["services"] = from_old_settings(data)
         self._data = data
 
     def get(self) -> dict:
@@ -145,6 +153,9 @@ class Settings:
                     if value and not value.lower().startswith(("http://", "https://")):
                         raise ValueError("website links must start with http:// or https://")
                     data[key] = value
+            if "services" in patch:
+                from .services import clean
+                data["services"] = clean(patch["services"])
             if "player" in patch:
                 if patch["player"] not in ("mpv", "vlc"):
                     raise ValueError("player must be mpv or vlc")

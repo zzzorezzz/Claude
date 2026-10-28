@@ -111,6 +111,40 @@ def open_url(url, browser=""):
         raise LaunchError("couldn't open your default browser")
 
 
+def trash(path):
+    """Move a file to the Recycle Bin / Trash (so a delete by mistake can be undone)."""
+    p = Path(path)
+    if not p.exists():
+        raise LaunchError("that file doesn't exist any more")
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
+                        ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                        ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+        # FO_DELETE with FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT
+        op = SHFILEOPSTRUCTW(None, 3, str(p.resolve()) + "\0", None, 0x40 | 0x10 | 0x400 | 0x4, False, None, None)
+        if ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) or op.fAnyOperationsAborted:
+            raise LaunchError("couldn't move it to the Recycle Bin")
+        return
+    if sys.platform == "darwin":
+        bin_ = Path.home() / ".Trash"
+    else:
+        bin_ = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "Trash/files"
+    try:
+        bin_.mkdir(parents=True, exist_ok=True)
+        target = bin_ / p.name
+        n = 1
+        while target.exists():
+            n += 1
+            target = bin_ / f"{p.stem} ({n}){p.suffix}"
+        shutil.move(str(p), str(target))
+    except OSError as e:
+        raise LaunchError(f"couldn't move it to the Trash ({e})") from e
+
+
 def reveal(path):
     """Show a file (or folder) in Explorer / Finder."""
     p = Path(path)

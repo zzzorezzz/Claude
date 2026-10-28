@@ -65,7 +65,8 @@ def _blank_item() -> dict:
         "positions": {},
         "added": now,
         "last_played": None,
-        "watched_at": None,  # in your Watched list since then
+        "in_watched": None,  # in your Watched list since then
+        "watched_at": None,  # a film: when it was last played to the end
         "updated": now,      # when the online info was last fetched
         "modified": now,     # when anything about it last changed (for sync)
     }
@@ -185,6 +186,11 @@ class Store:
         # Fill in fields newer versions of the app added.
         blank = _blank_item()
         for item in self._items.values():
+            if "in_watched" not in item:
+                # One version kept the Watched list in "watched_at", which the player
+                # also sets when a film is played to the end: only a series could
+                # have been put there by hand.
+                item["in_watched"] = item.get("watched_at") if item.get("format") == "series" else None
             for key, value in blank.items():
                 item.setdefault(key, copy.deepcopy(value))
         for col in self._collections.values():

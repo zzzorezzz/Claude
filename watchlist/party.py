@@ -369,7 +369,8 @@ class Party:
             size = os.path.getsize(entry["path"])
         except OSError:
             size = 0
-        file_ = {"name": os.path.basename(entry["path"]), "duration": round(session.dur, 3), "size": size,
+        file_ = {"name": entry.get("name") or os.path.basename(entry["path"]), "duration": round(session.dur, 3),
+                 "size": size,
                  "watchlist": meta}
         self.conn.send({"Set": {"file": file_}})
         self.people[self.me] = file_
