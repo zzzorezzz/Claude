@@ -52,10 +52,12 @@ def _base(guess):
     return text.strip()
 
 
-def groups_of(files):
+def groups_of(files, common=None):
     """The pack's files in groups: [{"id", "kind", "season", "label", "title",
     "distinct", "files": [keys], "episodes": {key: n}, "sample"}]. "distinct":
-    the group has a name of its own ("To the Top"), not just the show's."""
+    the group has a name of its own ("To the Top"), not just the show's.
+    common: the series' own title words from MyAnimeList ("haikyuu"); without
+    them, the name most files share is taken as the show's."""
     files = describe(files)
     videos = [f for f in files if Path(f["rel"]).suffix.lower() in scanner.VIDEO_EXTS]
     main_titles = [_base(f["guess"]) for f in videos if f["kind"] == "episode" and f["guess"]]
@@ -64,6 +66,9 @@ def groups_of(files):
 
     def own_name(guess):
         """What a name says beyond the show's title ("to the top"), without numbers."""
+        if common:
+            # (A torrent of "To the Top" alone: every file says it, and it's still its own name.)
+            return " ".join(sorted(_words(_base(guess), common)))
         rest = _base(guess)
         if main and (rest == main or rest.startswith(main + " ")):
             rest = rest[len(main):]
@@ -327,11 +332,13 @@ def ai_plan(settings, groups, ents):
     return out, ai.NAMES[provider]
 
 
-def plan(settings, mal_id, files, use_ai=True):
+def plan(settings, mal_id, files, use_ai=True, ents=None):
     """Everything about a pack: {"groups": [...each with "parts": {key: [source_id,
-    episode]}, "why", "sure", "by"], "entries": [...], "by": who matched it}."""
-    groups = groups_of(files)
-    ents = entries(settings, mal_id) if settings.get("mal_client_id") else []
+    episode]}, "why", "sure", "by"], "entries": [...], "by": who matched it}.
+    ents: the franchise's entries, when they're known already."""
+    if ents is None:
+        ents = entries(settings, mal_id) if settings.get("mal_client_id") else []
+    groups = groups_of(files, _common_words(ents) if len(ents) > 1 else None)
     rules = rule_plan(groups, ents, str(mal_id))
     smart, who = {}, "the app's rules"
     if use_ai and ents and ai.available(settings) and any(g["kind"] != "extra" for g in groups):

@@ -102,6 +102,14 @@ class PackRulesTest(unittest.TestCase):
         got = episodes_of(self.plan(names))
         self.assertEqual(sorted(got.values()), [("20583", 1), ("20583", 2), ("20583", 3)])
 
+    def test_a_torrent_of_one_later_season_on_its_own(self):
+        """Every file says "To the Top": that's still its own name, not the show's."""
+        names = [f"[Judas] Haikyuu!! To the Top/[Judas] Haikyuu!! To the Top - {n:02d} [1080p].mkv" for n in (1, 13)]
+        with mock.patch.object(packs, "entries", return_value=ENTRIES):
+            got = episodes_of(packs.plan({"mal_client_id": "cid"}, "28891", [
+                {"key": i, "rel": n, "size": 1} for i, n in enumerate(names)], use_ai=False))
+        self.assertEqual([got[0], got[1]], [("38883", 1), ("38883", 13)])
+
     def test_pointing_a_group_elsewhere(self):
         names = [f"Season 4/[Anime Time] Haikyuu!! S4 - {n:02d}{TAIL}" for n in (1, 14)]
         result = self.plan(names)

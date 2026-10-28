@@ -1003,3 +1003,23 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 .pg-change { margin-top: 6px; }
 .pg-change .select { width: 100%; max-width: 100%; text-overflow: ellipsis; }
 @media (max-width: 760px) { .plan-missing { flex-direction: column; align-items: stretch; } }
+
+/* Get magnet */
+.get-magnet { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 10px 0 12px; }
+.finder-modal { width: min(860px, 96vw); }
+.finder-wait { padding: 24px 0; }
+.finder-wait h3 { margin: 14px 0 6px; }
+.fd-done { padding: 12px 14px; border-radius: 12px; border: 1px solid rgba(70, 200, 120, .4); background: rgba(70, 200, 120, .08); }
+.fd-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; max-height: 60vh; overflow: auto; padding-right: 4px; }
+.fd-card { min-width: 0; border: 1px solid #2c2c2c; background: #181818; border-radius: 12px; padding: 12px 14px; display: grid; gap: 6px; }
+.fd-card.chosen { border-color: rgba(70, 200, 120, .5); }
+.fd-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fd-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.fd-chips .chip.bad { color: #ff8a8a; }
+.fd-files { max-height: 220px; overflow: auto; font-size: 12px; border-top: 1px solid #2a2a2a; padding-top: 6px; }
+.fd-files div { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+.fd-files div span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fd-log { margin-top: 12px; }
+.fd-log div { word-break: break-all; }
+.site-examples { margin: 6px 0 0 16px; padding: 0; }
+.site-test-out { margin-top: 4px; }

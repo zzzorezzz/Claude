@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, discover, importer, launcher, library, metadata, player, scanner, services, share, sorter, syncplay
+from . import ai, dialogs, discover, importer, launcher, library, metadata, player, scanner, services, share, sites, sorter, syncplay
 from . import party as party_mod
 from . import torrents as torrents_mod
 from .config import Settings, read_json, write_json
@@ -70,6 +70,7 @@ class App:
         self._related_lock = threading.Lock()
         self.anime_index = discover.AnimeIndex(self.data_dir / "anime_index.json")
         self.torrents = torrents_mod.Torrents(self, self.data_dir)
+        self.site_jobs = sites.Jobs(self)
         self.party = None
         self.party_last = None
         self._party_lock = threading.Lock()
@@ -122,7 +123,8 @@ class App:
                 "party": bool(self.party and self.party.active),
                 "services": [{"name": x["name"], "types": x["types"], "on": x["on"]} for x in s["services"]],
                 "torrents": {"available": torrents_mod.available(), "count": len(self.torrents.records),
-                             "delete_after": torrents_mod.DELETE_AFTER}}
+                             "delete_after": torrents_mod.DELETE_AFTER},
+                "torrent_sites": sum(1 for x in s["torrent_sites"] if x["on"])}
 
     def open_link(self, url):
         browser = launcher.find_browser(self.settings.get()["browser_path"])
@@ -1011,6 +1013,10 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/torrents/(\w+)/files/(\d+)/delete", "torrent_file_delete"),
         ("DELETE", r"/api/torrents/(\w+)", "remove_torrent"),
         ("GET", r"/api/torrents/(\w+)/plan", "torrent_plan"),
+        ("GET", r"/api/items/(\w+)/find-torrent", "find_torrent_state"),
+        ("POST", r"/api/items/(\w+)/find-torrent", "find_torrent"),
+        ("POST", r"/api/items/(\w+)/find-torrent/use", "find_torrent_use"),
+        ("POST", r"/api/sites/test", "test_site"),
         ("POST", r"/api/torrents/(\w+)/plan", "torrent_plan_group"),
         ("POST", r"/api/torrents/(\w+)/plan/redo", "torrent_plan_redo"),
         ("POST", r"/api/torrents/(\w+)/plan/add", "torrent_plan_add"),
@@ -1565,6 +1571,41 @@ class Handler(BaseHTTPRequestHandler):
                 self.app.item(item_id)
             self.app.torrents.set_episode(h, int(index), body["episode"], item_id or None)
         return self.app.torrents.view(h)
+
+    def api_find_torrent(self, body, item_id):
+        item = self.app.item(item_id)
+        if item["type"] != "anime":
+            raise ApiError("Get magnet is for anime")
+        if not torrents_mod.available():
+            raise ApiError(self.app.torrents.error)
+        return self.app.site_jobs.start(item)
+
+    def api_find_torrent_state(self, body, item_id):
+        self.app.item(item_id)
+        return self.app.site_jobs.get(item_id) or {"running": False, "choices": [], "error": "", "added": None}
+
+    def api_find_torrent_use(self, body, item_id):
+        self.app.item(item_id)
+        try:
+            return self.app.site_jobs.use(item_id, str(body.get("key") or ""))
+        except (sites.SiteError, torrents_mod.TorrentError) as e:
+            raise ApiError(str(e)) from e
+
+    def api_test_site(self, body):
+        try:
+            [site] = sites.clean([body.get("site") or {}]) or [None]
+        except ValueError as e:
+            raise ApiError(str(e)) from e
+        if not site:
+            raise ApiError("add the site's search link first")
+        query = str(body.get("query") or "").strip()
+        if not query:
+            anime = [i for i in self.app.store.list() if i["type"] == "anime"]
+            query = (anime[0].get("original_title") or anime[0]["title"]) if anime else "naruto"
+        try:
+            return dict(sites.test_site(site, query), query=query)
+        except sites.SiteError as e:
+            raise ApiError(str(e)) from e
 
     def api_torrent_plan(self, body, h):
         return self.app.torrents.plan_view(h)

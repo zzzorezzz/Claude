@@ -91,6 +91,20 @@ On a show's page, under **Stream from a torrent**, paste its **magnet link**.
 - **Packs** (a whole franchise in one torrent, like "Haikyuu!! S01+02+03+04+Movies+OVAs"): see below. Adding the same pack on another of its titles just shows it there.
 - **Watch parties** work with streamed episodes: if the other person doesn't have the episode, their app adds the same torrent to the show and streams it, and moving on to the next episode loads it on both sides without leaving the party.
 
+### Get magnet: your own torrent site (anime)
+
+In **Settings → Your torrent site**, add your own site: a name and its search link (search for any anime on it, copy the results page's address, and put **{title}** where the name was). The list starts empty; no site comes with the app. **Test** searches it and shows what the app can read: the results, their sizes and seeders.
+
+Then **Get magnet** on an anime's page (or **Get magnet from my site** in Watch now):
+
+1. Your site is searched for the anime's MyAnimeList name, its English name, and the series' name (which finds packs of every season).
+2. From the results page it reads each result's name, size and seeders (from the column headed Seeders). Results about another anime, single episodes and results named after another title of the series ("To the Top" when you're on Second Season) are left out or ranked down.
+3. The best ones' own pages are opened for their magnet link. When a page only shows the **info hash** as text (its magnet button needing JavaScript), the magnet is made from the hash, with the trackers the page lists. A .torrent file on the page works too.
+4. The best few are checked for real: each one's list of files is fetched from the people sharing it (nothing is downloaded) and worked out the way any torrent is, so the app knows how many of this title's episodes each one really has, not just what its name says. A pack with other seasons, films or OVAs counts if it has all of this one.
+5. Every episode first, then quality (1080p, Blu-ray) and seeders. With an AI key, your AI helper also compares them (it's given their names, sizes, seeders and what was found in their files).
+
+One that clearly wins is added straight away. When two or more are about as good, you choose: each shows its quality, size, seeders, how many episodes it has, and **See its files**. After that it's a torrent like any other: an episode downloads when you play it and is deleted after you watch it (unless kept), packs go to the right titles, and everything in the Torrents window works.
+
 ### Packs: a whole franchise in one torrent or folder
 
 On MyAnimeList every season, part, film and OVA is its own title (Haikyuu!! has Haikyuu!!, Second Season, Karasuno vs. Shiratorizawa, To the Top, To the Top Part 2, four films and OVAs), but a pack has them all, often as "Season 1-4". So a pack isn't matched to one title:
@@ -145,7 +159,7 @@ With a key:
 - **Find Media → I'm in the mood for…** suggests what to watch, from your list and new titles.
 - **Previously on…** on a title page gives a short, spoiler-free recap up to the episode you're on.
 
-Only names are sent, never the files: file and folder names, the titles in your list that could match, and for **I'm in the mood for…** your list's titles with how far you've got.
+Only names are sent, never the files: file and folder names, the titles in your list that could match, for **Get magnet** the torrents' names, sizes and seeders, and for **I'm in the mood for…** your list's titles with how far you've got.
 
 ### Adding your own site
 

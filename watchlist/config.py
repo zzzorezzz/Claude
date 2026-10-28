@@ -35,6 +35,9 @@ DEFAULT_SETTINGS = {
     # site that's always searched), "types": ["anime", "tv", "movie"], "on"}].
     # None until first used: then made from the older settings above and below.
     "services": None,
+    # Your own torrent sites, searched by "Get magnet" on an anime's page:
+    # [{"id", "name", "url" (its search link, with {title}), "on"}]. Empty: none.
+    "torrent_sites": [],
     # Your own sites, searched when Netflix and HBO Max don't have a title.
     # {title} is replaced with the title. Empty means use fallback_url.
     "anime_site_url": "",
@@ -156,6 +159,9 @@ class Settings:
             if "services" in patch:
                 from .services import clean
                 data["services"] = clean(patch["services"])
+            if "torrent_sites" in patch:
+                from .sites import clean as clean_sites
+                data["torrent_sites"] = clean_sites(patch["torrent_sites"])
             if "player" in patch:
                 if patch["player"] not in ("mpv", "vlc"):
                     raise ValueError("player must be mpv or vlc")

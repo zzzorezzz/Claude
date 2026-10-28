@@ -244,6 +244,9 @@ class Torrents:
                 if rec["item_id"] != item_id and not self._owns_any(rec, item_id):
                     raise TorrentError(f"that torrent is already added to {self._title(rec['item_id']) or 'another title'}")
                 return self.view(h)
+            peeked = self.dir / "peek" / f"{h}.torrent"
+            if peeked.exists():
+                peeked.replace(self.dir / f"{h}.torrent")    # its list of files is known already
             rec = {"hash": h, "item_id": item_id, "magnet": magnet, "name": p.name or "", "save_path": self._save_dir(),
                    "added": time.time(), "paused": False, "priorities": {}, "overrides": {}, "finished": {},
                    "files": []}
@@ -718,6 +721,86 @@ class Torrents:
             self._add_handle(h, rec)
             self._save()
         return {"ok": True}
+
+    # ---- looking inside torrents that aren't added (Get magnet compares them)
+
+    def peek_many(self, magnets, wait=45):
+        """{info hash: {"files", "seeds", "name"}} for torrents that aren't added:
+        each one's list of files, fetched from the people sharing it (nothing
+        else is downloaded), then let go. Seeds is what its trackers say, or
+        how many were reached; None when unknown."""
+        if not lt:
+            return {}
+        out, mine = {}, {}
+        folder = self.dir / "peek"
+        folder.mkdir(parents=True, exist_ok=True)
+        with self.lock:
+            self._start()
+            for m in magnets:
+                try:
+                    p = lt.parse_magnet_uri(m)
+                except Exception:  # noqa: BLE001 - a broken magnet: skipped
+                    continue
+                h = _hash_of(p)
+                rec = self.records.get(h)
+                if rec and rec.get("files"):
+                    out[h] = {"files": rec["files"], "seeds": None, "name": rec.get("name") or ""}
+                    continue
+                if h in self.handles or h in mine:
+                    continue
+                meta = folder / f"{h}.torrent"
+                if meta.exists():
+                    try:
+                        p = lt.add_torrent_params()
+                        p.ti = lt.torrent_info(str(meta))
+                        p.file_priorities = [0] * p.ti.num_files()
+                    except Exception:  # noqa: BLE001 - fetched again
+                        p = lt.parse_magnet_uri(m)
+                p.save_path = str(folder)
+                p.flags |= lt.torrent_flags.upload_mode
+                p.flags &= ~lt.torrent_flags.auto_managed
+                p.flags &= ~lt.torrent_flags.paused
+                try:
+                    mine[h] = self.ses.add_torrent(p)
+                except Exception:  # noqa: BLE001
+                    continue
+        seeds = {}
+        deadline = time.time() + wait
+        settle = None
+        try:
+            while mine and time.time() < deadline:
+                for h, handle in mine.items():
+                    st = handle.status()
+                    if h not in out and st.has_metadata:
+                        ti = handle.torrent_file()
+                        fs = ti.files()
+                        out[h] = {"name": ti.name(), "seeds": None,
+                                  "files": [{"index": i, "path": fs.file_path(i), "size": fs.file_size(i)}
+                                            for i in range(fs.num_files()) if not _is_pad(fs, i)]}
+                        try:
+                            (folder / f"{h}.torrent").write_bytes(lt.bencode({"info": lt.bdecode(ti.metadata())}))
+                        except Exception:  # noqa: BLE001
+                            pass
+                        handle.scrape_tracker()
+                    if st.num_complete >= 0 or st.list_seeds:
+                        seeds[h] = max(st.num_complete, st.list_seeds)
+                if all(h in out for h in mine):
+                    # Everything's in: a few seconds more for the trackers' seeder counts.
+                    settle = settle or time.time() + 6
+                    if time.time() > settle or all(h in seeds for h in mine):
+                        break
+                time.sleep(0.5)
+        finally:
+            with self.lock:
+                for handle in mine.values():
+                    try:
+                        self.ses.remove_torrent(handle)
+                    except Exception:  # noqa: BLE001
+                        pass
+        for h, n in seeds.items():
+            if h in out:
+                out[h]["seeds"] = n
+        return out
 
     # ---- packs: which title each file is, worked out across the franchise
 

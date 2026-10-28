@@ -26,6 +26,7 @@ const ICON = {
   globe: '<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.9 6h-3a15.7 15.7 0 0 0-1.4-3.6A8 8 0 0 1 18.9 8zM12 4c.8 1.2 1.5 2.5 1.9 4h-3.8c.4-1.5 1.1-2.8 1.9-4zM4.3 14a8.2 8.2 0 0 1 0-4h3.4a16.5 16.5 0 0 0 0 4zm.8 2h3a15.7 15.7 0 0 0 1.4 3.6A8 8 0 0 1 5.1 16zm3-8h-3a8 8 0 0 1 4.4-3.6C8.9 5.5 8.4 6.7 8.1 8zM12 20c-.8-1.2-1.5-2.5-1.9-4h3.8c-.4 1.5-1.1 2.8-1.9 4zm2.3-6H9.7a14.7 14.7 0 0 1 0-4h4.6a14.7 14.7 0 0 1 0 4zm.2 5.6c.6-1.1 1.1-2.3 1.4-3.6h3a8 8 0 0 1-4.4 3.6zm1.8-5.6a16.5 16.5 0 0 0 0-4h3.4a8.2 8.2 0 0 1 0 4z"/></svg>',
   file: '<svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zm2 2v12h12V6zm3 2l6 4-6 4z"/></svg>',
   folder: '<svg viewBox="0 0 24 24"><path d="M3 5h7l2 2h9v12H3z"/></svg>',
+  search: '<svg viewBox="0 0 24 24"><path d="M10 3a7 7 0 0 1 5.6 11.2l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1 1 10 3zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/></svg>',
 };
 
 const S = {
@@ -2539,7 +2540,7 @@ async function titleClick(wrap, e) {
     deleteEpisodeFile(wrap, item, del.dataset.del);
     return;
   }
-  const torBtn = e.target.closest('[data-t^="tor-"], [data-t="add-magnet"], [data-t="torrents-window"]');
+  const torBtn = e.target.closest('[data-t^="tor-"], [data-t="add-magnet"], [data-t="torrents-window"], [data-t="get-magnet"]');
   if (torBtn) { await torrentClick(wrap, item, torBtn); return; }
   const ep = e.target.closest('[data-ep]');
   if (ep) {
@@ -2722,7 +2723,12 @@ function drawTorrentBox(wrap) {
         <button class="btn btn-ghost btn-sm" data-t="tor-pause">${t.paused ? 'Resume' : 'Pause'}</button>
         <button class="btn btn-ghost btn-sm" data-t="tor-remove">Remove</button></div></div>`;
   }).join('');
-  box.innerHTML = `${cards}
+  const finder = item.type === 'anime'
+    ? (S.status.torrent_sites ? `<div class="get-magnet"><button class="btn btn-white btn-sm" data-t="get-magnet">${ICON.search} Get magnet</button>
+        <span class="muted small">Finds the best torrent of it on your site: every episode, best quality, most seeders.</span></div>`
+      : '<p class="muted small">Add your own torrent site in <button class="linkish" data-t="tor-settings">Settings</button> and <b>Get magnet</b> finds it there for you.</p>')
+    : '';
+  box.innerHTML = `${cards}${finder}
     <div class="magnet-row"><input class="input" id="magnet-in" placeholder="Paste a magnet link (magnet:?xt=…)" autocomplete="off" spellcheck="false">
       <button class="btn btn-white btn-sm" data-t="add-magnet">${data.torrents.length ? 'Add another' : 'Add'}</button></div>
     <p class="muted small">Only the list of files is fetched now. An episode downloads when you play it, while you watch.</p>
@@ -2770,6 +2776,8 @@ async function torrentClick(wrap, item, btn) {
       await loadLocal(wrap);
     } else if (t === 'tor-manage') openTorrents(hash);
     else if (t === 'tor-plan') openPlan(hash, () => loadLocal(wrap));
+    else if (t === 'get-magnet') openFinder(item, () => loadLocal(wrap));
+    else if (t === 'tor-settings') openSettings();
     else if (t === 'tor-pause') {
       const tor = wrap.st.torrents.torrents.find((x) => x.hash === hash);
       await api('POST', `/api/torrents/${hash}/pause`, { paused: !tor.paused });
@@ -2901,6 +2909,95 @@ function planLine(t, attr) {
   if (p.status !== 'ready') return '';
   return `<div class="plan-line small">A pack of ${p.titles} title${p.titles === 1 ? '' : 's'} in your list${p.missing ? ` · <b>${p.missing} more not in your list</b>` : ''}
     <button class="btn btn-ghost btn-sm" ${attr}="tor-plan">What's matched to what…</button></div>`;
+}
+
+/* Get magnet: your own site searched for this anime, the best torrent found.
+   One clear winner is added; when several are as good, you choose. */
+function openFinder(item, onAdded = () => {}) {
+  const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>${ICON.search} Get magnet</h2><p class="sub">${esc(item.title)}</p>
+    <div id="finder-body"><div class="spinner"></div></div></div>`, 'finder-modal');
+  m.st = { open: new Set() };
+  const draw = (st) => {
+    const body = $('#finder-body', m);
+    if (!body) return;
+    if (st.running) {
+      body.innerHTML = `<div class="center finder-wait"><div class="spinner"></div><h3>${esc(st.stage || 'Working…')}</h3>
+        <p class="muted small">It searches your site, opens the results that are about this anime, then gets the best few's list of files from the people sharing them to check they really have every episode. Usually under a minute.</p></div>`;
+      m.timer = setTimeout(load, 1200);
+      return;
+    }
+    const choices = st.choices || [];
+    const added = st.added ? choices.find((c) => c.key === st.added.hash) : null;
+    const card = (c, i) => {
+      const cover = c.checked
+        ? (c.complete ? `<span class="ok">✓ All ${c.wanted > 1 ? `${c.wanted} episodes` : 'of it'}</span>` : `<span class="bad">${c.has || 0} of ${c.wanted} episodes</span>`)
+          + (c.others ? ` <span class="muted">+ ${c.others} other title${c.others === 1 ? '' : 's'} of the series (only what you play downloads)</span>` : '')
+        : '<span class="muted">Not checked: nobody sharing it answered in time</span>';
+      return `<div class="fd-card ${added && c.key === added.key ? 'chosen' : ''}" data-key="${esc(c.key)}">
+        <div class="fd-name" title="${esc(c.name)}">${esc(c.name)}</div>
+        <div class="fd-chips">${c.resolution ? `<span class="chip">${c.resolution === 2160 ? '4K' : `${c.resolution}p`}</span>` : ''}${c.bd ? '<span class="chip">Blu-ray</span>' : ''}${c.others ? '<span class="chip">Pack</span>' : c.pack ? '<span class="chip">Batch</span>' : ''}
+          ${c.size ? `<span class="chip">${fmtBytes(c.size)}</span>` : ''}<span class="chip ${c.seeders ? '' : 'bad'}">${c.seeders == null ? '? seeders' : `${c.seeders} seeder${c.seeders === 1 ? '' : 's'}`}</span><span class="muted small">${esc(c.site)}</span></div>
+        <div class="small">${cover}</div>
+        ${c.why ? `<div class="muted small">AI: ${esc(c.why)}</div>` : ''}
+        <div class="btns">${added && c.key === added.key ? '<span class="ok small">✓ Added</span>' : `<button class="btn ${i === 0 && !added ? 'btn-white' : 'btn-ghost'} btn-sm" data-f="use">Use this one</button>`}
+          ${c.files.length ? `<button class="btn btn-ghost btn-sm" data-f="files">${m.st.open.has(c.key) ? 'Hide' : 'See'} its ${c.files.length} files</button>` : ''}</div>
+        ${m.st.open.has(c.key) ? `<div class="fd-files">${c.files.map((f) => `<div><span>${esc(f.path.split('/').slice(1).join('/') || f.path)}</span><span class="muted">${fmtBytes(f.size)}</span></div>`).join('')}</div>` : ''}
+      </div>`;
+    };
+    const head = st.error ? `<div class="warn">${esc(st.error)}</div>`
+      : added ? `<div class="fd-done"><b>Added the best one:</b> ${esc(added.name)}<div class="muted small">Its episodes are on this page now, matched like any torrent (with Season 2, films and OVAs going to their own titles). An episode downloads when you play it.</div></div>`
+      : choices.length ? `<p class="muted">${choices.filter((c) => c.complete).length > 1 ? 'These are about as good as each other - choose one. Best first.' : 'None of them was clearly right - choose one, or none. Best first.'}${st.ai ? ` Compared by the app and ${esc(st.ai)}.` : ''}</p>` : '';
+    body.innerHTML = `${head}
+      ${choices.length ? `${added ? `<h4 style="margin-top:16px">Other options</h4>` : ''}<div class="fd-list">${choices.filter((c) => !added || c.key !== added.key).map(card).join('')}</div>` : ''}
+      ${st.log?.length ? `<details class="fd-log small muted"><summary>What it did</summary>${st.log.map((x) => `<div>${esc(x)}</div>`).join('')}
+        ${(st.searched || []).map((u) => `<div>${esc(u)}</div>`).join('')}</details>` : ''}
+      <div class="btns" style="margin-top:14px"><button class="btn btn-ghost btn-sm" data-f="again">Search again</button></div>`;
+    m.st.last = st;
+  };
+  const load = async () => {
+    if (!m.isConnected) return;
+    try { draw(await api('GET', `/api/items/${item.id}/find-torrent`)); } catch (err) { fail(err); }
+  };
+  m.onClose = () => clearTimeout(m.timer);
+  m.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-f]');
+    if (!b) return;
+    const key = b.closest('[data-key]')?.dataset.key;
+    try {
+      if (b.dataset.f === 'files') {
+        if (m.st.open.has(key)) m.st.open.delete(key); else m.st.open.add(key);
+        draw(m.st.last);
+      } else if (b.dataset.f === 'use') {
+        b.disabled = true;
+        b.textContent = 'Adding…';
+        const st = await api('POST', `/api/items/${item.id}/find-torrent/use`, { key });
+        S.status.torrents = { ...(S.status.torrents || {}), count: (S.status.torrents?.count || 0) + 1 };
+        renderNavButtons();
+        toast('Torrent added - its episodes are on the page now');
+        draw(st);
+        onAdded();
+      } else if (b.dataset.f === 'again') {
+        draw(await api('POST', `/api/items/${item.id}/find-torrent`));
+      }
+    } catch (err) { fail(err); b.disabled = false; }
+  });
+  api('POST', `/api/items/${item.id}/find-torrent`).then((st) => {
+    draw(st);
+  }).catch((err) => { fail(err); closeModal(m); });
+  m.st.notify = true;
+  // Added by itself: the page follows.
+  const watchAdded = setInterval(() => {
+    if (!m.isConnected) { clearInterval(watchAdded); return; }
+    if (m.st.last && !m.st.last.running) {
+      clearInterval(watchAdded);
+      if (m.st.last.added) {
+        S.status.torrents = { ...(S.status.torrents || {}), count: (S.status.torrents?.count || 0) + 1 };
+        renderNavButtons();
+        onAdded();
+      }
+    }
+  }, 500);
 }
 
 /* A pack (a whole franchise in one torrent): each group of files and the
@@ -3372,6 +3469,7 @@ function watchChoice(wrap, { reason = '' } = {}) {
     : tor.available ? `<div class="choice choice-form"><div>${ICON.download}<b>Stream from a torrent</b>
         <span>${(wrap.st.torrentCount || 0) ? "This show's torrent doesn't have this episode. Add another magnet link:" : "Paste this show's magnet link - only the episode you play downloads:"}</span></div>
         <div class="magnet-row"><input class="input" id="w-magnet" placeholder="magnet:?xt=…" spellcheck="false"><button class="btn btn-white btn-sm" data-choice="add-magnet">Add & stream</button></div></div>` : ''}
+      ${!stream && tor.available && item.type === 'anime' && S.status.torrent_sites ? `<button class="choice" data-choice="get-magnet">${ICON.search}<b>Get magnet from my site</b><span>Finds the best torrent of it on your site and adds it</span></button>` : ''}
       <button class="choice" data-choice="online">${ICON.globe}<b>Watch online</b><span>${esc(servicesLine(item))}</span></button>
       <button class="choice" data-choice="find">${ICON.pc}<b>Find the file on my ${pcName()}</b><span>Pick the file (or a folder for this title)</span></button>
     </div>`);
@@ -3400,6 +3498,16 @@ function watchChoice(wrap, { reason = '' } = {}) {
       } else if (c === 'online') drawOnline(wrap);
       else if (c === 'find') watchLocal(wrap, { choose: true });
       else if (c === 'add-magnet') await addMagnetAndStream(wrap);
+      else if (c === 'get-magnet') {
+        openFinder(item, async () => {
+          for (let n = 0; n < 40 && wrap.isConnected; n++) {
+            const got = await fetchLocal(wrap).catch(() => null);
+            if (got?.target) break;
+            await new Promise((r) => setTimeout(r, 1500));
+          }
+          if (wrap.isConnected) decideWatch(wrap);
+        });
+      }
     } catch (err) { fail(err); }
   });
   if (tor.available && !stream) {
@@ -3710,6 +3818,56 @@ async function serviceAction(wrap, a, row) {
   drawServices(wrap);
 }
 
+// Your own torrent sites (Settings → Your torrent site), for Get magnet.
+function drawSites(wrap) {
+  const box = $('#site-list', wrap);
+  if (!box) return;
+  box.innerHTML = wrap.sites.length ? wrap.sites.map((x, i) => `<div class="svc-row ${x.on ? '' : 'off'}" data-i="${i}">
+      <label class="svc-on" title="Use it"><input type="checkbox" class="site-on" ${x.on ? 'checked' : ''}></label>
+      <div class="svc-main">
+        <div class="svc-line"><input class="input site-name" value="${esc(x.name)}" placeholder="Name">
+          <input class="input site-url" value="${esc(x.url)}" placeholder="https://yoursite/search?q={title}" spellcheck="false"></div>
+        <div class="site-test-out small"></div></div>
+      <div class="svc-tools">
+        <button type="button" class="svc-btn" data-s="site-test" title="Search it and show what's read">Test</button>
+        <button type="button" class="svc-btn danger" data-s="site-del" title="Remove">✕</button></div></div>`).join('')
+    : '<p class="muted small">No torrent site yet.</p>';
+}
+
+function readSites(wrap) {
+  $$('#site-list .svc-row', wrap).forEach((row) => {
+    const x = wrap.sites[Number(row.dataset.i)];
+    if (!x) return;
+    x.on = $('.site-on', row).checked;
+    x.name = $('.site-name', row).value.trim();
+    x.url = $('.site-url', row).value.trim();
+  });
+  return wrap.sites;
+}
+
+async function siteAction(wrap, a, row) {
+  readSites(wrap);
+  if (a === 'site-add') {
+    wrap.sites.push({ id: '', name: '', url: '', on: true });
+    drawSites(wrap);
+    $$('#site-list .svc-row', wrap).pop()?.querySelector('.site-name')?.focus();
+    return;
+  }
+  const i = Number(row?.dataset.i);
+  if (a === 'site-del') { wrap.sites.splice(i, 1); drawSites(wrap); return; }
+  if (a === 'site-test') {
+    const out = $('.site-test-out', row);
+    out.innerHTML = '<span class="spin-dot"></span> Searching it…';
+    try {
+      const r = await api('POST', '/api/sites/test', { site: wrap.sites[i] });
+      out.innerHTML = r.count
+        ? `<span class="ok">✓ ${r.count} results for "${esc(r.query)}"</span> - ${r.with_magnet ? `${r.with_magnet} with their magnet or info hash, ` : ''}${r.with_page ? `${r.with_page} with their own page (where the magnet or info hash is read)` : ''}${r.with_seeders ? `, seeders read for ${r.with_seeders}` : ', no seeders column found (they\'re asked from the torrents instead)'}.
+           <ul class="site-examples">${r.examples.map((x) => `<li>${esc(x.name)}${x.size ? ` · ${fmtBytes(x.size)}` : ''}${x.seeders != null ? ` · ${x.seeders} seeders` : ''}</li>`).join('')}</ul>`
+        : `<span class="bad">No results read for "${esc(r.query)}"</span> from ${esc(r.url)}. Check the link has {title} where the name goes.`;
+    } catch (err) { out.innerHTML = `<span class="bad">${esc(err.message)}</span>`; }
+  }
+}
+
 const COUNTRIES = 'PK IN AE SA QA KW OM BH BD LK NP AF IR TR EG MA US CA GB IE AU NZ DE FR IT ES NL BE SE NO DK FI PL PT CH AT CZ RO GR HU JP KR CN HK TW SG MY ID TH PH VN BR MX AR CL CO PE ZA NG KE'.split(' ');
 
 async function openSettings() {
@@ -3759,6 +3917,12 @@ async function openSettings() {
         (ticked "only when it has it") only when TMDB says it has the title in your country, a site every time. You can also pick any of them
         when you watch. For a site: search for any title on it, copy the address of the results page, and put <b>{title}</b> where the title was.</small></div>
     <label class="field"><span>If none of them fit, open</span><input class="input" name="fallback_url" value="${esc(s.fallback_url)}"></label>
+    <h4>Your torrent site <span class="tag-optional">anime</span></h4>
+    <div class="field"><div id="site-list"></div>
+      <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="site-add">+ Add your site</button></div>
+      <small><b>Get magnet</b> on an anime's page searches it, picks the torrent that has every episode (a pack with other seasons, films or OVAs is fine), in the best quality with the most seeders, and adds it.
+        For the search link: search for any anime on your site, copy the address of the results page, and put <b>{title}</b> where the name was.
+        <b>Test</b> shows what the app can read from it.</small></div>
     <h4>Your downloads</h4>
     <label class="field"><span>Downloads folder</span>
       <div class="input-row"><input class="input" name="downloads_folder" value="${esc(s.downloads_folder)}" placeholder="The one folder all your downloads go into">
@@ -3802,6 +3966,8 @@ async function openSettings() {
   </form>`, 'settings-modal');
   const form = $('form', wrap);
   wrap.svc = JSON.parse(JSON.stringify(s.services || []));
+  wrap.sites = JSON.parse(JSON.stringify(s.torrent_sites || []));
+  drawSites(wrap);
   drawServices(wrap);
   api('GET', '/api/services/presets').then(({ presets }) => {
     wrap.presets = presets;
@@ -3821,7 +3987,7 @@ async function openSettings() {
     const f = new FormData(form);
     return {
       tmdb_api_key: f.get('tmdb_api_key'), mal_client_id: f.get('mal_client_id'), region: f.get('region'),
-      fallback_url: f.get('fallback_url'), services: readServices(wrap),
+      fallback_url: f.get('fallback_url'), services: readServices(wrap), torrent_sites: readSites(wrap),
       vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), sync_folder: f.get('sync_folder'),
       downloads_folder: f.get('downloads_folder'), player: f.get('player'), queue_next_episodes: form.queue_next_episodes.checked,
       gemini_api_key: f.get('gemini_api_key'), groq_api_key: f.get('groq_api_key'), openrouter_api_key: f.get('openrouter_api_key'),
@@ -3858,6 +4024,8 @@ async function openSettings() {
           ? { kind: 'file', types: 'app', title: 'Find Opera GX', initial: '/Applications' }
           : { kind: 'file', types: 'exe', title: "Find Opera GX's launcher.exe" });
         if (path) form.browser_path.value = path;
+      } else if (a.startsWith('site-')) {
+        await siteAction(wrap, a, e.target.closest('[data-i]'));
       } else if (a.startsWith('svc-')) {
         serviceAction(wrap, a, e.target.closest('[data-i]'));
       } else if (a === 'dl-browse') {

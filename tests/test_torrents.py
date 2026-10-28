@@ -241,6 +241,18 @@ class TorrentTest(test_server.ServerBase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("End of file", result.stdout + result.stderr)
 
+    def test_peeking_inside_a_torrent_adds_nothing(self):
+        """Get magnet compares torrents by their files before one is added."""
+        magnet = f"{self.magnet}&x.pe=127.0.0.1:{self.seeder.listen_port()}"
+        h = self.app.torrents.hash_of_magnet(magnet)
+        got = self.app.torrents.peek_many([magnet], wait=20)
+        self.assertEqual(len(got[h]["files"]), 5)
+        self.assertEqual((self.app.torrents.records, self.app.torrents.handles), ({}, {}))
+        # Added afterwards: its list of files is there at once.
+        status, t = self.call("POST", f"/api/items/{self.item['id']}/torrents", {"magnet": self.magnet})
+        self.assertEqual(status, 200, t)
+        self.assertTrue(wait_for(lambda: self.app.torrents.records[t["hash"]].get("files"), timeout=5))
+
     def test_after_a_restart(self):
         h = self.add()
         self.app.torrents._save()
