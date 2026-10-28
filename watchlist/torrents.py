@@ -13,6 +13,12 @@
   part way through is kept. Everything can also be done by hand in the
   Torrents window: pause, resume, choose files, delete files or a torrent.
 
+A pack holding a whole anime franchise (seasons, films, OVAs) is worked out
+by packs.py once its list of files arrives: each file is given to the
+MyAnimeList entry it belongs to ("assign"), so Season 2's files show up on
+Haikyuu!! Second Season, the films on the films, and so on. You can check
+and change that in the torrent's "Matched to" window.
+
 Files go in "Watchlist torrents" inside your downloads folder (which the
 download sorting skips), or in the app's data folder without one.
 """
@@ -26,7 +32,7 @@ import urllib.parse
 import warnings
 from pathlib import Path
 
-from . import scanner
+from . import packs, scanner
 from .config import read_json, write_json
 
 # libtorrent 2.1 renamed a few things; the old names still work everywhere.
@@ -96,6 +102,9 @@ class Torrents:
         self._stop = False
         if lt and self.records:
             self._start()
+        for h, rec in self.records.items():
+            if rec.get("files") and not rec.get("plan"):
+                self._plan_soon(h)          # added before packs were worked out
 
     # ---- the libtorrent session
 
@@ -207,6 +216,7 @@ class Torrents:
         handle.set_flags(lt.torrent_flags.sequential_download)
         rec.pop("error", None)
         self._save_soon()
+        self._plan_soon(h)
 
     # ---- adding and removing
 
@@ -231,8 +241,8 @@ class Torrents:
             self._start()
             if h in self.records:
                 rec = self.records[h]
-                if rec["item_id"] != item_id:
-                    raise TorrentError("that torrent is already added to another title")
+                if rec["item_id"] != item_id and not self._owns_any(rec, item_id):
+                    raise TorrentError(f"that torrent is already added to {self._title(rec['item_id']) or 'another title'}")
                 return self.view(h)
             rec = {"hash": h, "item_id": item_id, "magnet": magnet, "name": p.name or "", "save_path": self._save_dir(),
                    "added": time.time(), "paused": False, "priorities": {}, "overrides": {}, "finished": {},
@@ -267,9 +277,55 @@ class Torrents:
 
     def forget_item(self, item_id):
         for h in [h for h, r in self.records.items() if r["item_id"] == item_id]:
-            self.remove(h, delete_files=True)
+            rec = self.records[h]
+            others = {o for f in rec.get("files") or [] for o in [self._owner(rec, f)[0]] if o and o != item_id}
+            if others:
+                rec["item_id"] = sorted(others)[0]     # a pack other titles still use: kept for them
+            else:
+                self.remove(h, delete_files=True)
         self.keep.pop(item_id, None)
         self._save_soon()
+
+    # ---- which title each file is
+
+    def _title(self, item_id):
+        try:
+            return self.app.store.get(item_id)["title"]
+        except KeyError:
+            return ""
+
+    def _owner(self, rec, f, cache=None):
+        """(item id, season, episode) a file belongs to: what you chose by hand,
+        else what the pack's matching gave it, else the torrent's title (season
+        and episode then from its name). (None, ...) for a file of no title in
+        your list."""
+        idx = str(f["index"])
+        override = (rec.get("overrides") or {}).get(idx)
+        if override == "none":
+            return None, None, None
+        if isinstance(override, dict):
+            return override.get("item"), override.get("season"), override.get("episode")
+        if isinstance(override, str) and ":" in override:
+            s, e = (int(x) for x in override.split(":"))
+            return rec["item_id"], s, e
+        assign = (rec.get("assign") or {}).get(idx)
+        if assign is not None:
+            sid, ep = assign
+            if not sid:
+                return None, None, None
+            cache = {} if cache is None else cache
+            if sid not in cache:
+                found = self.app.store.find_source("mal", sid)
+                cache[sid] = found["id"] if found else None
+            return cache[sid], (1 if ep else None), ep
+        return rec["item_id"], None, None
+
+    def _owns_any(self, rec, item_id):
+        cache = {}
+        return any(self._owner(rec, f, cache)[0] == item_id for f in rec.get("files") or [])
+
+    def _records_of(self, item_id):
+        return [h for h, r in self.records.items() if r["item_id"] == item_id or self._owns_any(r, item_id)]
 
     # ---- what's in a torrent
 
@@ -303,20 +359,23 @@ class Torrents:
     def videos(self, item, rec=None):
         """The torrent's video files as videos the rest of the app understands:
         finished ones by their real path, the rest by a stream link."""
-        out = []
-        recs = [rec] if rec else [r for r in self.records.values() if r["item_id"] == item["id"]]
+        out, cache = [], {}
+        recs = [rec] if rec else list(self.records.values())
         for rec in recs:
             progress = self._progress(rec["hash"])
             for f in rec.get("files") or []:
                 if kind_of(f["path"]) != "video":
                     continue
-                override = (rec.get("overrides") or {}).get(str(f["index"]))
-                if override == "none":
+                owner, s, e = self._owner(rec, f, cache)
+                if owner != item["id"]:
                     continue
                 v = self._describe(f["path"], f["size"])
-                if override and ":" in override:
-                    s, e = (int(x) for x in override.split(":"))
+                if item.get("format") == "movie" and owner != rec["item_id"]:
+                    v.update(season=None, episodes=[], kind="movie")       # a pack's film, given to the film
+                elif e:
                     v.update(season=s, episodes=[e], kind="episode" if s else "special")
+                elif owner != rec["item_id"]:
+                    v.update(season=1, episodes=v["episodes"][:1] or [1], kind="episode")   # a one-episode OVA
                 done = progress[f["index"]] if f["index"] < len(progress) else 0
                 whole = self.complete(rec, f, progress)
                 v.update(path=self.path_of(rec, f) if whole else self.stream_url(rec["hash"], f["index"], f["path"]),
@@ -361,14 +420,12 @@ class Torrents:
 
     def owns(self, item_id, path):
         """A stream link or downloaded file of one of this title's torrents."""
-        found = self.parse_url(path)
-        if found:
-            return self.records[found[0]]["item_id"] == item_id
-        for rec in self.records.values():
-            if rec["item_id"] == item_id and isinstance(path, str) and path.startswith(rec["save_path"]):
-                real = os.path.realpath(path)
-                return any(os.path.realpath(self.path_of(rec, f)) == real for f in rec.get("files") or [])
-        return False
+        found = self.find_file(path) if isinstance(path, str) else None
+        if not found:
+            return False
+        rec = self.records[found[0]]
+        f = next((f for f in rec.get("files") or [] if f["index"] == found[1]), None)
+        return bool(f) and self._owner(rec, f)[0] == item_id
 
     def find_file(self, path):
         """(hash, index) of a torrent's downloaded file, by its path."""
@@ -542,8 +599,9 @@ class Torrents:
             if now - at > 30:
                 continue
             rec = self.records.get(h)
+            f = next((f for f in (rec or {}).get("files") or [] if f["index"] == index), None)
             try:
-                item = self.app.store.get(rec["item_id"]) if rec else None
+                item = self.app.store.get(self._owner(rec, f)[0]) if f else None
             except KeyError:
                 item = None
             if not item:
@@ -566,8 +624,6 @@ class Torrents:
         now = time.time()
         playing = self._playing_paths()
         for h, rec in list(self.records.items()):
-            if self.keep.get(rec["item_id"]):
-                continue
             # Deleting puts the torrent back for a moment: not while any of its
             # episodes is streaming (it happens once you stop).
             if any(now - at < 120 for (rh, _), at in self.reading.items() if rh == h):
@@ -579,6 +635,8 @@ class Torrents:
                     f = self._file(rec, int(index))
                 except TorrentError:
                     rec["finished"].pop(index, None)
+                    continue
+                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]):
                     continue
                 if self.path_of(rec, f) in playing or self.stream_url(h, f["index"], f["path"]) in playing:
                     continue
@@ -609,15 +667,22 @@ class Torrents:
                 handle.file_priority(index, priority)
             self._save_soon()
 
-    def set_episode(self, h, index, key):
-        """Which episode a file is ("s:e"), not an episode ("none"), or automatic (None)."""
+    def set_episode(self, h, index, key, item_id=None):
+        """Which episode a file is ("s:e", of item_id when it's another title
+        than the torrent's), not an episode ("none"), or automatic (None)."""
         with self.lock:
             rec = self._rec(h)
             self._file(rec, index)
             if key in (None, ""):
                 rec["overrides"].pop(str(index), None)
-            elif key == "none" or (":" in key and all(x.isdigit() for x in key.split(":"))):
+            elif key == "none":
                 rec["overrides"][str(index)] = key
+            elif isinstance(key, str) and key.count(":") == 1 and all(x.isdigit() for x in key.split(":")):
+                s, e = (int(x) for x in key.split(":"))
+                if item_id and item_id != rec["item_id"]:
+                    rec["overrides"][str(index)] = {"item": item_id, "season": s, "episode": e}
+                else:
+                    rec["overrides"][str(index)] = key
             else:
                 raise TorrentError("episode must look like 1:5")
             self._save_soon()
@@ -654,6 +719,122 @@ class Torrents:
             self._save()
         return {"ok": True}
 
+    # ---- packs: which title each file is, worked out across the franchise
+
+    def _plan_soon(self, h):
+        threading.Thread(target=self.make_plan, args=(h,), daemon=True).start()
+
+    def make_plan(self, h, use_ai=True):
+        """Work out a torrent that may hold a whole anime franchise. Only an
+        anime from MyAnimeList is worked out this way (other shows are one
+        title with seasons); a torrent of one entry's episodes stays as it was."""
+        rec = self.records.get(h)
+        if not rec or not rec.get("files"):
+            return
+        settings = self.app.settings.get()
+        try:
+            item = self.app.store.get(rec["item_id"])
+        except KeyError:
+            return
+        files = [{"key": f["index"], "rel": f["path"], "size": f["size"]}
+                 for f in rec["files"] if kind_of(f["path"]) == "video"]
+        if item.get("source") != "mal" or not settings.get("mal_client_id") or len(files) < 2:
+            with self.lock:
+                rec["plan"] = {"status": "single"}
+                self._save_soon()
+            return
+        with self.lock:
+            rec["plan"] = dict(rec.get("plan") or {}, status="working")
+        try:
+            result = packs.plan(settings, item["source_id"], files, use_ai=use_ai)
+        except Exception as e:  # noqa: BLE001 - MyAnimeList unreachable: try again next start
+            with self.lock:
+                rec["plan"] = {"status": "failed", "error": str(e)[:200]}
+                self._save_soon()
+            return
+        targets = {v[0] for g in result["groups"] for v in g["parts"].values() if v[0]}
+        with self.lock:
+            if targets <= {item["source_id"]}:
+                rec["plan"] = {"status": "single"}
+                rec.pop("assign", None)
+            else:
+                rec["plan"] = {
+                    "status": "ready", "by": result["by"], "anchor": item["source_id"],
+                    "entries": [{k: e.get(k) for k in ("source_id", "title", "kind", "media_type", "episodes", "year",
+                                                       "relation", "poster")} for e in result["entries"]],
+                    "groups": [{"id": g["id"], "kind": g["kind"], "label": g["label"], "season": g["season"],
+                                "files": g["files"], "episodes": [[k, n] for k, n in g["episodes"].items()],
+                                "sample": g["sample"], "why": g["why"], "by": g["by"], "sure": g["sure"]}
+                               for g in result["groups"]]}
+                rec["assign"] = {str(k): v for g in result["groups"] for k, v in g["parts"].items()}
+            self._save()
+
+    def wait_for_plan(self, h, wait=90):
+        """Until a pack is worked out (so its files are on the right titles)."""
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            rec = self.records.get(h)
+            if not rec or (rec.get("plan") or {}).get("status") not in (None, "", "working"):
+                return
+            time.sleep(0.3)
+
+    def _missing(self, rec):
+        """MyAnimeList entries the pack has files of that aren't in your list."""
+        sids = {v[0] for v in (rec.get("assign") or {}).values() if v and v[0]}
+        return sorted(sid for sid in sids if not self.app.store.find_source("mal", sid))
+
+    def plan_view(self, h):
+        rec = self._rec(h)
+        plan = rec.get("plan") or {}
+        if plan.get("status") != "ready":
+            return {"hash": h, "status": plan.get("status") or ("loading" if not rec.get("files") else "working"),
+                    "error": plan.get("error", "")}
+        in_list = {}
+        for e in plan["entries"]:
+            found = self.app.store.find_source("mal", e["source_id"])
+            in_list[e["source_id"]] = found["id"] if found else None
+        titles = {e["source_id"]: e["title"] for e in plan["entries"]}
+        assign = rec.get("assign") or {}
+        groups = []
+        for g in plan["groups"]:
+            parts = [assign.get(str(k)) or [None, None] for k in g["files"]]
+            targets = []
+            for sid, ep in parts:
+                t = next((t for t in targets if t["source_id"] == sid), None)
+                if not t:
+                    t = {"source_id": sid, "title": titles.get(sid, "") if sid else "", "item_id": in_list.get(sid),
+                         "files": 0, "first": ep, "last": ep}
+                    targets.append(t)
+                t["files"] += 1
+                if ep:
+                    t["first"] = min(t["first"] or ep, ep)
+                    t["last"] = max(t["last"] or ep, ep)
+            groups.append({"id": g["id"], "kind": g["kind"], "label": g["label"], "count": len(g["files"]),
+                           "sample": g["sample"], "why": g["why"], "by": g["by"], "sure": g["sure"],
+                           "targets": targets})
+        return {"hash": h, "status": "ready", "by": plan["by"], "name": rec.get("name") or "",
+                "entries": [dict(e, item_id=in_list[e["source_id"]]) for e in plan["entries"]],
+                "groups": groups, "missing": self._missing(rec)}
+
+    def set_group(self, h, gid, source_id):
+        """Point a group of a pack's files at another entry (None: at nothing)."""
+        with self.lock:
+            rec = self._rec(h)
+            plan = rec.get("plan") or {}
+            g = next((g for g in plan.get("groups") or [] if g["id"] == gid), None)
+            if not g:
+                raise TorrentError("that group isn't in the torrent any more")
+            if source_id is not None and source_id not in {e["source_id"] for e in plan["entries"]}:
+                raise TorrentError("that isn't one of the franchise's entries")
+            group = dict(g, episodes={k: n for k, n in g["episodes"]})
+            ents = [dict(e, names=[e["title"]]) for e in plan["entries"]]
+            for k, v in packs.regroup(group, ents, source_id, plan["anchor"]).items():
+                rec.setdefault("assign", {})[str(k)] = v
+                rec["overrides"].pop(str(k), None)
+            g.update(why="you chose it", by="you", sure=True)
+            self._save()
+        return self.plan_view(h)
+
     # ---- for the Torrents window
 
     def view(self, h):
@@ -666,17 +847,33 @@ class Torrents:
             item = self.app.store.get(rec["item_id"])
         except KeyError:
             pass
-        eps = {}
-        if item and item.get("format") == "series":
-            for key, v in self.episodes(item).items():
-                if v["hash"] == h:
-                    eps[v["index"]] = key
+        cache, owners = {}, {}
+        for f in rec.get("files") or []:
+            if kind_of(f["path"]) == "video":
+                owners[f["index"]] = self._owner(rec, f, cache)[0]
+        eps, titles = {}, {}
+        for owner in {o for o in owners.values() if o}:
+            try:
+                it = self.app.store.get(owner)
+            except KeyError:
+                continue
+            titles[owner] = it["title"]
+            if it.get("format") == "series":
+                for key, v in self.episodes(it).items():
+                    if v["hash"] == h:
+                        eps[v["index"]] = key
+            else:
+                eps.update({i: "film" for i, o in owners.items() if o == owner})
         files = []
         for f in rec.get("files") or []:
             done = progress[f["index"]] if f["index"] < len(progress) else 0
+            override = rec["overrides"].get(str(f["index"]))
+            owner = owners.get(f["index"])
             files.append({"index": f["index"], "path": f["path"], "size": f["size"], "done": done,
                           "kind": kind_of(f["path"]), "priority": int(rec["priorities"].get(str(f["index"]), 0)),
-                          "episode": eps.get(f["index"]), "override": rec["overrides"].get(str(f["index"])),
+                          "episode": eps.get(f["index"]), "item_id": owner, "item_title": titles.get(owner, ""),
+                          "override": (f'{override["season"]}:{override["episode"]}' if isinstance(override, dict)
+                                       else override),
                           "complete": self.complete(rec, f, progress),
                           "finished_at": rec["finished"].get(str(f["index"]))})
         state = "paused" if rec.get("paused") else "loading" if not rec.get("files") else (
@@ -687,11 +884,14 @@ class Torrents:
                 "down": st.download_rate if st else 0, "up": st.upload_rate if st else 0,
                 "peers": st.num_peers if st else 0, "seeds": st.num_seeds if st else 0,
                 "wanted": st.total_wanted if st else 0, "wanted_done": st.total_wanted_done if st else 0,
-                "keep": bool(self.keep.get(rec["item_id"])), "files": files}
+                "keep": bool(self.keep.get(rec["item_id"])), "files": files,
+                "plan": {"status": (rec.get("plan") or {}).get("status", ""),
+                         "titles": len({o for o in owners.values() if o}),
+                         "missing": len(self._missing(rec))}}
 
     def all(self, item_id=None):
         with self.lock:
-            hashes = [h for h, r in self.records.items() if item_id in (None, r["item_id"])]
+            hashes = list(self.records) if item_id is None else self._records_of(item_id)
             return {"available": bool(lt), "error": self.error, "keep_after": DELETE_AFTER,
                     "torrents": [self.view(h) for h in hashes]}
 

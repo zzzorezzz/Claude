@@ -2679,7 +2679,8 @@ async function loadLocal(wrap) {
     if (isSeries(item)) drawEpisodes(wrap);
   }
   // While a torrent is busy, keep its progress (and the episode list) current.
-  const busy = (tor?.torrents || []).some((t) => !t.paused && (t.state === 'loading' || t.wanted > t.wanted_done || t.down > 0));
+  const busy = (tor?.torrents || []).some((t) => t.plan?.status === 'working'
+    || (!t.paused && (t.state === 'loading' || t.wanted > t.wanted_done || t.down > 0)));
   if (busy) wrap.torTimer = setTimeout(() => { if (wrap.isConnected) loadLocal(wrap); }, 3000);
 }
 
@@ -2716,6 +2717,7 @@ function drawTorrentBox(wrap) {
       <div class="tor-meta muted small">${vids} video${vids === 1 ? '' : 's'}${isSeries(item) ? ` · ${eps} episode${eps === 1 ? '' : 's'} matched` : ''}
         ${t.wanted ? ` · ${pct}% of what you chose` : ''}${t.down ? ` · ↓ ${fmtBytes(t.down)}/s` : ''}${t.peers ? ` · ${t.peers} peer${t.peers === 1 ? '' : 's'}` : ''}</div>
       ${t.error ? `<div class="bad small">${esc(t.error)}</div>` : ''}
+      ${planLine(t, 'data-t')}
       <div class="btns"><button class="btn btn-ghost btn-sm" data-t="tor-manage">Files & downloads…</button>
         <button class="btn btn-ghost btn-sm" data-t="tor-pause">${t.paused ? 'Resume' : 'Pause'}</button>
         <button class="btn btn-ghost btn-sm" data-t="tor-remove">Remove</button></div></div>`;
@@ -2767,6 +2769,7 @@ async function torrentClick(wrap, item, btn) {
       await api('POST', `/api/items/${item.id}/torrent-keep`, { keep: btn.checked });
       await loadLocal(wrap);
     } else if (t === 'tor-manage') openTorrents(hash);
+    else if (t === 'tor-plan') openPlan(hash, () => loadLocal(wrap));
     else if (t === 'tor-pause') {
       const tor = wrap.st.torrents.torrents.find((x) => x.hash === hash);
       await api('POST', `/api/torrents/${hash}/pause`, { paused: !tor.paused });
@@ -2823,7 +2826,8 @@ function openTorrents(focus = '') {
       else if (act === 'delete-file') {
         if (!(await confirmModal('Delete this file?', 'What\'s downloaded of it is deleted, and it stops downloading.', 'Delete'))) return;
         await api('POST', `/api/torrents/${hash}/files/${index}/delete`);
-      } else if (act === 'episode') { await editTorrentEpisode(hash, Number(index), b.dataset.current || ''); }
+      } else if (act === 'episode') { await editTorrentEpisode(hash, Number(index), b.dataset.current || '', b.dataset.owner || ''); }
+      else if (act === 'tor-plan') { openPlan(hash); return; }
       else if (act === 'open-title') { closeModal(wrap); openTitle(b.dataset.item); return; }
       wrap.st.sig = '';
       refreshOpenTitle();
@@ -2836,7 +2840,7 @@ function drawTorrents(wrap, data) {
   if (!list) return;
   if (!data.available) { list.innerHTML = `<p class="muted">${esc(data.error)}</p>`; return; }
   if (!data.torrents.length) { list.innerHTML = '<p class="muted">No torrents yet. Paste a magnet link on a show\'s page, under "Stream from a torrent".</p>'; return; }
-  const sig = JSON.stringify(data.torrents.map((t) => [t.hash, t.paused, t.files.map((f) => [f.priority, f.episode, f.override, f.complete, f.done > 0])]));
+  const sig = JSON.stringify(data.torrents.map((t) => [t.hash, t.paused, t.plan, t.files.map((f) => [f.priority, f.episode, f.item_id, f.override, f.complete, f.done > 0])]));
   // Only the numbers change between updates, unless something was changed.
   if (sig === wrap.st.sig) {
     for (const t of data.torrents) {
@@ -2859,7 +2863,7 @@ function drawTorrents(wrap, data) {
   list.innerHTML = sorted.map((t) => `<div class="tw-card ${t.hash === wrap.st.focus ? 'focus' : ''}" data-hash="${esc(t.hash)}">
     <div class="tw-head"><div><b>${esc(t.name || 'Torrent')}</b>
       <div class="muted small">${t.title ? `For <button class="linkish" data-tw="open-title" data-item="${esc(t.item_id)}">${esc(t.title)}</button> · ` : ''}<span class="tw-state">${esc(TORRENT_STATE[t.state] || t.state)}</span> · <span class="tw-rates">${esc(torrentRates(t))}</span>${t.keep ? ' · keeps watched episodes' : ''}</div>
-      ${t.error ? `<div class="bad small">${esc(t.error)}</div>` : ''}</div>
+      ${t.error ? `<div class="bad small">${esc(t.error)}</div>` : ''}${planLine(t, 'data-tw')}</div>
       <div class="btns"><button class="btn btn-ghost btn-sm" data-tw="${t.paused ? 'resume' : 'pause'}">${t.paused ? 'Resume' : 'Pause'}</button>
         <button class="btn btn-ghost btn-sm" data-tw="folder">Open folder</button>
         <button class="btn btn-ghost btn-sm" data-tw="remove">Remove</button></div></div>
@@ -2869,8 +2873,8 @@ function drawTorrents(wrap, data) {
           ${[[0, 'Skip'], [1, 'Normal'], [4, 'High'], [7, 'Now']].map(([v, l]) => `<option value="${v}" ${f.priority === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
         <span class="tw-kind ${f.kind}">${f.kind === 'video' ? '▶' : f.kind === 'subtitle' ? 'CC' : '•'}</span>
         <span class="tw-name" title="${esc(f.path)}">${esc(f.path.split('/').pop())}</span>
-        <button class="tw-ep ${f.override ? 'set' : ''}" data-tw="episode" data-current="${esc(f.override || '')}" title="Which episode is this?">${f.kind === 'video'
-    ? (f.override === 'none' ? 'Not an episode' : f.episode ? esc(epKeyLabel(f.episode)) : 'No episode') : ''}</button>
+        <button class="tw-ep ${f.override ? 'set' : ''}" data-tw="episode" data-current="${esc(f.override || '')}" data-owner="${esc(f.item_id || t.item_id)}" title="Which title and episode is this?">${f.kind === 'video'
+    ? (f.override === 'none' ? 'Not an episode' : fileLabel(t, f)) : ''}</button>
         <span class="tw-size">${fmtBytes(f.size)}</span>
         <span class="tw-fbar"><i style="width:${f.size ? (f.done / f.size) * 100 : 0}%"></i></span><span class="tw-pct">${f.size ? Math.floor((f.done / f.size) * 100) : 0}%</span>
         ${f.done > 0 ? `<button class="tw-del" data-tw="delete-file" title="Delete this file">${ICON.trash}</button>` : '<span></span>'}</div>`).join('')}</div>`
@@ -2882,12 +2886,104 @@ function drawTorrents(wrap, data) {
 const torrentRates = (t) => [t.down ? `↓ ${fmtBytes(t.down)}/s` : '', t.up ? `↑ ${fmtBytes(t.up)}/s` : '',
   `${t.peers} peer${t.peers === 1 ? '' : 's'}${t.seeds ? ` (${t.seeds} sharing everything)` : ''}`].filter(Boolean).join(' · ');
 const epKeyLabel = (key) => { const [s, e] = key.split(':').map(Number); return s === 0 ? `Special ${e}` : `S${s} E${e}`; };
+// "Haikyuu!! Second Season · E5" when a pack's file is another title's.
+function fileLabel(t, f) {
+  if (!f.item_id) return t.plan?.status === 'ready' ? 'Not matched' : 'No episode';
+  const ep = f.episode === 'film' ? '' : f.episode ? epKeyLabel(f.episode) : 'No episode';
+  const other = f.item_id !== t.item_id || (t.plan?.titles || 0) > 1;
+  return esc(other ? [f.item_title, ep.replace(/^S1 /, '')].filter(Boolean).join(' · ') : ep);
+}
+// Under a torrent: whether it's a pack spread over several titles.
+function planLine(t, attr) {
+  const p = t.plan || {};
+  if (p.status === 'working') return '<div class="plan-line small"><span class="spin-dot"></span> Working out which title and episode each file is…</div>';
+  if (p.status === 'failed') return `<div class="plan-line small muted">Couldn't check the files against MyAnimeList yet. <button class="linkish" ${attr}="tor-plan">Try again</button></div>`;
+  if (p.status !== 'ready') return '';
+  return `<div class="plan-line small">A pack of ${p.titles} title${p.titles === 1 ? '' : 's'} in your list${p.missing ? ` · <b>${p.missing} more not in your list</b>` : ''}
+    <button class="btn btn-ghost btn-sm" ${attr}="tor-plan">What's matched to what…</button></div>`;
+}
 
-async function editTorrentEpisode(hash, index, current) {
+/* A pack (a whole franchise in one torrent): each group of files and the
+   MyAnimeList entry it went to, with why. Any group can be pointed elsewhere. */
+function openPlan(hash, onChange = () => {}) {
+  const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>What's matched to what</h2>
+    <p class="sub">This torrent holds several seasons, films or OVAs. On MyAnimeList each of those is its own title, so each group of files was matched to its own entry (and its episodes renumbered to match). Change any group that's wrong.</p>
+    <div id="plan-body"><div class="spinner"></div></div></div>`, 'plan-modal');
+  const changed = () => { onChange(); refreshOpenTitle(); };
+  const draw = (v) => {
+    const body = $('#plan-body', m);
+    if (!body) return;
+    if (v.status !== 'ready') {
+      body.innerHTML = v.status === 'working' || v.status === 'loading'
+        ? '<p class="muted"><span class="spin-dot"></span> Still working it out… this takes a few seconds (up to a minute with AI).</p>'
+        : `<p class="muted">${v.status === 'failed' ? `Couldn't work it out: ${esc(v.error)}` : 'This torrent is all one title - nothing to match.'}</p>
+           <div class="btns"><button class="btn btn-white btn-sm" data-p="redo">Work it out again</button></div>`;
+      if (v.status === 'working' || v.status === 'loading') m.timer = setTimeout(load, 2000);
+      return;
+    }
+    const opts = (sel) => `<option value="">Not part of any title (skip)</option>${v.entries.map((e) => `<option value="${esc(e.source_id)}" ${e.source_id === sel ? 'selected' : ''}>${esc(e.title)} (${esc(e.media_type || e.kind)}${e.episodes ? `, ${e.episodes} ep` : ''}${e.year ? `, ${e.year}` : ''})${e.item_id ? '' : ' - not in your list'}</option>`).join('')}`;
+    const missing = v.entries.filter((e) => v.missing.includes(e.source_id));
+    body.innerHTML = `<p class="muted small">Matched by ${esc(v.by)}.</p>
+      ${missing.length ? `<div class="plan-missing"><div><b>${missing.length} of these title${missing.length === 1 ? ' isn\'t' : 's aren\'t'} in your list yet</b>
+        <div class="muted small">${missing.map((e) => esc(e.title)).join(' · ')}</div>
+        <div class="muted small">Their files show up on them once they're added.</div></div>
+        <button class="btn btn-white btn-sm" data-p="add">Add ${missing.length === 1 ? 'it' : 'them all'}</button></div>` : ''}
+      <div class="plan-groups">${v.groups.map((g) => {
+    const main = g.targets[0] || {};
+    return `<div class="plan-group ${g.kind === 'extra' ? 'extra' : ''}" data-group="${esc(g.id)}">
+        <div class="pg-head"><b>${esc(g.label)}</b><span class="muted small">${g.count} file${g.count === 1 ? '' : 's'}</span>
+          ${g.kind === 'extra' ? '' : `<span class="pg-by ${g.by}">${g.by === 'ai' ? 'AI' : g.by === 'you' ? 'You' : 'Rules'}${g.sure ? '' : ' · unsure'}</span>`}</div>
+        <div class="muted small pg-sample" title="${esc(g.sample.join('\n'))}">${esc(g.sample[0] || '')}</div>
+        ${g.kind === 'extra' ? '<div class="muted small">Openings, endings and other extras aren\'t episodes.</div>' : `
+        <div class="pg-to">${g.targets.map((t) => t.source_id
+    ? `<div>→ <b>${esc(t.title)}</b>${t.first ? ` <span class="muted">episode${t.first === t.last ? ` ${t.first}` : `s ${t.first}-${t.last}`}</span>` : ''}${t.item_id ? '' : ' <span class="tag">not in your list</span>'}</div>`
+    : '<div class="muted">→ not part of any title</div>').join('')}</div>
+        <div class="muted small pg-why">${esc(g.why)}</div>
+        <label class="field pg-change"><span>Change to</span><select class="select" data-pg="${esc(g.id)}">${opts(main.source_id || '')}</select></label>`}
+      </div>`;
+  }).join('')}</div>
+      <div class="btns"><button class="btn btn-ghost btn-sm" data-p="redo">Work it all out again${(S.status.ai || []).length ? ' (with AI)' : ''}</button></div>`;
+  };
+  const load = async () => {
+    if (!m.isConnected) return;
+    try { draw(await api('GET', `/api/torrents/${hash}/plan`)); } catch (err) { fail(err); }
+  };
+  m.onClose = () => clearTimeout(m.timer);
+  m.addEventListener('change', async (e) => {
+    const sel = e.target.closest('[data-pg]');
+    if (!sel) return;
+    try { draw(await api('POST', `/api/torrents/${hash}/plan`, { group: sel.dataset.pg, source_id: sel.value || null })); changed(); } catch (err) { fail(err); }
+  });
+  m.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-p]');
+    if (!b) return;
+    b.disabled = true;
+    try {
+      if (b.dataset.p === 'add') {
+        b.textContent = 'Adding…';
+        const v = await api('POST', `/api/torrents/${hash}/plan/add`, {});
+        if (v.added) toast(`Added ${v.added} title${v.added === 1 ? '' : 's'} to your list`);
+        if (v.failed?.length) toast(`Some couldn't be added: ${v.failed.join('; ')}`, 'bad');
+        await reload();
+        draw(v);
+      } else if (b.dataset.p === 'redo') {
+        b.textContent = 'Working it out…';
+        draw(await api('POST', `/api/torrents/${hash}/plan/redo`, {}));
+      }
+      changed();
+    } catch (err) { fail(err); b.disabled = false; }
+  });
+  load();
+}
+
+async function editTorrentEpisode(hash, index, current, owner = '') {
   return new Promise((resolve) => {
     const [cs, ce] = current && current.includes(':') ? current.split(':') : ['1', ''];
+    const titles = S.items.filter((i) => isSeries(i) || i.id === owner).sort((a, b) => a.title.localeCompare(b.title));
     const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
       <h2>Which episode is this file?</h2>
+      <label class="field"><span>Title</span><select class="select" id="te-item">${titles.map((i) => `<option value="${esc(i.id)}" ${i.id === owner ? 'selected' : ''}>${esc(i.title)}</option>`).join('')}</select></label>
       <div class="mv-row"><label class="field"><span>Season</span><input class="input" id="te-s" type="number" min="0" value="${esc(cs)}" style="width:90px"></label>
         <label class="field"><span>Episode</span><input class="input" id="te-e" type="number" min="1" value="${esc(ce)}" style="width:110px"></label></div>
       <div class="btns" style="margin-top:16px"><button class="btn btn-white" data-x="set">Save</button>
@@ -2898,7 +2994,7 @@ async function editTorrentEpisode(hash, index, current) {
       const x = e.target.closest('[data-x]')?.dataset.x;
       if (!x) return;
       const episode = x === 'auto' ? null : x === 'none' ? 'none' : `${Number($('#te-s', m).value) || 0}:${Number($('#te-e', m).value) || 1}`;
-      try { await api('POST', `/api/torrents/${hash}/files/${index}`, { episode }); closeModal(m); } catch (err) { fail(err); }
+      try { await api('POST', `/api/torrents/${hash}/files/${index}`, { episode, item_id: $('#te-item', m).value || null }); closeModal(m); } catch (err) { fail(err); }
     });
   });
 }

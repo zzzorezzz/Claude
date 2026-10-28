@@ -51,11 +51,13 @@ Two things are optional, and everything works without them:
   - The app reads each video's name, and its folder's name if needed, and connects it to the right show, season and episode or movie in your list.
   - **Long anime numbered from the start** ("Season 12/Naruto Shippuden - 250"): an episode number of 40 or more in a "Season N" folder counts from the show's first episode, as on MyAnimeList, so the folder doesn't need renaming. For a TMDB show split into seasons, it's placed in the right season.
   - It tells episodes, OVAs, specials, films and extras apart, using the file and folder names, the size, and what MyAnimeList says each title is.
+  - Season folders are read however they're written: "Season 2", "(Season 2)", "S04", "4th Season", "Second Season - 05", "S2 - 05". A folder holding several seasons ("S01+02+03+04", "Complete", "Batch") doesn't count as season 1.
   - **Nothing is sorted until you press Sort now.** New downloads wait, and the banner above your downloads says how many. Files you've sorted, moved or taken out of a title, and files sorted earlier, are never changed.
   - **Sort now** (in the banner, and in **Sort your downloads**) sorts only what's still waiting:
-    1. Files that clearly match a title in your list, and extras in the same folder as a show.
-    2. Shows that aren't in your list are searched for, **MyAnimeList first**: anything that's an anime goes to Anime, and TMDB is only used for what isn't on MyAnimeList. Even when an anime is found on TMDB (or named by the AI as a TV show), its MyAnimeList entry is used, never TMDB's copy. An OVA, special, film or second season of an anime you have is found through that anime's MyAnimeList relations. A title already in your list is never added twice.
-    3. **✨ with AI**, the small button above **Sort now**, also asks your AI helper about what's left.
+    1. **Packs first:** a folder holding a whole anime franchise (several seasons, or seasons with films and OVAs) is worked out group by group, as described under **Packs** below, so Season 2's files go to the Second Season, not to the first one. A pack is worked out once; files you placed yourself are left alone.
+    2. Files that clearly match a title in your list, and extras in the same folder as a show.
+    3. Shows that aren't in your list are searched for, **MyAnimeList first**: anything that's an anime goes to Anime, and TMDB is only used for what isn't on MyAnimeList. Even when an anime is found on TMDB (or named by the AI as a TV show), its MyAnimeList entry is used, never TMDB's copy. An OVA, special, film or second season of an anime you have is found through that anime's MyAnimeList relations. A title already in your list is never added twice.
+    4. **✨ with AI**, the small button above **Sort now**, also asks your AI helper about what's left.
 
     It then says how many it sorted. Everything it did is listed under **Sorted for you**, where **Undo** puts it back (and removes the title it added); undone files are left for you.
   - **Sort them myself** opens **Sort your downloads**: what's ready to sort, what it isn't sure of (a typo, an unnumbered file, a subtitle without a video), and what isn't in your list, each with what was found. Your answers are kept.
@@ -86,7 +88,20 @@ On a show's page, under **Stream from a torrent**, paste its **magnet link**.
 - **Torrents window** (the download icon at the top, or **Files & downloads…**): every torrent and file, live: progress, speed, peers. Choose which files download and how urgently (**Skip / Normal / High / Now**, for subtitles or extras too), say which episode a file is if it was matched wrong, delete files, pause, resume, open the folder, or remove a torrent.
 - Files go in **Watchlist torrents** inside your downloads folder (download sorting skips that folder). Episodes you've finished downloading count as on your computer.
 - It's as fast as the torrent: with few people sharing it, or a download slower than the video, it pauses to buffer. While a torrent downloads it also uploads to others in it, as torrents do. The first time, Windows may ask whether Watchlist may accept connections.
+- **Packs** (a whole franchise in one torrent, like "Haikyuu!! S01+02+03+04+Movies+OVAs"): see below. Adding the same pack on another of its titles just shows it there.
 - **Watch parties** work with streamed episodes: if the other person doesn't have the episode, their app adds the same torrent to the show and streams it, and moving on to the next episode loads it on both sides without leaving the party.
+
+### Packs: a whole franchise in one torrent or folder
+
+On MyAnimeList every season, part, film and OVA is its own title (Haikyuu!! has Haikyuu!!, Second Season, Karasuno vs. Shiratorizawa, To the Top, To the Top Part 2, four films and OVAs), but a pack has them all, often as "Season 1-4". So a pack isn't matched to one title:
+
+1. Its files are put in groups: each season, each film, the OVAs/OADs, and extras (openings, endings), from the folder and file names.
+2. The franchise's entries come from MyAnimeList (the title you added it to and everything connected to it), with each one's kind, number of episodes and date.
+3. Each group is matched to its entry: Season N is the franchise's Nth TV series; a group whose name says which one it is ("To the Top") goes there; a season with more episodes than its entry carries on into the next one (To the Top's episodes 14-25 are To the Top Part 2's 1-12), and episodes numbered from the very start of the show are counted through the entries; films and OVAs go to the ones with the same name, or in release order.
+4. **With an AI key**, your AI helper looks at the same groups and MyAnimeList's facts and matches them too. Its answer is used wherever it checks out against MyAnimeList (an episode number that doesn't exist is thrown out, and the rules' answer is kept for that group).
+
+Each file then shows up on its own title, numbered the way MyAnimeList numbers it. Titles that aren't in your list yet are listed under the torrent: **What's matched to what…** shows every group, where it went and why (rules, AI or you), lets you change any group, **Add them all** to your list, or **Work it all out again**. In the **Torrents window** each file shows its title and episode, and you can point one file anywhere (any title, any episode). Your own downloads go through the same steps when you press **Sort now**, and anything it did can be undone under **Sorted for you**.
+
 
 ### Watch together
 

@@ -1,6 +1,10 @@
 """Sort now: what happens to waiting downloads when you press the button.
 Nothing here runs by itself.
 
+0. A folder holding a whole anime franchise ("Haikyuu!! S01+02+03+04+Movies")
+   is worked out first, group by group, against the franchise's MyAnimeList
+   entries (packs.py, with the AI's help when there's a key): Season 2's files
+   go to Second Season, the films to the films, and so on.
 1. Files that clearly match a title in your list (or a name you've answered
    before) are sorted there; extras go with the show in the same folder.
 2. The rest are looked up: an OVA, special, film or later season of an anime in
@@ -15,9 +19,11 @@ never touched.
 
 import threading
 import time
+from collections import Counter
+from pathlib import Path
 
-from . import ai, metadata
-from .library import item_kind, norm, score_file
+from . import ai, metadata, packs, scanner
+from .library import item_kind, norm, score_file, score_item
 from .store import new_item
 
 RETRY_AFTER = 3 * 24 * 3600
@@ -105,6 +111,9 @@ class Sorter:
             lib.busy = "Looking through your downloads…"
             lib.scan(force=True)
             settings = self.app.settings.get()
+            # 0. Packs of a whole franchise, before anything is sorted by name.
+            if settings.get("mal_client_id"):
+                self._packs(settings, report)
             # 1. Clear matches, and names you've answered before (then the extras,
             #    which can follow the files just sorted).
             for why in ("clear match by name", "in the same folder as the show"):
@@ -154,6 +163,123 @@ class Sorter:
             self.now = {"running": False, "last": report}
             self._running.release()
         return report
+
+    # ---- packs
+
+    def _pack_folders(self):
+        """{top folder: [videos]} of folders in your downloads that look like a
+        whole franchise: several seasons, or seasons with films or OVAs."""
+        lib = self.app.library
+        by_top = {}
+        for v in lib.videos:
+            parts = Path(v["rel"]).parts
+            if len(parts) > 1:
+                by_top.setdefault(parts[0], []).append(v)
+        out = {}
+        for top, vids in by_top.items():
+            if len(vids) < 2:
+                continue
+            groups = packs.groups_of([{"key": v["rel"], "rel": v["rel"], "size": v.get("size") or 0} for v in vids])
+            seasons = {g["season"] for g in groups if g["kind"] == "tv" and g["season"]}
+            named = [g for g in groups if g["kind"] == "tv" and not g["season"] and g["distinct"]]
+            others = [g for g in groups if g["kind"] in ("movie", "ova")]
+            tv = [g for g in groups if g["kind"] == "tv"]
+            if len(seasons) + len(named) >= 2 or (tv and others) or scanner._MANY_SEASONS.search(top):
+                out[top] = vids
+        return out
+
+    def _pack_anchor(self, settings, vids):
+        """A MyAnimeList entry of the pack's franchise: one its files are sorted
+        to already, else the clear match of its name on MyAnimeList."""
+        lib = self.app.library
+        items = {i["id"]: i for i in self.app.store.list()}
+        owners = Counter()
+        for v in vids:
+            a = lib.answers["files"].get(v["rel"])
+            target = a.get("item") if isinstance(a, dict) else None
+            if target in items:
+                owners[target] += 1
+        for q in lib.pending():
+            if q["kind"] == "title" and q.get("match") in items and set(q["files"]) & {v["rel"] for v in vids}:
+                owners[q["match"]] += len(q["files"])
+        for item_id, _ in owners.most_common():
+            item = items[item_id]
+            if item["source"] == "mal":
+                return item["source_id"]
+            return None                  # a show from TMDB: not an anime pack
+        names = [packs._base(v["guess"]) for v in vids if v["kind"] == "episode" and v["guess"]]
+        if not names:
+            return None
+        name = Counter(names).most_common(1)[0][0]
+        rows = metadata.MAL(settings["mal_client_id"]).search(name)
+        scored = []
+        for r in rows:
+            if (r.get("media_kind") or "").lower() not in ("tv", "ona"):
+                continue
+            item = {"title": r["title"], "aliases": r.get("aliases") or [], "original_title": r.get("original_title") or "",
+                    "type": "anime", "format": "series", "year": r.get("year"), "media_type": r.get("media_type") or "",
+                    "seasons": []}
+            scored.append((score_item(item, name, None, None, None, True), r.get("date") or "9999", r))
+        scored = [x for x in scored if x[0] >= SURE]
+        if not scored:
+            return None
+        return str(min(scored, key=lambda x: (-x[0], x[1]))[2]["source_id"])
+
+    def _packs(self, settings, report):
+        lib = self.app.library
+        done = lib.answers.setdefault("packs", {})
+        for top, vids in self._pack_folders().items():
+            mine = [v for v in vids if (lib.answers["files"].get(v["rel"]) or {}).get("by") != "you"]
+            sig = f"{len(vids)}:{sum(len(v['rel']) for v in vids)}"
+            if not mine or done.get(top) == sig:
+                continue                     # worked out before, and nothing new in it
+            lib.busy = f'Working out "{top}" (a pack of several seasons)…'
+            try:
+                anchor = self._pack_anchor(settings, vids)
+                if not anchor:
+                    done[top] = sig          # not an anime on MyAnimeList: sorted the usual way
+                    continue
+                files = [{"key": v["rel"], "rel": v["rel"], "size": v.get("size") or 0} for v in mine]
+                result = packs.plan(settings, anchor, files)
+            except metadata.MetadataError as e:
+                report["error"] = f"couldn't check {top} against MyAnimeList: {e}"
+                continue
+            if result["by"] != "the app's rules":
+                report["ai"] = result["by"].split(" (")[0]
+            decisions = {}
+            for g in result["groups"]:
+                if g["kind"] == "extra" or not g["sure"]:
+                    continue
+                for rel, (sid, ep) in g["parts"].items():
+                    if not sid:
+                        continue
+                    d = decisions.setdefault(sid, {"files": [], "episodes": {}, "kinds": {}, "why": g["why"],
+                                                   "by": "ai" if g["by"] == "ai" else "rules"})
+                    d["files"].append(rel)
+                    d["episodes"][rel] = [1, ep] if ep else None
+                    if g["kind"] == "movie":
+                        d["kinds"][rel] = "movie"
+            out = []
+            for sid, d in decisions.items():
+                added = False
+                item = self.app.store.find_source("mal", sid)
+                if not item:
+                    try:
+                        info = metadata.details(settings, "anime", "mal", sid)
+                    except metadata.MetadataError:
+                        continue
+                    item = self.app.store.add(new_item("anime", info))
+                    added = True
+                count = len(d["files"])
+                out.append({"key": f"pack:{top}:{sid}", "files": d["files"], "item": item["id"], "by": d["by"],
+                            "why": f"part of the pack {top}: {d['why']}", "added": added, "replace": True,
+                            "episodes": d["episodes"], "kinds": d["kinds"],
+                            "label": f'{count} file{"s" if count != 1 else ""} → {item["title"]}'
+                                     + (" (added to your list)" if added else "")})
+            if out:
+                lib.assign_many(out)
+            done[top] = sig
+            lib.save_answers()
 
     def _look_up(self, q, settings):
         lib = self.app.library

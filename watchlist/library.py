@@ -151,6 +151,8 @@ def file_kind(rel, season, episodes, size):
         return "special"
     kinds = {_KIND_WORDS[w] for w in words[1:] if w in _KIND_WORDS}
     kinds |= {_KIND_DIRS[d] for d in dirs if d in _KIND_DIRS}
+    # "Haikyuu!! Movies", "Haikyuu OVAs & OADs": a folder of films or OVAs (not the pack's own folder).
+    kinds |= {_KIND_DIRS[d.split()[-1]] for d in dirs[1:] if d and d.split()[-1] in _KIND_DIRS}
     for kind in ("ova", "special", "movie"):
         if kind in kinds:
             return kind
@@ -316,6 +318,8 @@ class Library:
                         "rejected": list(answers.get("rejected") or []),
                         # What searching MyAnimeList / TMDB found for a guessed title.
                         "lookups": dict(answers.get("lookups") or {}),
+                        # Folders worked out as a whole franchise (packs.py): not again unless they change.
+                        "packs": dict(answers.get("packs") or {}),
                         # 1: from before Sort now (what was sorted then is written down once).
                         # A new install starts at 2: nothing is sorted until you say so.
                         "v": answers.get("v") or (1 if app.settings.get()["downloads_folder"] else 2)}
@@ -768,9 +772,19 @@ class Library:
                 for rel in d["files"]:
                     current = self.answers["files"].get(rel)
                     if isinstance(current, dict) and current.get("item") and current["item"] != "extra":
-                        continue   # sorted already (by you or before), or held by you: never changed
+                        # Sorted already (by you or before), or held by you: never changed. Only
+                        # a pack's matching may correct what Sort now did by itself before.
+                        if not (d.get("replace") and current.get("by") not in ("you", None)
+                                and current["item"] not in ("unsorted", "ignore")):
+                            continue
                     extra = isinstance(current, dict) and current.get("item") == "extra"
-                    self.answers["files"][rel] = {"item": d["item"], "by": d["by"], **({"kind": "extra"} if extra else {})}
+                    entry = {"item": d["item"], "by": d["by"], **({"kind": "extra"} if extra else {})}
+                    ep = (d.get("episodes") or {}).get(rel)
+                    if ep and ep[1]:
+                        entry.update(season=ep[0], episode=ep[1])
+                    if (d.get("kinds") or {}).get(rel):
+                        entry["kind"] = d["kinds"][rel]
+                    self.answers["files"][rel] = entry
                 self.answers["auto"].append({"key": d["key"], "kind": "title", "item": d["item"],
                                              "files": list(d["files"]), "by": d["by"], "at": time.time(),
                                              "label": d.get("label", ""), "why": d.get("why", ""),

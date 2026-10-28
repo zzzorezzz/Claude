@@ -409,7 +409,9 @@ class App:
             # The host streams it from a torrent: stream the same one.
             try:
                 self.torrents.add(item["id"], magnet)
-                self.torrents.wait_for_files(self.torrents.hash_of_magnet(magnet))
+                h = self.torrents.hash_of_magnet(magnet)
+                self.torrents.wait_for_files(h)
+                self.torrents.wait_for_plan(h)
             except torrents_mod.TorrentError:
                 return None
             info = self.local_info(item, season, episode)
@@ -1008,6 +1010,10 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/torrents/(\w+)/files/(\d+)", "torrent_file"),
         ("POST", r"/api/torrents/(\w+)/files/(\d+)/delete", "torrent_file_delete"),
         ("DELETE", r"/api/torrents/(\w+)", "remove_torrent"),
+        ("GET", r"/api/torrents/(\w+)/plan", "torrent_plan"),
+        ("POST", r"/api/torrents/(\w+)/plan", "torrent_plan_group"),
+        ("POST", r"/api/torrents/(\w+)/plan/redo", "torrent_plan_redo"),
+        ("POST", r"/api/torrents/(\w+)/plan/add", "torrent_plan_add"),
         ("GET", r"/api/items/(\w+)/mal-matches", "mal_matches"),
         ("POST", r"/api/items/(\w+)/use-mal", "use_mal"),
         ("POST", r"/api/find/mood", "find_mood"),
@@ -1554,8 +1560,40 @@ class Handler(BaseHTTPRequestHandler):
         if "priority" in body:
             self.app.torrents.set_priority(h, int(index), int(body["priority"]))
         if "episode" in body:
-            self.app.torrents.set_episode(h, int(index), body["episode"])
+            item_id = str(body.get("item_id") or "")
+            if item_id:
+                self.app.item(item_id)
+            self.app.torrents.set_episode(h, int(index), body["episode"], item_id or None)
         return self.app.torrents.view(h)
+
+    def api_torrent_plan(self, body, h):
+        return self.app.torrents.plan_view(h)
+
+    def api_torrent_plan_group(self, body, h):
+        sid = body.get("source_id")
+        return self.app.torrents.set_group(h, str(body.get("group") or ""), str(sid) if sid else None)
+
+    def api_torrent_plan_redo(self, body, h):
+        self.app.torrents._rec(h)
+        self.app.torrents.make_plan(h, use_ai=body.get("ai", True) is not False)
+        return self.app.torrents.plan_view(h)
+
+    def api_torrent_plan_add(self, body, h):
+        """Add the pack's titles that aren't in your list yet (all, or the ones chosen)."""
+        rec = self.app.torrents._rec(h)
+        wanted = body.get("source_ids")
+        missing = self.app.torrents._missing(rec)
+        added, failed = [], []
+        for sid in missing:
+            if isinstance(wanted, list) and sid not in [str(x) for x in wanted]:
+                continue
+            try:
+                added.append(self.app.add_title("anime", "mal", sid)["id"])
+            except (ApiError, metadata.MetadataError) as e:
+                failed.append(f"{sid}: {e}")
+        out = self.app.torrents.plan_view(h)
+        out.update(added=len(added), failed=failed)
+        return out
 
     def api_torrent_file_delete(self, body, h, index):
         self.app.torrents.delete_file(h, int(index))

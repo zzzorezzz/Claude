@@ -22,6 +22,20 @@ _ABS = [
 ]
 _LEADING = re.compile(r"^\s*(\d{1,4})(?:v\d)?(?:\s|$|[-.])")
 _SEASON_DIR = re.compile(r"^(?:season|series|s)[ ._-]*(\d{1,2})\b", re.I)
+# A season said anywhere in a folder's or file's name: "Haikyuu!! (Season 2)",
+# "Haikyuu!! S04", "Haikyuu!! 4th Season", "Haikyuu!! Second Season".
+_SEASON_ANY = [
+    re.compile(r"\bseason[ ._-]*(\d{1,2})\b", re.I),
+    re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)[ ._-]*season\b", re.I),
+    re.compile(r"\bs(\d{1,2})\b(?![ ._-]*e\d)", re.I),
+]
+_SEASON_WORDS = {"second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8}
+_SEASON_WORD = re.compile(r"\b(" + "|".join(_SEASON_WORDS) + r")[ ._-]*season\b", re.I)
+# A folder holding several seasons ("S01+02+03+04", "Season 1-4", "Complete"): it says no one season.
+_MANY_SEASONS = re.compile(r"\bs\d{1,2}[ ]*[-+~&,][ ]*s?\d{1,2}\b|\bseasons?[ ]*\d{1,2}[ ]*[-+~&,][ ]*\d{1,2}\b"
+                           r"|\bcomplete\b|\bbatch\b|\bcollection\b|\ball seasons\b", re.I)
+# "Haikyuu!! S2 - 05", "Season 2 - 05": a season, then the episode after a dash.
+_SEASON_DASH = re.compile(r"\b(?:s|season[ ._-]*)(\d{1,2})[ ._]*-[ ._]*(\d{1,4})(?:v\d)?\b", re.I)
 _YEAR = re.compile(r"^(19|20)\d{2}$")
 _LANG_EN = re.compile(r"(?:^|[ ._\-\[(])(en|eng|english)(?:$|[ ._\-\])])", re.I)
 
@@ -34,24 +48,48 @@ def _clean(stem: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def season_of(name):
+    """The season a folder's (or file's) name says, or None. A name listing several
+    seasons ("S01+02+03+04", "Season 1-4", "Complete") says none."""
+    text = _clean(name)
+    if _MANY_SEASONS.search(name) or _MANY_SEASONS.search(text):
+        return None
+    m = _SEASON_DIR.match(text)
+    if m:
+        return int(m.group(1))
+    for pattern in _SEASON_ANY:
+        m = pattern.search(text)
+        if m:
+            return int(m.group(1))
+    m = _SEASON_WORD.search(text)
+    if m:
+        return _SEASON_WORDS[m.group(1).lower()]
+    return None
+
+
 def parse_episode(rel_parts):
     """(season or None, tuple of episode numbers) from a path relative to the folder."""
     stem = _clean(Path(rel_parts[-1]).stem)
     dir_season = None
     for part in reversed(rel_parts[:-1]):
-        m = _SEASON_DIR.match(_clean(part))
-        if m:
-            dir_season = int(m.group(1))
+        if _MANY_SEASONS.search(part):
+            break                       # the pack's own folder: nothing above says more
+        dir_season = season_of(part)
+        if dir_season is not None:
             break
 
     m = _SXE.search(stem)
     if m:
         eps = tuple(int(e) for e in _EPS.findall(m.group(2)))
         return int(m.group(1)), eps
-    for pattern in (_SEASON_EP_WORDS, _NXN):
+    for pattern in (_SEASON_EP_WORDS, _NXN, _SEASON_DASH):
         m = pattern.search(stem)
         if m:
             return int(m.group(1)), (int(m.group(2)),)
+    # "Haikyuu!! Second Season - 05" / "4th Season - 05": the name's season, then the episode.
+    name_season = season_of(re.split(r"\s-\s", stem)[0]) if re.search(r"\s-\s", stem) else None
+    if name_season is not None:
+        dir_season = name_season
     for pattern in _ABS:
         m = pattern.search(stem)
         if m and not _YEAR.match(m.group(1)):
