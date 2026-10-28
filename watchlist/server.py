@@ -19,10 +19,10 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, discover, importer, launcher, library, metadata, player, scanner, sorter, syncplay
+from . import ai, dialogs, discover, importer, launcher, library, metadata, player, scanner, share, sorter, syncplay
 from . import party as party_mod
 from .config import Settings, read_json, write_json
-from .store import TYPES, Store, new_item, next_episode
+from .store import METADATA_FIELDS, TYPES, Store, new_item, next_episode
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 REFRESH_AFTER = 7 * 24 * 3600
@@ -140,10 +140,118 @@ class App:
         existing = self.store.find_source(source, source_id)
         if existing:
             return existing
-        info = metadata.details(self.settings.get(), item_type, source, str(source_id or ""))
+        s = self.settings.get()
+        info = metadata.details(s, item_type, source, str(source_id or ""))
+        if s["mal_client_id"] and metadata.tmdb_is_anime(info):
+            # Anime always come from MyAnimeList (its episode numbers match fansub releases).
+            twin = metadata.mal_twin(s, info)
+            if twin:
+                existing = self.store.find_source("mal", twin["source_id"])
+                if existing:
+                    return existing
+                item_type, info = "anime", metadata.details(s, "anime", "mal", twin["source_id"])
         item = new_item(item_type, info)
         item["collections"] = [c for c in collections if isinstance(c, str)]
         return self.store.add(item)
+
+    # ---- sharing collections
+
+    def share_collection(self, col_id):
+        col = next((c for c in self.store.collections() if c["id"] == col_id), None)
+        if not col:
+            raise ApiError("collection not found", HTTPStatus.NOT_FOUND)
+        items = [i for i in self.store.list() if col_id in i["collections"]]
+        if not items:
+            raise ApiError("this collection is empty")
+        return share.pack(col["name"], items, self.settings.get()["party_name"])
+
+    def read_shared(self, body):
+        """A shared collection from a pasted code or a chosen file, each title marked
+        with whether it's in your list already."""
+        text = str(body.get("code") or "")
+        path = str(body.get("file") or "")
+        if path:
+            try:
+                if os.path.getsize(path) > 2_000_000:
+                    raise ApiError("that file is too big to be a shared collection")
+                text = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                raise ApiError(f"couldn't open that file ({e})") from e
+        try:
+            data = share.read(text)
+        except share.ShareError as e:
+            raise ApiError(str(e)) from e
+        for r in data["items"]:
+            mine = self.store.find_source(r["source"], r["source_id"])
+            r["in_list"] = mine["id"] if mine else None
+        return data
+
+    def import_shared(self, body):
+        """Add a shared collection: its titles that aren't in your list yet, and
+        the collection itself (under its own name, or with "(shared)" after it)."""
+        data = self.read_shared(body)
+        name = str(body.get("name") or data["name"]).strip() or "Shared collection"
+        existing = {c["name"].lower() for c in self.store.collections() if not c.get("type")}
+        final, n = name, 1
+        while final.lower() in existing:
+            n += 1
+            final = f"{name} (shared)" if n == 2 else f"{name} (shared {n - 1})"
+        col = self.store.add_collection(final)
+
+        def one(r):
+            try:
+                return self.add_title(r["type"], r["source"], r["source_id"])
+            except (metadata.MetadataError, ApiError, ValueError, KeyError):
+                return None
+
+        with ThreadPoolExecutor(4) as pool:
+            added = list(pool.map(one, data["items"]))
+        ok = [a for a in added if a]
+        for item in ok:
+            fresh = self.store.get(item["id"])
+            self.store.set_item_collections(item["id"], fresh["collections"] + [col["id"]])
+        return {"collection": col, "titles": len(ok), "new": sum(1 for r in data["items"] if not r["in_list"]),
+                "failed": len(data["items"]) - len(ok)}
+
+    def use_mal(self, item, mal_id):
+        """Switch a title whose info came from TMDB to its MyAnimeList entry (anime
+        always should), keeping its files, progress and collections. If that entry
+        is in your list already, the two become one."""
+        s = self.settings.get()
+        if not s["mal_client_id"]:
+            raise ApiError("add your MyAnimeList Client ID in Settings first")
+        info = metadata.details(s, "anime", "mal", str(mal_id))
+        counts = {x["number"]: x["episodes"] for x in item.get("seasons") or [] if x["number"] > 0}
+
+        def flat(season, episode):         # TMDB's "S3 E10" is MyAnimeList's episode 10 + seasons 1-2
+            if not season or not episode:
+                return season, episode
+            return 1, sum(n for k, n in counts.items() if k < season) + episode
+
+        p = item["progress"]
+        _, ep = flat(p["season"], p["episode"])
+        total = info.get("episodes_total")
+        progress = {"season": 1, "episode": min(ep, total) if total else ep}
+        positions = {}
+        for key, value in (item.get("positions") or {}).items():
+            a, _, b = key.partition(":")
+            positions[f"1:{flat(int(a), int(b))[1]}" if a.isdigit() and b.isdigit() else key] = value
+        existing = self.store.find_source("mal", str(mal_id))
+        if existing and existing["id"] != item["id"]:
+            self.library.reassign(item["id"], existing["id"], flat)
+            patch = {"collections": list(dict.fromkeys(existing["collections"] + item["collections"])),
+                     "positions": {**positions, **existing.get("positions", {})}}
+            if existing["progress"] == {"season": 1, "episode": 1}:
+                patch["progress"] = progress
+            self.store.update(existing["id"], patch)
+            self.store.delete(item["id"])
+            return self.store.get(existing["id"])
+        fresh = new_item("anime", info)
+        patch = {k: fresh[k] for k in METADATA_FIELDS if k in fresh}
+        patch.update(type="anime", source="mal", source_id=str(mal_id), progress=progress,
+                     positions=positions, updated=time.time())
+        self.library.reassign(item["id"], item["id"], flat)
+        return self.store.update(item["id"], patch)
 
     # ---- watching together
 
@@ -441,7 +549,8 @@ class App:
                 for r in self._search_safely(s, search_type, row["title"]):
                     names = {library.norm(n) for n in (r["title"], r.get("original_title"), *(r.get("aliases") or [])) if n}
                     if want in names and (not row["year"] or not r.get("year") or abs(r["year"] - row["year"]) <= 1):
-                        return _entry(dict(r, relation=row["relation"]), item_type)
+                        r, item_type = sorter._anime_from_mal(s, r, item_type)
+                        return _entry(dict(r, relation=row["relation"]), item_type) if r else None
             return None
 
         with ThreadPoolExecutor(4) as pool:
@@ -769,6 +878,10 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/collections", "add_collection"),
         ("PUT", r"/api/collections/(\w+)", "rename_collection"),
         ("DELETE", r"/api/collections/(\w+)", "delete_collection"),
+        ("POST", r"/api/collections/(\w+)/share", "share_collection"),
+        ("POST", r"/api/collections/(\w+)/save", "save_collection"),
+        ("POST", r"/api/shared/peek", "shared_peek"),
+        ("POST", r"/api/shared/import", "shared_import"),
         ("GET", r"/api/player", "player_status"),
         ("POST", r"/api/player/vlc", "player_vlc"),
         ("POST", r"/api/player/stop", "player_stop"),
@@ -786,6 +899,8 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/find/search", "find_search"),
         ("GET", r"/api/find/genres", "find_genres"),
         ("GET", r"/api/find/about", "find_about"),
+        ("GET", r"/api/items/(\w+)/mal-matches", "mal_matches"),
+        ("POST", r"/api/items/(\w+)/use-mal", "use_mal"),
         ("POST", r"/api/find/mood", "find_mood"),
         ("POST", r"/api/import/mal", "import_mal"),
         ("GET", r"/api/import/status", "import_status"),
@@ -975,6 +1090,47 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             raise ApiError(str(e)) from e
         return self.app.library.state()
+
+    def api_share_collection(self, body, col_id):
+        data = self.app.share_collection(col_id)
+        return {"code": share.to_code(data), "name": data["name"], "count": len(data["items"])}
+
+    def api_save_collection(self, body, col_id):
+        """Save a collection as a file (in your Downloads folder) and show it."""
+        data = self.app.share_collection(col_id)
+        folder = Path.home() / "Downloads"
+        folder = folder if folder.is_dir() else Path.home()
+        path = folder / share.file_name(data["name"])
+        try:
+            path.write_text(share.to_file_text(data), encoding="utf-8")
+        except OSError as e:
+            raise ApiError(f"couldn't save the file ({e})") from e
+        launcher.reveal(str(path))
+        return {"path": str(path), "count": len(data["items"])}
+
+    def api_shared_peek(self, body):
+        return self.app.read_shared(body)
+
+    def api_shared_import(self, body):
+        return self.app.import_shared(body)
+
+    def api_mal_matches(self, body, item_id):
+        """MyAnimeList entries that could be this title (to switch a TMDB anime over)."""
+        item = self.app.item(item_id)
+        s = self.app.settings.get()
+        if not s["mal_client_id"]:
+            raise ApiError("add your MyAnimeList Client ID in Settings first")
+        rows = metadata.mal_matches(s, dict(item, source_id=item["source_id"]))
+        for r in rows:
+            mine = self.app.store.find_source("mal", r["source_id"])
+            r["in_list"] = mine["id"] if mine else None
+        return {"results": rows}
+
+    def api_use_mal(self, body, item_id):
+        try:
+            return self.app.use_mal(self.app.item(item_id), str(int(body.get("mal_id"))))
+        except (TypeError, ValueError) as e:
+            raise ApiError("choose a MyAnimeList entry") from e
 
     def api_connected(self, body, item_id):
         return self.app.connected(self.app.item(item_id))
@@ -1190,6 +1346,9 @@ class Handler(BaseHTTPRequestHandler):
                 # A file picked from somewhere else: its folder becomes the title's folder.
                 patch["local_folder"] = os.path.dirname(path)
             patch["local_file"] = path
+        if "watched" in body:
+            # "Watched": kept as part of your collection, out of the everyday rows.
+            patch["watched_at"] = (item.get("watched_at") or time.time()) if body["watched"] else None
         if "local_broken" in body:
             patch["local_broken"] = bool(body["local_broken"])
         elif "local_folder" in patch or "local_file" in patch:

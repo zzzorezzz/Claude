@@ -158,7 +158,9 @@ function sortItems(list) {
   return arr;
 }
 const applyGenre = (list) => (S.genre ? list.filter((i) => i.genres.includes(S.genre)) : list);
-const ofType = (type) => sortItems(applyGenre(S.items.filter((i) => i.type === type)));
+// Your list: everything except what you've moved to Watched (that has its own page).
+const listed = () => S.items.filter((i) => !i.watched_at);
+const ofType = (type) => sortItems(applyGenre(listed().filter((i) => i.type === type)));
 
 function matchesQuery(item, q) {
   const hay = [item.title, item.original_title, ...(item.aliases || []), ...(item.genres || []),
@@ -175,6 +177,7 @@ function route() {
   if (parts[0] === 'collections') return { name: 'collections', id: parts[1] };
   if (parts[0] === 'downloads' && TYPES.includes(parts[1])) return { name: 'downloads', type: parts[1] };
   if (parts[0] === 'find') return { name: 'find', mode: parts[1] || '' };
+  if (parts[0] === 'watched') return { name: 'watched' };
   return { name: 'home' };
 }
 
@@ -220,6 +223,7 @@ function render() {
   else if (TYPES.includes(r.name)) renderCategory(view, r.name);
   else if (r.name === 'downloads') renderDownloads(view, r.type);
   else if (r.name === 'find') renderFind(view, r.mode);
+  else if (r.name === 'watched') renderWatched(view);
   else if (r.id) renderCollection(view, r.id);
   else renderCollections(view);
 }
@@ -315,6 +319,7 @@ function cardHTML(item, opts = {}) {
   const inner = `<div class="poster-fallback">${esc(item.title)}</div>
     ${item.poster ? `<img class="poster" src="${esc(item.poster)}" alt="" loading="lazy" decoding="async">` : ''}
     ${opts.resume ? resumeBarHTML(item) : badge}
+    ${item.watched_at && route().name !== 'watched' ? `<span class="badge-watched">${ICON.check} WATCHED</span>` : ''}
     <div class="card-info">
       <div class="card-buttons">
         <button class="cb play" data-act="watch" title="Watch now">${ICON.play}</button>
@@ -330,7 +335,7 @@ function cardHTML(item, opts = {}) {
 // Continue watching: what you were in the middle of, most recent first.
 function continueItems() {
   const cutoff = Date.now() / 1000 - 90 * 86400;
-  return S.items.filter((i) => i.last_played && i.last_played > cutoff && hasFiles(i)).filter((i) => {
+  return listed().filter((i) => i.last_played && i.last_played > cutoff && hasFiles(i)).filter((i) => {
     if (savedPos(i)) return true;
     if (!isSeries(i)) return false;
     const total = i.seasons.filter((s) => s.number > 0).reduce((n, s) => n + (s.episodes || 0), 0) || i.episodes_total || 0;
@@ -443,6 +448,8 @@ function viewAction(name, data) {
   else if (name === 'new-folder') newCollection(data.type).then((f) => { if (f) { S.folderSel[data.type] = f.id; render(); } });
   else if (name === 'pick-folder') { S.folderSel[data.type] = data.id; render(); }
   else if (name === 'rename-collection') renameCollection(data.id);
+  else if (name === 'share-collection') openShareCollection(data.id);
+  else if (name === 'open-shared') openSharedCollection();
   else if (name === 'delete-collection') deleteCollection(data.id);
   else if (name === 'search-online') openAdd(data.type, S.query.trim());
   else if (name === 'set-downloads') chooseDownloadsFolder();
@@ -525,7 +532,7 @@ function renderHome(view) {
       </div></div></section>${setupBanner()}`;
     return;
   }
-  const downloaded = S.items.filter(hasFiles);
+  const downloaded = listed().filter(hasFiles);
   // Top of the screen: what you were last watching from your downloads.
   const recent = downloaded.filter((i) => i.last_played).sort((a, b) => b.last_played - a.last_played)[0];
   const featured = recent || pickFeatured();
@@ -576,7 +583,7 @@ function downloadsSectionHTML() {
   }
   const lib = S.library;
   const rows = DL_ORDER.map((t) => {
-    const items = sortItems(applyGenre(S.items.filter((i) => i.type === t && hasFiles(i))));
+    const items = sortItems(applyGenre(listed().filter((i) => i.type === t && hasFiles(i))));
     return items.length ? rowHTML({ title: TYPE_PLURAL[t], link: `#/downloads/${t}`, items, emptyText: '' }) : '';
   }).join('');
   return `<div class="section-head"><h2>Downloaded</h2>
@@ -587,8 +594,23 @@ function downloadsSectionHTML() {
     <div class="section-gap"></div>`;
 }
 
+// Watched: titles you've finished, kept as your collection, out of the everyday rows.
+function renderWatched(view) {
+  const all = sortItems(applyGenre(S.items.filter((i) => i.watched_at)));
+  const groups = TYPES.map((t) => [t, all.filter((i) => i.type === t)]).filter(([, list]) => list.length);
+  view.innerHTML = `<div class="page">
+    <div class="page-head"><h1>Watched</h1>
+      <span class="count">${all.length} title${all.length === 1 ? '' : 's'} · ${sortLabel()}</span>${filterNote()}</div>
+    <p class="hint">Everything you've watched, kept as your collection. Mark any title as watched from its ⋯ menu;
+      the same menu moves it back to your list.</p>
+    ${groups.length ? groups.map(([t, list]) => `<h2 class="watched-head">${TYPE_PLURAL[t]} <span class="muted small">${list.length}</span></h2>
+      <div class="grid">${list.map(cardHTML).join('')}</div>`).join('')
+    : `<p class="muted">${S.genre ? `No watched ${esc(S.genre)} titles.` : 'Nothing here yet. Use ⋯ → Mark as watched on any title.'}</p>`}
+  </div>`;
+}
+
 function renderDownloads(view, type) {
-  const items = sortItems(applyGenre(S.items.filter((i) => i.type === type && hasFiles(i))));
+  const items = sortItems(applyGenre(listed().filter((i) => i.type === type && hasFiles(i))));
   view.innerHTML = `<div class="page">
     <div class="page-head"><h1>Downloaded ${TYPE_PLURAL[type]}</h1>
       <span class="count">${items.length} title${items.length === 1 ? '' : 's'}</span>${filterNote()}
@@ -642,12 +664,14 @@ function renderCollections(view) {
     return rowHTML({
       title: c.name, link: `#/collections/${c.id}`, items,
       emptyText: 'Empty - use ⋯ on any title (or right-click it) to add it here.',
-      tools: `<div class="row-tools"><button class="btn btn-ghost btn-sm" data-do="rename-collection" data-id="${esc(c.id)}">Rename</button>
+      tools: `<div class="row-tools"><button class="btn btn-ghost btn-sm" data-do="share-collection" data-id="${esc(c.id)}">${ICON.people} Share</button>
+              <button class="btn btn-ghost btn-sm" data-do="rename-collection" data-id="${esc(c.id)}">Rename</button>
               <button class="btn btn-ghost btn-sm" data-do="delete-collection" data-id="${esc(c.id)}">Delete</button></div>`,
     });
   }).join('');
   view.innerHTML = `<div class="page" style="padding-left:0;padding-right:0">
     <div class="page-head" style="padding:0 var(--side)"><h1>Collections</h1>${filterNote()}<span class="spacer"></span>
+      <button class="btn btn-ghost btn-sm" data-do="open-shared">Open a shared collection…</button>
       <button class="btn btn-red btn-sm" data-do="new-collection">+ New collection</button></div>
     ${rows || `<div class="empty-state"><h2>No collections yet</h2>
       <p>Collections mix TV shows, anime and movies, like "Weekend binge" or "Watch with friends".<br>A title can be in as many as you like.
@@ -664,11 +688,100 @@ function renderCollection(view, id) {
   view.innerHTML = `<div class="page">
     <div class="page-head"><h1>${esc(col.name)}</h1><span class="count">${items.length} title${items.length === 1 ? '' : 's'}</span>${filterNote()}
       <span class="spacer"></span>
+      <button class="btn btn-ghost btn-sm" data-do="share-collection" data-id="${esc(id)}">${ICON.people} Share</button>
       <button class="btn btn-ghost btn-sm" data-do="rename-collection" data-id="${esc(id)}">Rename</button>
       <button class="btn btn-ghost btn-sm" data-do="delete-collection" data-id="${esc(id)}">Delete</button></div>
     ${items.length ? `<div class="grid">${items.map(cardHTML).join('')}</div>`
       : '<div class="empty-state">This collection is empty. Use ⋯ on any title (or right-click it) to add it here.</div>'}
   </div>`;
+}
+
+/* ---- sharing a collection with someone else who has Watchlist */
+
+async function openShareCollection(id) {
+  const col = S.collections.find((c) => c.id === id);
+  if (!col) return;
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Share "${esc(col.name)}"</h2>
+    <p class="sub">Anyone with Watchlist can open it with <b>Collections → Open a shared collection…</b>, see every title, and add the collection to their own list.
+      Only the titles are shared - not your files, progress or keys.</p>
+    <div id="share-out"><div class="spinner"></div></div></div>`, 'share-modal');
+  try {
+    const r = await api('POST', `/api/collections/${id}/share`);
+    $('#share-out', wrap).innerHTML = `<h4>Share code <span class="muted small">${r.count} title${r.count === 1 ? '' : 's'}</span></h4>
+      <p class="muted small">Copy it and paste it into any chat.</p>
+      <textarea class="input share-code" rows="4" readonly>${esc(r.code)}</textarea>
+      <div class="btns"><button class="btn btn-white" data-s="copy">Copy the code</button>
+        <button class="btn btn-ghost" data-s="file">Save as a file instead</button></div>
+      <div id="share-file"></div>`;
+  } catch (e) { $('#share-out', wrap).innerHTML = `<div class="warn">${esc(e.message)}</div>`; return; }
+  wrap.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b) return;
+    if (b.dataset.s === 'copy') {
+      const box = $('.share-code', wrap);
+      try { await navigator.clipboard.writeText(box.value); } catch { box.select(); document.execCommand('copy'); }
+      b.textContent = 'Copied ✓';
+    } else if (b.dataset.s === 'file') {
+      b.disabled = true;
+      try {
+        const r = await api('POST', `/api/collections/${id}/save`);
+        $('#share-file', wrap).innerHTML = `<p class="ok small">Saved to ${esc(r.path)} - send that file to them (it's opened for you).</p>`;
+      } catch (err) { fail(err); }
+      b.disabled = false;
+    }
+  });
+}
+
+function openSharedCollection() {
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Open a shared collection</h2>
+    <p class="sub">Paste the share code you were sent (it starts with WLC1.), or choose the file.</p>
+    <textarea class="input shared-paste" rows="3" placeholder="WLC1.…"></textarea>
+    <div class="btns"><button class="btn btn-white" data-s="peek" disabled>Open</button>
+      <button class="btn btn-ghost" data-s="choose">Choose a file…</button></div>
+    <div id="shared-view"></div></div>`, 'shared-modal');
+  const paste = $('.shared-paste', wrap);
+  let source = {};
+  paste.addEventListener('input', () => { $('[data-s="peek"]', wrap).disabled = !paste.value.trim(); });
+  const view = async () => {
+    const out = $('#shared-view', wrap);
+    out.innerHTML = '<div class="spinner"></div>';
+    try {
+      const data = await api('POST', '/api/shared/peek', source);
+      const fresh = data.items.filter((x) => !x.in_list).length;
+      out.innerHTML = `<div class="shared-head"><h3>${esc(data.name)}</h3>
+          <span class="muted small">${data.items.length} title${data.items.length === 1 ? '' : 's'}${data.by ? ` · shared by ${esc(data.by)}` : ''} · ${fresh} not in your list</span></div>
+        <div class="shared-grid">${data.items.map((x) => `<div class="shared-card${x.in_list ? ' in' : ''}">
+          <div class="shared-poster"><span>${esc(x.title)}</span>${x.poster ? `<img src="${esc(x.poster)}" alt="" loading="lazy">` : ''}</div>
+          <b title="${esc(x.title)}">${esc(x.title)}</b>
+          <small>${[{ tv: 'TV show', anime: 'Anime', movie: 'Movie' }[x.type], x.year, x.rating ? `★ ${fmtRating(x.rating)}` : ''].filter(Boolean).map(esc).join(' · ')}</small>
+          ${x.in_list ? `<small class="ok">${ICON.check} In your list</small>` : ''}</div>`).join('')}</div>
+        <div class="btns"><button class="btn btn-red" data-s="import">Add it to my Watchlist</button></div>
+        <p class="muted small">Adds a collection called "${esc(data.name)}" to your Collections${fresh ? `, and adds the ${fresh} title${fresh === 1 ? '' : 's'} you don't have yet to your list` : ' (every title in it is in your list already)'}.</p>`;
+    } catch (e) { out.innerHTML = `<div class="warn">${esc(e.message)}</div>`; }
+  };
+  wrap.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b) return;
+    if (b.dataset.s === 'peek') { source = { code: paste.value }; view(); }
+    else if (b.dataset.s === 'choose') {
+      try {
+        const r = await api('POST', '/api/browse', { kind: 'file', title: 'Choose the shared collection file', types: 'collection' });
+        if (r.path) { source = { file: r.path }; view(); }
+      } catch (err) { fail(err); }
+    } else if (b.dataset.s === 'import') {
+      b.disabled = true;
+      b.textContent = 'Adding…';
+      try {
+        const r = await api('POST', '/api/shared/import', source);
+        closeModal(wrap);
+        await reload();
+        toast(`Added "${r.collection.name}" - ${r.titles} title${r.titles === 1 ? '' : 's'}${r.failed ? ` (${r.failed} couldn't be found)` : ''}`);
+        location.hash = `#/collections/${r.collection.id}`;
+      } catch (err) { fail(err); b.disabled = false; b.textContent = 'Add it to my Watchlist'; }
+    }
+  });
 }
 
 function renderSearch(view) {
@@ -713,6 +826,8 @@ function openItemMenu(item, anchor, { inTitle = false } = {}) {
     <button data-m="new-folder"><span class="check">+</span>New folder…</button><hr>
     <div class="menu-label">Collections</div>${cols}
     <button data-m="new-col"><span class="check">+</span>New collection…</button><hr>
+    <button data-m="watched">${item.watched_at ? '↩&nbsp; Move back to my list' : '✓&nbsp; Mark as watched'}</button>
+    ${maybeAnimeOnTmdb(item) ? '<button data-m="use-mal">⇄&nbsp; Use MyAnimeList info</button>' : ''}
     <button data-m="refresh">↻&nbsp; Refresh info</button>
     <button data-m="remove" class="danger">✕&nbsp; Remove from list</button>`;
   menu.addEventListener('click', async (e) => {
@@ -756,10 +871,55 @@ function openItemMenu(item, anchor, { inTitle = false } = {}) {
         upsert(await api('POST', `/api/items/${item.id}/refresh`));
         render(); refreshOpenTitle();
         toast('Info updated');
-      } else if (m === 'remove') removeItem(item.id);
+      } else if (m === 'watched') await toggleWatched(item.id);
+      else if (m === 'use-mal') openUseMal(findItem(item.id));
+      else if (m === 'remove') removeItem(item.id);
     } catch (err) { fail(err); }
   });
   placeMenu(menu, anchor);
+}
+
+// Anime always come from MyAnimeList; one that came from TMDB can be switched.
+const animeOnTmdb = (item) => item.source === 'tmdb'
+  && (item.type === 'anime' || ((item.genres || []).includes('Animation') && item.language === 'ja'));
+const maybeAnimeOnTmdb = (item) => item.source === 'tmdb' && (item.type === 'anime' || (item.genres || []).includes('Animation'));
+
+async function openUseMal(item) {
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Use MyAnimeList for ${esc(item.title)}</h2>
+    <p class="sub">Its details come from TMDB now. MyAnimeList's seasons and episode numbers match how anime are released and named.
+      Your files, where you're up to, folders and collections are kept${item.type === 'anime' ? '' : ', and it moves to Anime'}.</p>
+    <div id="mal-matches">${'<div class="rel-row skeleton"><div class="sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(3)}</div></div>`, 'mal-modal');
+  let rows = [];
+  try { rows = (await api('GET', `/api/items/${item.id}/mal-matches`)).results; } catch (e) { $('#mal-matches', wrap).innerHTML = `<div class="warn">${esc(e.message)}</div>`; return; }
+  $('#mal-matches', wrap).innerHTML = rows.length ? rows.map((r, i) => `<div class="mal-row">
+      ${r.poster ? `<img src="${esc(r.poster)}" alt="" loading="lazy">` : '<span class="rel-ph"></span>'}
+      <div><b>${esc(r.title)}</b><small>${[kindName(r), r.year, r.episodes_total ? `${r.episodes_total} episodes` : ''].filter(Boolean).map(esc).join(' · ')}</small>
+        ${r.in_list ? '<small class="muted">Already in your list - the two will become one.</small>' : ''}</div>
+      <button class="btn btn-sm ${i ? 'btn-ghost' : 'btn-white'}" data-use="${i}">Use this</button></div>`).join('')
+    : '<p class="muted">Nothing found on MyAnimeList under this name.</p>';
+  wrap.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-use]');
+    if (!b) return;
+    b.disabled = true;
+    b.textContent = 'Switching…';
+    try {
+      const updated = await api('POST', `/api/items/${item.id}/use-mal`, { mal_id: rows[Number(b.dataset.use)].source_id });
+      closeModal(wrap);
+      await reload();
+      toast(`${updated.title} now uses MyAnimeList`);
+      refreshOpenTitle();
+      if (updated.id !== item.id) openTitle(updated.id);
+    } catch (err) { fail(err); b.disabled = false; b.textContent = 'Use this'; }
+  });
+}
+
+async function toggleWatched(id) {
+  const item = findItem(id);
+  const watched = !item.watched_at;
+  upsert(await api('PUT', `/api/items/${id}`, { watched }));
+  render(); refreshOpenTitle();
+  toast(watched ? `${item.title} moved to Watched` : `${item.title} is back in your list`);
 }
 
 async function removeItem(id) {
@@ -1605,9 +1765,17 @@ function followParty(wrap, box) {
   draw();
 }
 
-function openStartParty(item) {
+async function openStartParty(item) {
   const series = isSeries(item);
-  const avail = series ? (S.library.items?.[item.id]?.episodes || []) : [];
+  // The same episodes, and files, the title page shows.
+  let local = {};
+  try { local = await api('GET', `/api/items/${item.id}/local`); } catch { /* the server says what's missing */ }
+  const byEp = local.by_episode || {};
+  const avail = series ? Object.keys(byEp).sort((a, b) => {
+    const [as, ae] = a.split(':').map(Number);
+    const [bs, be] = b.split(':').map(Number);
+    return as - bs || ae - be;
+  }) : [];
   const current = `${item.progress.season}:${item.progress.episode}`;
   const options = avail.map((k) => { const [s, n] = k.split(':').map(Number); return `<option value="${k}" ${k === current ? 'selected' : ''}>${esc(epLabel({ season: s, episode: n }))}</option>`; }).join('');
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
@@ -1619,11 +1787,13 @@ function openStartParty(item) {
     <div id="party-out"></div><div id="party-live"></div>${PARTY_NOTE}</div>`, 'party-modal');
   partyClicks(wrap);
   $('[data-p="start"]', wrap).addEventListener('click', async (e) => {
-    const [season, episode] = ($('#party-ep', wrap)?.value || current).split(':').map(Number);
+    const key = $('#party-ep', wrap)?.value || current;
+    const [season, episode] = key.split(':').map(Number);
+    const path = series ? byEp[key]?.path : local.target?.path;
     e.target.disabled = true;
     e.target.textContent = 'Starting…';
     try {
-      const r = await api('POST', '/api/party/start', { item_id: item.id, season, episode });
+      const r = await api('POST', '/api/party/start', { item_id: item.id, season, episode, path: path || '' });
       if (!r.ok) { $('#party-out', wrap).innerHTML = `<div class="warn">${esc(r.message)}</div>`; return; }
       e.target.closest('.btns').remove();
       $('#party-ep', wrap)?.closest('.field').remove();
@@ -1934,6 +2104,9 @@ function drawTitle(wrap) {
         ${progress}
         ${item.tagline ? `<p class="tm-tagline">${esc(item.tagline)}</p>` : ''}
         <p class="tm-overview">${esc(item.overview || 'No summary available.')}</p>
+        ${animeOnTmdb(item) ? `<div class="mal-switch">${ICON.info || ''}<span>This anime's details come from TMDB, whose seasons and episode numbers don't match MyAnimeList's or most downloads'.</span>
+          <button class="btn btn-sm btn-white" data-t="use-mal">Use MyAnimeList instead</button></div>` : ''}
+        ${item.watched_at ? `<div class="watched-note">${ICON.check} In your Watched list <button class="linkish" data-t="unwatch">Move back to my list</button></div>` : ''}
       </div>
       <aside class="tm-side">${side.join('')}</aside>
     </div>
@@ -2269,6 +2442,8 @@ async function titleClick(wrap, e) {
     else if (t === 'recap') showRecap(item);
     else if (t === 'files') openTitleFiles(item, wrap.st.local);
     else if (t === 'party') openStartParty(item);
+    else if (t === 'use-mal') openUseMal(item);
+    else if (t === 'unwatch') toggleWatched(item.id);
     else if (t === 'watched') {
       const res = await api('POST', `/api/items/${item.id}/watched`);
       upsert(res.item);

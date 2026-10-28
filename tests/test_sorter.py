@@ -446,6 +446,39 @@ class AITest(unittest.TestCase):
         self.assertEqual(ai.available({"gemini_api_key": " ", "openrouter_api_key": "x"}), ["openrouter"])
 
 
+class AnimeFromMyAnimeListTest(_Base):
+    def setUp(self):
+        super().setUp()
+        metadata._twin_cache._data.clear()
+        # Two MyAnimeList entries called "Naruto": too close to choose between by name alone.
+        two = [result("anime", "Naruto", "20", year=2002), result("anime", "Naruto", "99", year=2023)]
+        self.searches[("anime", "naruto")] = self.searches[("anime", "Naruto")] = two
+        self.searches[("tv", "naruto")] = [result("tv", "Naruto", "tv/46260", year=2002, genre_ids=[16, 10759],
+                                                  language="ja", original_title="ナルト", aliases=["Naruto", "ナルト"])]
+
+    def test_an_anime_tmdb_finds_is_taken_from_myanimelist(self):
+        touch(self.dl, "Naruto - 150 [1080p].mkv")
+        self.app.library.scan(force=True)
+        self.sort()
+        added = [i for i in self.app.store.list() if i["title"] == "Naruto"]
+        self.assertEqual([(i["source"], i["source_id"], i["type"]) for i in added], [("mal", "20", "anime")])
+
+    def test_never_the_tmdb_copy_when_myanimelist_has_none(self):
+        self.searches[("anime", "Naruto")] = self.searches[("anime", "naruto")] = []
+        touch(self.dl, "Naruto - 150 [1080p].mkv")
+        self.app.library.scan(force=True)
+        self.sort()
+        self.assertFalse(any(i["source"] == "tmdb" for i in self.app.store.list()))
+
+    def test_live_action_stays_on_tmdb(self):
+        self.searches[("tv", "breaking bad")] = [result("tv", "Breaking Bad", "tv/1396", year=2008,
+                                                        genre_ids=[18], language="en")]
+        touch(self.dl, "Breaking.Bad.S01E01.mkv")
+        self.app.library.scan(force=True)
+        self.sort()
+        self.assertEqual([i["source"] for i in self.app.store.list() if i["title"] == "Breaking Bad"], ["tmdb"])
+
+
 class ConnectedTest(_Base):
     def test_everything_connected_shows_where_each_one_is(self):
         self.related[self.frieren["source_id"]] = [

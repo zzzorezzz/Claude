@@ -26,6 +26,8 @@ from pathlib import Path
 from . import scanner
 from .config import read_json, write_json
 
+# A "Season N" folder holding episode 40 or more is numbered from the show's start.
+ABSOLUTE_FROM = 40
 RESCAN_EVERY = 60  # seconds
 
 _JUNK = {
@@ -372,6 +374,12 @@ class Library:
         """Add the guessed title, year and kind to a video found on disk."""
         g = guess_full(Path(v["rel"]).parts)
         v["guess"], v["full"], v["year"], v["name_season"] = g["title"], g["full"], g["year"], g["title_season"]
+        if v["season"] and v["season"] > 1 and v["episodes"] and min(v["episodes"]) >= ABSOLUTE_FROM \
+                and not scanner.season_in_name(Path(v["rel"]).name):
+            # "Season 12/Naruto Shippuden - 250": a number that high is counted from
+            # the start of the show (as MyAnimeList does), so the folder's season
+            # mustn't decide which title or season it is.
+            v["folder_season"], v["season"] = v["season"], None
         v["kind"] = file_kind(v["rel"], v["season"], v["episodes"], v.get("size") or 0)
         if v["kind"] in ("special", "ova") and not v["episodes"]:
             m = _SP_NUMBER.search(norm(scanner._clean(Path(v["rel"]).stem)))
@@ -624,10 +632,17 @@ class Library:
         with self._lock:
             self._match_if_needed()
             items = {}
+            titles = {i["id"]: i for i in self.app.store.list()}
             for item_id, vids in self.by_item.items():
                 main = [v for v in vids if v["kind"] != "extra"]
-                eps = sorted({f"{v['season'] if v['season'] is not None else 1}:{e}"
-                              for v in main for e in v["episodes"]})
+                if item_id in titles:
+                    # Numbered the way the title page and the player number them
+                    # ("Naruto - 150" is season 3 when the title has seasons).
+                    pairs = scanner.episode_map(titles[item_id], main) if titles[item_id]["format"] == "series" else {}
+                    eps = [f"{s}:{e}" for s, e in sorted(pairs)]
+                else:
+                    eps = sorted({f"{v['season'] if v['season'] is not None else 1}:{e}"
+                                  for v in main for e in v["episodes"]})
                 items[item_id] = {"files": len(main), "extras": len(vids) - len(main), "episodes": eps}
             unknown = sum(len(q["files"]) for q in self.questions if q.get("reason") == "unknown")
             waiting = sum(1 for v in self.videos if v.get("how") == "waiting")
@@ -800,6 +815,25 @@ class Library:
             for key, target in list(self.answers["titles"].items()):
                 if target == item_id:
                     del self.answers["titles"][key]
+            self.save_answers()
+            self._matched_for = None
+
+    def reassign(self, old_id, new_id, renumber=None):
+        """Files sorted to one title now belong to another (or the same title, with
+        its episodes numbered differently): renumber(season, episode) gives the
+        new numbers of files sorted to a particular episode."""
+        with self._lock:
+            for rel, answer in self.answers["files"].items():
+                if isinstance(answer, dict) and answer.get("item") == old_id:
+                    answer["item"] = new_id
+                    if renumber and answer.get("season") and answer.get("episode"):
+                        answer["season"], answer["episode"] = renumber(answer["season"], answer["episode"])
+            for key, target in self.answers["titles"].items():
+                if target == old_id:
+                    self.answers["titles"][key] = new_id
+            for entry in self.answers["auto"]:
+                if isinstance(entry, dict) and entry.get("item") == old_id:
+                    entry["item"] = new_id
             self.save_answers()
             self._matched_for = None
 

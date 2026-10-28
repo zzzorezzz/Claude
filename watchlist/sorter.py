@@ -44,6 +44,15 @@ def _type_order(q, settings):
     return [t for t in order if have[t]]
 
 
+def _anime_from_mal(settings, r, item_type):
+    """Anime always come from MyAnimeList: a TMDB result that's an anime becomes
+    its MyAnimeList entry, or (None, ...) when there isn't a clear one - never
+    the TMDB copy, whose seasons and episode numbers don't match MyAnimeList's."""
+    if settings.get("mal_client_id") and metadata.tmdb_is_anime(r):
+        return metadata.mal_twin(settings, r), "anime"
+    return r, item_type
+
+
 def _as_item(result, item_type):
     return {"type": item_type, "format": result.get("format") or ("movie" if item_type == "movie" else "series"),
             "title": result.get("title", ""), "original_title": result.get("original_title", ""),
@@ -194,11 +203,18 @@ class Sorter:
             query = q["guess"] if not q.get("season") or q["season"] == 1 or item_type != "anime" \
                 else f'{q["guess"]} season {q["season"]}'
             results = metadata.search(settings, item_type, query)[:15]
+            found = []
             for r in results:
-                s = score_file(_as_item(r, item_type), _guess(q), q["file_kind"])
+                r_type = item_type
+                if item_type != "anime":
+                    r, r_type = _anime_from_mal(settings, r, item_type)
+                    if not r:
+                        continue
+                s = score_file(_as_item(r, r_type), _guess(q), q["file_kind"])
                 if s >= 50:
-                    scored.append((s, _suggestion(r, item_type)))
-            pick = _pick([x for x in scored if x[1]["type"] == item_type])
+                    found.append((s, _suggestion(r, r_type)))
+            scored += found
+            pick = _pick(found)
             if pick:
                 return pick, [s for _, s in sorted(scored, key=lambda x: -x[0])]
         return None, [s for _, s in sorted(scored, key=lambda x: -x[0])]
@@ -262,6 +278,10 @@ class Sorter:
         for r in results:
             names = {norm(n) for n in [r.get("title"), r.get("original_title"), *(r.get("aliases") or [])] if n}
             if want in names and (not year or not r.get("year") or abs(r["year"] - year) <= 1):
+                if item_type != "anime":
+                    r, item_type = _anime_from_mal(settings, r, item_type)
+                    if not r:
+                        return None
                 return _suggestion(r, item_type, "named by AI, found on " +
                                    ("MyAnimeList" if item_type == "anime" else "TMDB"))
         return None

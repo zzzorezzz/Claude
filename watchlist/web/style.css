@@ -792,3 +792,37 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
 @media (max-width: 640px) { .g-card { grid-template-columns: 24px 1fr; } .g-poster { display: none; } .guide { padding: 20px 16px; } }
 .tag-dot { font-style: normal; color: #9cc3ff; margin-left: 4px; }
 .genre-chip.on .tag-dot { color: #fff; }
+
+/* ---------- watched ---------- */
+.badge-watched { position: absolute; top: 6px; right: 6px; z-index: 2; display: inline-flex; align-items: center; gap: 3px; font-size: 9px; font-weight: 800; letter-spacing: .06em; padding: 2px 6px; border-radius: 3px; background: rgba(0,0,0,.75); color: var(--green); }
+.badge-watched svg { width: 9px; height: 9px; }
+.watched-head { margin: 26px 0 12px; font-size: 22px; }
+.watched-head:first-of-type { margin-top: 6px; }
+.watched-note { display: inline-flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--green); font-size: 14px; }
+.watched-note svg { width: 14px; height: 14px; }
+.watched-note .linkish, .mal-switch .linkish { background: none; border: 0; padding: 0; color: #9cc3ff; text-decoration: underline; cursor: pointer; font: inherit; }
+.mal-switch { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: rgba(91, 155, 255, .1); border: 1px solid rgba(91, 155, 255, .35); font-size: 14px; color: #cfe0ff; }
+.mal-switch svg { width: 18px; height: 18px; flex: none; }
+.mal-switch span { flex: 1; min-width: 200px; }
+.mal-modal { width: min(640px, 94vw); }
+.mal-row { display: grid; grid-template-columns: 46px 1fr auto; gap: 12px; align-items: center; padding: 8px; border-radius: 6px; background: var(--panel-2); margin-bottom: 8px; }
+.mal-row img, .mal-row .rel-ph { width: 46px; height: 66px; object-fit: cover; border-radius: 4px; }
+.mal-row b { display: block; }
+.mal-row small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+/* ---------- sharing collections ---------- */
+.share-modal, .shared-modal { width: min(760px, 94vw); }
+.share-code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; resize: vertical; }
+.shared-paste { font-family: ui-monospace, Consolas, monospace; font-size: 12px; margin-bottom: 10px; }
+.shared-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 18px 0 10px; }
+.shared-head h3 { margin: 0; }
+.shared-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 12px; max-height: 46vh; overflow: auto; padding: 2px; margin-bottom: 12px; }
+.shared-card { display: grid; gap: 3px; font-size: 12px; }
+.shared-card b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.shared-card small { color: var(--muted); }
+.shared-card small.ok { color: var(--green); display: inline-flex; align-items: center; gap: 3px; }
+.shared-card small.ok svg { width: 10px; height: 10px; }
+.shared-poster { position: relative; aspect-ratio: 2 / 3; border-radius: 4px; background: #262626; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 6px; overflow: hidden; }
+.shared-poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.shared-poster img.broken { display: none; }
+.shared-card.in .shared-poster { opacity: .55; }

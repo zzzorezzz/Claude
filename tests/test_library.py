@@ -259,6 +259,19 @@ class SortOnDemandTest(unittest.TestCase):
     def names(self, item):
         return sorted(Path(v["rel"]).name for v in self.lib.videos_for(item["id"]))
 
+    def test_season_folders_of_a_one_season_anime(self):
+        shippuden = add(self.app, "anime", "Naruto: Shippuuden", aliases=["Naruto Shippuden"],
+                        seasons=[{"number": 1, "episodes": 500}])
+        for n in (250, 251):
+            touch(self.dl, f"Naruto Shippuden/Season 12/[Group] Naruto Shippuden - {n} [1080p].mkv")
+        self.lib.scan(force=True)
+        self.app.sorter.run_now()
+        self.assertEqual(len(self.names(shippuden)), 2)
+        # The episodes the watch party offers are the ones the title page plays.
+        self.assertEqual(self.lib.state()["items"][shippuden["id"]]["episodes"], ["1:250", "1:251"])
+        info = self.app.local_info(self.app.store.get(shippuden["id"]), 1, 250)
+        self.assertEqual(Path(info["target"]["path"]).name, "[Group] Naruto Shippuden - 250 [1080p].mkv")
+
     def test_new_files_wait_for_sort_now(self):
         self.lib.scan(force=True)
         self.assertEqual(self.names(self.frieren), [])

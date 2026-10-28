@@ -11,8 +11,13 @@ Two things are optional, and everything works without them:
   - Movies are ordered by box office, TV shows by TMDB popularity, and anime by MyAnimeList members.
 - **Top bar:** search, **Sort by year** (newest first, oldest first, then back to popular) and a **Genre** filter.
 - **Adding titles:** use **+** in any row. The summary, ratings, cast, seasons and trailer are filled in automatically, from TMDB for movies and TV and from MyAnimeList for anime.
+  - Anime always come from MyAnimeList: adding an anime from TMDB (say from TV Shows) adds its MyAnimeList entry instead.
+  - An anime added from TMDB before this version shows **Use MyAnimeList instead** on its page (also in **⋯ → Use MyAnimeList info**). Pick the right entry: its files, where you're up to, folders and collections are kept, episode numbers are converted (TMDB's season 2 episode 3 becomes episode 10 when season 1 had 7), and it moves to Anime. If that entry is already in your list, the two become one.
 - **Folders:** on the TV Shows, Anime and Movies pages, click **New folder** to make your own folders. Drag a poster onto a folder to move it there, or right-click a poster (or use **⋯**) → **Move to folder**. A title is in one folder at a time.
 - **Collections:** these can mix TV shows, anime and movies, and a title can be in several. Find them on the **Collections** page.
+  - **Share** (next to each collection) gives a share code to paste into any chat, or **Save as a file instead** (saved to your Downloads folder). Only the titles are shared: no files, progress or keys.
+  - **Open a shared collection…** (top of the Collections page): paste the code or choose the file to see every title, then **Add it to my Watchlist** adds the collection and the titles you don't have yet.
+- **Watched:** **⋯ → Mark as watched** on any title moves it out of your everyday rows (Home, TV Shows, Anime, Movies, Continue watching) into the **Watched** page, kept as your collection. **⋯ → Move back to my list** undoes it. Watched titles still show in collections and search, marked WATCHED.
 - **Continue watching:** the first row on the home screen. Click a poster to carry on where you stopped.
 - **Title page:** backdrop, summary, ratings and an episode list. The trailer only plays when you click it.
   - **Everything connected**, on the right: press **Find everything connected** to find every season, sequel, prequel, OVA, ONA, special, film and spin-off. When it's done, the **story guide** opens (and **Open the story guide** brings it back):
@@ -43,11 +48,12 @@ Two things are optional, and everything works without them:
 - **Import from MyAnimeList:** **Settings → Import my MyAnimeList list…** brings in your list by user name (if it's public) or from MyAnimeList's export file. Your watched episodes set where you're up to.
 - **Downloads:** choose the one folder your downloads go into (**Settings → Your downloads**).
   - The app reads each video's name, and its folder's name if needed, and connects it to the right show, season and episode or movie in your list.
+  - **Long anime numbered from the start** ("Season 12/Naruto Shippuden - 250"): an episode number of 40 or more in a "Season N" folder counts from the show's first episode, as on MyAnimeList, so the folder doesn't need renaming. For a TMDB show split into seasons, it's placed in the right season.
   - It tells episodes, OVAs, specials, films and extras apart, using the file and folder names, the size, and what MyAnimeList says each title is.
   - **Nothing is sorted until you press Sort now.** New downloads wait, and the banner above your downloads says how many. Files you've sorted, moved or taken out of a title, and files sorted earlier, are never changed.
   - **Sort now** (in the banner, and in **Sort your downloads**) sorts only what's still waiting:
     1. Files that clearly match a title in your list, and extras in the same folder as a show.
-    2. Shows that aren't in your list are searched for, **MyAnimeList first**: anything that's an anime goes to Anime, and TMDB is only used for what isn't on MyAnimeList. An OVA, special, film or second season of an anime you have is found through that anime's MyAnimeList relations. A title already in your list is never added twice.
+    2. Shows that aren't in your list are searched for, **MyAnimeList first**: anything that's an anime goes to Anime, and TMDB is only used for what isn't on MyAnimeList. Even when an anime is found on TMDB (or named by the AI as a TV show), its MyAnimeList entry is used, never TMDB's copy. An OVA, special, film or second season of an anime you have is found through that anime's MyAnimeList relations. A title already in your list is never added twice.
     3. **✨ with AI**, the small button above **Sort now**, also asks your AI helper about what's left.
 
     It then says how many it sorted. Everything it did is listed under **Sorted for you**, where **Undo** puts it back (and removes the title it added); undone files are left for you.

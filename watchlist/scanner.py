@@ -61,6 +61,12 @@ def parse_episode(rel_parts):
     return dir_season, ()
 
 
+def season_in_name(name):
+    """Whether a file's own name says its season ("S02E05", "2x05", "Season 2 Episode 5")."""
+    stem = _clean(Path(name).stem)
+    return any(p.search(stem) for p in (_SXE, _SEASON_EP_WORDS, _NXN))
+
+
 def natural_key(text):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", text)]
 
@@ -118,17 +124,36 @@ def episode_map(item, videos):
     # Extras (openings, endings...) are never episodes.
     videos = [v for v in videos if v.get("kind") != "extra"]
     numbered = [v for v in videos if v["episodes"]]
-    # A one-season entry (most MyAnimeList anime) whose files all say e.g. "S02E05".
-    single = len(counts) <= 1 and len({v["season"] for v in numbered if v["season"] != 0}) == 1
+    # A one-season entry (most MyAnimeList anime): its files all go in season 1,
+    # whatever season their names or folders say ("S02E05", or "Season 12/250"
+    # for Naruto Shippuden), unless the same episode number turns up twice.
+    regular = [v for v in numbered if v["season"] != 0]
+    numbers = [ep for v in regular for ep in v["episodes"]]
+    single = len(counts) <= 1 and (len({v["season"] for v in regular}) == 1 or len(numbers) == len(set(numbers)))
     found = {}
     for v in numbered:
         if v["season"] is not None:
             for ep in v["episodes"]:
-                found.setdefault((v["season"] if v["season"] == 0 or not single else 1, ep), v)
+                if v["season"] == 0:
+                    key = (0, ep)
+                elif single:
+                    key = (1, ep)
+                elif counts.get(v["season"]) and ep > counts[v["season"]]:
+                    key = _from_absolute(counts, ep)      # "Season 12/250": counted from the very start
+                else:
+                    key = (v["season"], ep)
+                found.setdefault(key, v)
     for v in numbered:
         if v["season"] is None:
             for ep in v["episodes"]:
-                found.setdefault(_from_absolute(counts, ep), v)
+                folder = v.get("folder_season")
+                if single:
+                    key = (1, ep)
+                elif folder and counts.get(folder) and ep <= counts[folder]:
+                    key = (folder, ep)            # a long season, numbered within it
+                else:
+                    key = _from_absolute(counts, ep)
+                found.setdefault(key, v)
     if not numbered:
         # No episode numbers at all: go by the files' order.
         for i, v in enumerate(sorted(videos, key=lambda v: natural_key(v["rel"]))):

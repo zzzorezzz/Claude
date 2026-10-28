@@ -30,7 +30,7 @@ METADATA_FIELDS = (
     "backdrop", "genres", "rating", "rating_source", "votes", "popularity",
     "revenue", "mal_members", "mal_rank", "runtime", "cast", "studios", "seasons",
     "episodes_total", "airing_status", "trailer", "links", "tmdb_ref", "format",
-    "media_type", "tmdb_collection", "date",
+    "media_type", "tmdb_collection", "date", "language",
 )
 
 # How often (seconds) to look for changes the other computer made.
@@ -65,6 +65,7 @@ def _blank_item() -> dict:
         "positions": {},
         "added": now,
         "last_played": None,
+        "watched_at": None,  # in your Watched list since then
         "updated": now,      # when the online info was last fetched
         "modified": now,     # when anything about it last changed (for sync)
     }

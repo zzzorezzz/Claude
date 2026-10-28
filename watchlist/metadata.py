@@ -6,6 +6,7 @@ knows whether a title is on Netflix or HBO Max in Pakistan.
 
 import html
 import re
+import unicodedata
 import ssl
 import threading
 import time
@@ -195,6 +196,7 @@ class TMDB:
             "poster": self.image(d.get("poster_path")),
             "backdrop": self.image(d.get("backdrop_path"), "w1280"),
             "genres": [g["name"] for g in d.get("genres", [])],
+            "language": d.get("original_language") or "",
             "rating": round(d["vote_average"], 1) if d.get("vote_count") else None,
             "rating_source": "TMDB", "votes": d.get("vote_count"),
             "popularity": d.get("popularity") or 0,
@@ -543,6 +545,66 @@ def search(settings, item_type, query):
         return MAL(settings["mal_client_id"]).search(query)
     media = "movie" if item_type == "movie" else "tv"
     return TMDB(settings["tmdb_api_key"]).search(query, media)
+
+
+_twin_cache = _Cache(24 * 3600)
+
+
+def tmdb_is_anime(r):
+    """A TMDB search result or title that's Japanese animation - an anime, which
+    the app always takes from MyAnimeList instead."""
+    if r.get("source") != "tmdb":
+        return False
+    animated = 16 in (r.get("genre_ids") or []) or "Animation" in (r.get("genres") or [])
+    return animated and r.get("language") == "ja"
+
+
+def _plain(text):
+    return norm_title(unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode())
+
+
+def mal_matches(settings, r, limit=8):
+    """MyAnimeList entries that could be the same anime as a TMDB title, best first."""
+    if not settings.get("mal_client_id"):
+        return []
+    names = _unique([r.get("title"), r.get("original_title"), *(r.get("aliases") or [])])
+    want = {_plain(n) for n in names if _plain(n)}
+    film = r.get("format") == "movie" or str(r.get("source_id", "")).startswith("movie/")
+    seen, scored = set(), []
+    for name in [n for n in names if len(_plain(n)) >= 3][:2]:
+        try:
+            rows = search(settings, "anime", name)[:15]
+        except MetadataError:
+            continue
+        for rank, m in enumerate(rows):
+            if m["source_id"] in seen:
+                continue
+            seen.add(m["source_id"])
+            mine = {_plain(x) for x in (m["title"], m.get("original_title"), *(m.get("aliases") or [])) if x}
+            near = not r.get("year") or not m.get("year") or abs(m["year"] - r["year"]) <= 1
+            same_kind = film == (m.get("media_kind") == "movie")
+            scored.append(((bool(want & mine) and near and same_kind, bool(want & mine), near, same_kind, -rank), m))
+    return [m for _, m in sorted(scored, key=lambda x: x[0], reverse=True)][:limit]
+
+
+def mal_twin(settings, r):
+    """The MyAnimeList entry for a TMDB anime: the same name, the same year
+    (give or take one) and a film for a film. None when there isn't a clear one."""
+    key = (r.get("source_id"), r.get("title"))
+    hit = _twin_cache.get(key)
+    if hit is not None:
+        return hit or None
+    names = {_plain(n) for n in (r.get("title"), r.get("original_title"), *(r.get("aliases") or [])) if n}
+    film = r.get("format") == "movie" or str(r.get("source_id", "")).startswith("movie/")
+    found = None
+    for m in mal_matches(settings, r):
+        mine = {_plain(x) for x in (m["title"], m.get("original_title"), *(m.get("aliases") or [])) if x}
+        near = not r.get("year") or not m.get("year") or abs(m["year"] - r["year"]) <= 1
+        if names & mine and near and film == (m.get("media_kind") == "movie"):
+            found = m
+            break
+    _twin_cache.put(key, found or {})
+    return found
 
 
 def details(settings, item_type, source, source_id):

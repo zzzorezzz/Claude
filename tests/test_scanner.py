@@ -116,3 +116,44 @@ class FolderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def video(rel, season, episodes, **extra):
+    return dict({"rel": rel, "path": "/dl/" + rel, "name": rel.split("/")[-1], "season": season,
+                 "episodes": list(episodes), "kind": "episode"}, **extra)
+
+
+class AbsoluteNumberingTest(unittest.TestCase):
+    """Long anime are numbered from their first episode (as on MyAnimeList), even
+    when the files sit in "Season N" folders."""
+
+    def test_a_season_folder_doesnt_change_a_myanimelist_episode(self):
+        from watchlist.library import Library
+        v = Library.describe({"rel": "Naruto Shippuden/Season 12/[Group] Naruto Shippuden - 250 [1080p].mkv",
+                              "season": 12, "episodes": [250], "size": 400_000_000})
+        self.assertEqual((v["season"], v["folder_season"]), (None, 12))
+        kept = Library.describe({"rel": "Show/Season 2/Show - 05.mkv", "season": 2, "episodes": [5], "size": 1})
+        self.assertEqual(kept["season"], 2)
+        named = Library.describe({"rel": "Show/Season 12/Show S12E250.mkv", "season": 12, "episodes": [250], "size": 1})
+        self.assertEqual(named["season"], 12)                     # the file's own name says so
+
+        shippuden = {"seasons": [{"number": 1, "episodes": 500}]}           # one season on MyAnimeList
+        files = [video("S11/a.mkv", None, [230], folder_season=11), video("S12/b.mkv", None, [250], folder_season=12),
+                 video("S12/c.mkv", 12, [251])]
+        self.assertEqual(sorted(scanner.episode_map(shippuden, files)), [(1, 230), (1, 250), (1, 251)])
+
+    def test_tmdb_seasons_from_an_episode_counted_from_the_start(self):
+        tmdb = {"seasons": [{"number": n, "episodes": 20} for n in range(1, 21)]}
+        files = [video("S12/x.mkv", None, [250], folder_season=12), video("S12/y S12E250.mkv", 12, [250])]
+        found = scanner.episode_map(tmdb, files)
+        self.assertEqual(sorted(found), [(13, 10)])               # 12 seasons of 20, then episode 10
+
+    def test_a_long_season_numbered_within_it(self):
+        soap = {"seasons": [{"number": n, "episodes": 200} for n in range(1, 31)]}
+        found = scanner.episode_map(soap, [video("Season 30/Soap - 150.mkv", None, [150], folder_season=30)])
+        self.assertEqual(list(found), [(30, 150)])
+
+    def test_season_in_name(self):
+        self.assertTrue(scanner.season_in_name("Show S02E05.mkv"))
+        self.assertTrue(scanner.season_in_name("Show 2x05.mkv"))
+        self.assertFalse(scanner.season_in_name("[Group] Naruto Shippuden - 250 [1080p].mkv"))
