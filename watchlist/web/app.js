@@ -2199,7 +2199,7 @@ function drawPartyDock() {
       <div class="pd-people">${st.people.map((p) => partyPersonHTML(p, st)).join('')}</div>
       ${host && !others.length ? '<div class="muted small">Waiting for someone to join…</div>' : ''}
       ${host && st.invite ? `<div class="pd-invite"><div class="small muted">Invite - they paste it into <b>Watch together</b> (${ICON.people} at the top):</div>
-          <div class="party-code-row"><code class="party-code">${esc(st.invite)}</code><button class="btn btn-sm btn-white" data-pd="copy">Copy</button></div></div>` : ''}
+          <div class="party-code-row"><code class="party-code">${esc(st.invite)}</code><button class="btn btn-sm btn-white" data-pd="copy">Copy</button>${onPhone() ? '<button class="btn btn-sm btn-white" data-pd="share">Send…</button>' : ''}</div></div>` : ''}
       <div class="btns pd-actions"><button class="btn btn-sm btn-ghost danger" data-pd="leave">${host ? 'End the party for everyone' : 'Leave the party'}</button></div>
     </div>`);
 }
@@ -2231,6 +2231,8 @@ async function partyDockClick(e) {
     } else if (a === 'copy') {
       const code = party.st.invite;
       navigator.clipboard?.writeText(code).then(() => toast('Invite copied - send it to them'), () => toast(code));
+    } else if (a === 'share') {
+      phone()?.share(`Watch with me in Watch Anything - paste this into Watch together: ${party.st.invite}`);
     } else if (a === 'leave') {
       const host = party.st.role === 'host';
       if (host && !(await confirmModal('End the watch party?', 'It ends for everyone in it.', 'End it'))) return;
@@ -2569,7 +2571,7 @@ function drawTitle(wrap) {
         <div class="btns">
           <button class="btn btn-white" data-t="watch">${ICON.play} ${esc(watchLabel(item))}</button>
           ${hasFiles(item) ? '<button class="btn btn-grey desktop-only" data-t="vlc" title="Play the file in VLC instead of the built-in player">Play in VLC</button>' : ''}
-          <button class="btn btn-grey desktop-only ${hasFiles(item) ? '' : 'hidden'}" data-t="party" title="Watch in sync with someone else, each on your own computer">${ICON.people} Watch together</button>
+          <button class="btn btn-grey ${hasFiles(item) ? '' : 'hidden'}" data-t="party" title="Watch in sync with someone else, each on your own computer">${ICON.people} Watch together</button>
           <button class="btn btn-grey" data-t="trailer">${ICON.play} ${item.trailer ? 'Trailer' : 'Find trailer'}</button>
           <button class="btn btn-grey" data-t="all-watched" title="${item.in_watched ? 'Put it back in your everyday rows' : `Mark the whole ${isSeries(item) ? 'show' : 'film'} as watched: it moves to the Watched page`}">${item.in_watched ? '↩ Back to my list' : `${ICON.check} Watched it all`}</button>
           <button class="btn-round" data-t="menu" title="Collections & more">${ICON.plus}</button>
@@ -2598,7 +2600,7 @@ function drawTitle(wrap) {
     <section class="tm-section"><h3>On your ${pcName()}<span class="spacer"></span>
       <button class="btn btn-ghost btn-sm" data-t="ep-links" title="Every ${series ? 'episode' : 'file'} and the file or torrent it plays from - change any of them">${series ? 'See how the episodes are connected' : 'See which file plays'}</button></h3>
       <div class="folder-line" id="folder-line"></div></section>
-    <section class="tm-section desktop-only" id="torrent-section"><h3>Stream from a torrent<span class="spacer"></span>
+    <section class="tm-section" id="torrent-section"><h3>Stream from a torrent<span class="spacer"></span>
       <button class="btn btn-ghost btn-sm" data-t="torrents-window">${ICON.download || '⇩'} Torrents window</button></h3>
       <div id="torrent-box"><div class="muted small">…</div></div></section>
     <section class="tm-section hidden" id="extras-section"><h3>Extras <span class="muted small" id="extras-count"></span></h3>
@@ -4733,8 +4735,8 @@ async function openSettings(focus = '') {
         <b>TMDB</b> or <b>AI</b> - only when that says it has the title in your country (✓ / ✗ shows next to it when you watch);
         <b>No check</b> - every time (for your own sites). Nothing else is ever opened. You can also pick any of them when you watch.
         For your own site: search for any title on it, copy the address of the results page, and put <b>{title}</b> where the title was.</small></div>
-    <h4 class="desktop-only">Your torrent sites</h4>
-    <div class="field desktop-only"><div id="site-list"></div>
+    <h4>Your torrent sites</h4>
+    <div class="field"><div id="site-list"></div>
       <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="site-add">+ Add a site</button></div>
       <small><b>Get magnet</b> on a title's page searches the sites ticked for its kind (anime, TV shows, movies), picks the torrent that has every episode (for a TV show, of the season you're on; a pack with other seasons, films or OVAs is fine) or the film, in the best quality with the most seeders, and adds it.
         For the search link: search for any anime on your site, copy the address of the results page, and put <b>{title}</b> where the name was.
@@ -4780,7 +4782,7 @@ async function openSettings(focus = '') {
         <i style="background:linear-gradient(135deg, ${a}, ${b})"></i>${l}</button>`).join('')}</div>
       <input type="hidden" name="theme" value="${esc(s.theme || 'violet')}">
       <small>Changes the whole app, and the built-in player's controls. You see it straight away; Save keeps it.</small></div>
-    <div class="desktop-only"><h4>Watch together</h4>
+    <div><h4>Watch together</h4>
     <label class="field"><span>Your name in watch parties</span>
       <input class="input" name="party_name" value="${esc(s.party_name)}" placeholder="e.g. Ali"></label>
     <div class="field"><span>Your picture in watch parties</span>

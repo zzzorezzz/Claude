@@ -49,16 +49,23 @@ public class MainActivity extends Activity {
         public void openUrl(String url) {
             runOnUiThread(() -> openLink(url));
         }
+
+        /** A watch party opening the player (a guest following the host, or the host starting one). */
+        public void openPlayer(String json) {
+            runOnUiThread(() -> startPlayer(json));
+        }
+
+        /** A watch party telling the open player what to do. */
+        public void playerCommand(String session, String json) {
+            PlayerActivity.command(session, json);
+        }
     }
 
     /** What the screens call (JavaScript → Java). */
     public class Phone {
         @JavascriptInterface
         public void play(String json) {
-            Intent i = new Intent(MainActivity.this, PlayerActivity.class);
-            i.putExtra("json", json);
-            i.putExtra("port", port);
-            startActivity(i);
+            runOnUiThread(() -> startPlayer(json));
         }
 
         @JavascriptInterface
@@ -168,6 +175,13 @@ public class MainActivity extends Activity {
                                 + "</pre></body></html>", "text/html", "utf-8", null));
             }
         }).start();
+    }
+
+    private void startPlayer(String json) {
+        Intent i = new Intent(MainActivity.this, PlayerActivity.class);
+        i.putExtra("json", json);
+        i.putExtra("port", port);
+        startActivity(i);
     }
 
     private void openLink(String url) {

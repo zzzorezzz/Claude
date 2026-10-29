@@ -1373,7 +1373,9 @@ body { --red: var(--accent); }
 /* ======================================================== on a phone */
 .tabbar { display: none; }
 body.android .desktop-only { display: none !important; }
-body.android .party-banner, body.android #party-dock { display: none !important; }
+/* A phone: the party panel sits above the tab bar, the width of the screen. */
+body.android #party-dock { left: 10px; right: 10px; bottom: 76px; width: auto; max-height: calc(100vh - 150px); }
+body.android #party-dock.collapsed { left: auto; }
 
 @media (max-width: 700px) {
   :root { --side: 16px; }

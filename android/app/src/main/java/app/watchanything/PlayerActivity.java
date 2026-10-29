@@ -1,12 +1,18 @@
 package app.watchanything;
 
 import android.app.Activity;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.media3.common.C;
@@ -15,8 +21,14 @@ import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
+import androidx.media3.datasource.DefaultDataSource;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.ui.PlayerView;
+
+import com.chaquo.python.Python;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -38,71 +50,94 @@ import java.util.concurrent.Executors;
  * The phone's video player: plays an episode (and the ones after it) with its
  * subtitles, and tells the app where you are, so it resumes there next time
  * and moves you on to the next episode once you've watched one to the end.
+ *
+ * In a watch party it is also the app's player for the party: it tells the app
+ * what it's doing many times a second, and the app tells it to pause, play,
+ * skip, catch up, show a message or play the next thing (command()).
  */
 public class PlayerActivity extends Activity {
+    private static volatile PlayerActivity current;
+
     private ExoPlayer player;
+    private PlayerView view;
+    private TextView message;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService net = Executors.newSingleThreadExecutor();
+    private final ExecutorService events = Executors.newSingleThreadExecutor();
     private final List<String> keys = new ArrayList<>();
     private final Set<String> finished = new HashSet<>();
     private String itemId = "";
+    private String session = "";
+    private boolean keepOpen;
+    private boolean inParty;
+    private boolean anime;
     private int port;
+    private long lastReport;
 
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            reportNow(false);
-            handler.postDelayed(this, 5000);
+            if (System.currentTimeMillis() - lastReport >= 5000) {
+                lastReport = System.currentTimeMillis();
+                reportNow(false);
+            }
+            tellApp(false);
+            handler.postDelayed(this, 500);
         }
     };
+
+    private final Runnable hideMessage = () -> message.setVisibility(View.GONE);
+
+    /** From the app (a watch party): do these things, if this is still the player it means. */
+    static void command(String sessionId, String json) {
+        PlayerActivity p = current;
+        if (p == null || !sessionId.equals(p.session)) return;
+        p.runOnUiThread(() -> p.run(json));
+    }
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        PlayerActivity old = current;
+        if (old != null && old != this) old.finish();     // one player at a time
+        current = this;
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         port = getIntent().getIntExtra("port", 0);
-        PlayerView view = new PlayerView(this);
+
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.BLACK);
+        view = new PlayerView(this);
         view.setShowSubtitleButton(true);
         view.setShowNextButton(true);
         view.setShowPreviousButton(true);
         view.setControllerShowTimeoutMs(3500);
         view.setKeepScreenOn(true);
-        setContentView(view);
+        root.addView(view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        message = new TextView(this);
+        message.setTextColor(Color.WHITE);
+        message.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        message.setBackgroundColor(0xB3141826);
+        int pad = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 10, getResources().getDisplayMetrics());
+        message.setPadding(pad * 2, pad, pad * 2, pad);
+        message.setVisibility(View.GONE);
+        FrameLayout.LayoutParams at = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        at.topMargin = pad * 3;
+        root.addView(message, at);
+        setContentView(root);
         hideBars(view);
 
-        player = new ExoPlayer.Builder(this).build();
+        // Torrent episodes stream from the app while they download: wait patiently for data.
+        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+                .setConnectTimeoutMs(30_000).setReadTimeoutMs(180_000).setAllowCrossProtocolRedirects(true);
+        player = new ExoPlayer.Builder(this)
+                .setMediaSourceFactory(new DefaultMediaSourceFactory(new DefaultDataSource.Factory(this, http)))
+                .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(15_000, 90_000, 1_500, 3_000).build())
+                .build();
         view.setPlayer(player);
         try {
             JSONObject play = new JSONObject(getIntent().getStringExtra("json"));
-            itemId = play.optString("item_id");
-            JSONArray entries = play.getJSONArray("entries");
-            List<MediaItem> items = new ArrayList<>();
-            for (int i = 0; i < entries.length(); i++) {
-                JSONObject e = entries.getJSONObject(i);
-                keys.add(e.optString("key", "movie"));
-                MediaItem.Builder b = new MediaItem.Builder()
-                        .setUri(toUri(e.getString("path")))
-                        .setMediaId(e.optString("key", "movie"))
-                        .setMediaMetadata(new MediaMetadata.Builder().setTitle(e.optString("label")).build());
-                String sub = e.optString("sub", "");
-                if (!sub.isEmpty() && !"null".equals(sub)) {
-                    b.setSubtitleConfigurations(Collections.singletonList(
-                            new MediaItem.SubtitleConfiguration.Builder(toUri(sub))
-                                    .setMimeType(subtitleType(sub))
-                                    .setLanguage("en")
-                                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                                    .build()));
-                }
-                items.add(b.build());
-            }
-            // Anime: the original Japanese audio with subtitles, as on a computer.
-            player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
-                    .setPreferredAudioLanguages(play.optBoolean("anime") ? new String[]{"ja", "jpn"} : new String[]{})
-                    .setPreferredTextLanguages("en", "eng")
-                    .setSelectUndeterminedTextLanguage(true)
-                    .build());
-            long start = (long) (play.optDouble("start", 0) * 1000);
-            player.setMediaItems(items, 0, start);
+            load(play);
         } catch (Exception e) {
             Toast.makeText(this, "Couldn't open that: " + e.getMessage(), Toast.LENGTH_LONG).show();
             finish();
@@ -116,14 +151,26 @@ public class PlayerActivity extends Activity {
                     int prev = player.getCurrentMediaItemIndex() - 1;
                     if (prev >= 0 && prev < keys.size()) markFinished(keys.get(prev));
                 }
+                tellApp(false);
             }
 
             @Override
             public void onPlaybackStateChanged(int st) {
                 if (st == Player.STATE_ENDED) {
                     reportNow(true);
-                    finish();
+                    if (!keepOpen) finish();
                 }
+                tellApp(false);
+            }
+
+            @Override
+            public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
+                tellApp(false);
+            }
+
+            @Override
+            public void onPositionDiscontinuity(Player.PositionInfo oldPos, Player.PositionInfo newPos, int reason) {
+                tellApp(false);
             }
 
             @Override
@@ -132,9 +179,121 @@ public class PlayerActivity extends Activity {
                         + error.getErrorCodeName() + ")", Toast.LENGTH_LONG).show();
             }
         });
+        handler.postDelayed(tick, 500);
+    }
+
+    /** What to play: the list of entries, where to start, playing or paused. */
+    private void load(JSONObject play) throws Exception {
+        itemId = play.optString("item_id");
+        session = play.optString("session", "");
+        keepOpen = play.optBoolean("keep_open", false);
+        inParty = play.optBoolean("party", false);
+        anime = play.optBoolean("anime", anime);
+        JSONArray entries = play.getJSONArray("entries");
+        List<MediaItem> items = new ArrayList<>();
+        keys.clear();
+        finished.clear();
+        for (int i = 0; i < entries.length(); i++) {
+            JSONObject e = entries.getJSONObject(i);
+            keys.add(e.optString("key", "movie"));
+            MediaItem.Builder b = new MediaItem.Builder()
+                    .setUri(toUri(e.getString("path")))
+                    .setMediaId(e.optString("key", "movie"))
+                    .setMediaMetadata(new MediaMetadata.Builder().setTitle(e.optString("label")).build());
+            String sub = e.optString("sub", "");
+            if (!sub.isEmpty() && !"null".equals(sub)) {
+                b.setSubtitleConfigurations(Collections.singletonList(
+                        new MediaItem.SubtitleConfiguration.Builder(toUri(sub))
+                                .setMimeType(subtitleType(sub))
+                                .setLanguage("en")
+                                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                                .build()));
+            }
+            items.add(b.build());
+        }
+        // Anime: the original Japanese audio with subtitles, as on a computer.
+        player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+                .setPreferredAudioLanguages(anime ? new String[]{"ja", "jpn"} : new String[]{})
+                .setPreferredTextLanguages("en", "eng")
+                .setSelectUndeterminedTextLanguage(true)
+                .build());
+        long start = (long) (play.optDouble("start", 0) * 1000);
+        player.setMediaItems(items, 0, start);
         player.prepare();
-        player.setPlayWhenReady(true);
-        handler.postDelayed(tick, 5000);
+        player.setPlayWhenReady(!play.optBoolean("paused", false));
+    }
+
+    private void run(String json) {
+        if (player == null) return;
+        try {
+            JSONArray list = new JSONArray(json);
+            for (int i = 0; i < list.length(); i++) {
+                JSONObject c = list.getJSONObject(i);
+                switch (c.optString("do")) {
+                    case "seek":
+                        player.seekTo((long) (c.optDouble("to", 0) * 1000));
+                        break;
+                    case "pause":
+                        player.setPlayWhenReady(false);
+                        break;
+                    case "play":
+                        player.setPlayWhenReady(true);
+                        break;
+                    case "speed":
+                        player.setPlaybackSpeed((float) c.optDouble("to", 1.0));
+                        break;
+                    case "text":
+                        show(c.optString("text"), c.optInt("ms", 3000));
+                        break;
+                    case "replace":
+                        load(c.getJSONObject("launch"));
+                        break;
+                    case "close":
+                        session = "";            // the app knows already
+                        finish();
+                        return;
+                    default:
+                        break;
+                }
+            }
+        } catch (Exception ignored) {
+            // A command we couldn't follow: the next one will put things right.
+        }
+        tellApp(false);
+    }
+
+    private void show(String text, int ms) {
+        message.setText(text);
+        message.setVisibility(View.VISIBLE);
+        handler.removeCallbacks(hideMessage);
+        handler.postDelayed(hideMessage, Math.max(800, ms));
+    }
+
+    /** What this player is doing, for a watch party. */
+    private void tellApp(boolean ended) {
+        if (session.isEmpty() || player == null && !ended) return;
+        final String sid = session;
+        final String json;
+        try {
+            JSONObject o = new JSONObject().put("ended", ended);
+            if (player != null) {
+                long dur = player.getDuration();
+                o.put("index", player.getCurrentMediaItemIndex())
+                        .put("pos", player.getCurrentPosition() / 1000.0)
+                        .put("dur", dur == C.TIME_UNSET ? 0 : dur / 1000.0)
+                        .put("paused", !player.getPlayWhenReady());
+            }
+            json = o.toString();
+        } catch (Exception e) {
+            return;
+        }
+        events.execute(() -> {
+            try {
+                Python.getInstance().getModule("watchlist.android").callAttr("player_event", sid, json);
+            } catch (Throwable ignored) {
+                // The app will hear the next one.
+            }
+        });
     }
 
     private static Uri toUri(String path) {
@@ -149,8 +308,8 @@ public class PlayerActivity extends Activity {
         return MimeTypes.APPLICATION_SUBRIP;
     }
 
-    private void hideBars(View view) {
-        view.setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+    private void hideBars(View v) {
+        v.setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
     }
@@ -207,17 +366,22 @@ public class PlayerActivity extends Activity {
     protected void onPause() {
         super.onPause();
         reportNow(false);
-        if (player != null) player.pause();
+        // In a watch party the others keep watching: leaving the player for a moment doesn't pause them.
+        if (player != null && !inParty) player.pause();
     }
 
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(tick);
         if (player != null) {
+            reportNow(false);
             player.release();
             player = null;
         }
+        tellApp(true);
+        if (current == this) current = null;
         net.shutdown();
+        events.shutdown();
         super.onDestroy();
     }
 }

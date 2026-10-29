@@ -10,6 +10,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // jlibtorrent: libtorrent (the torrent engine) built for Android.
+        maven {
+            url = uri("https://dl.frostwire.com/maven")
+            content { includeGroup("com.frostwire") }
+        }
     }
 }
 rootProject.name = "WatchAnything"

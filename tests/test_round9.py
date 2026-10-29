@@ -3,6 +3,7 @@ together, closing for everyone, links and pictures), I'm in the mood for,
 adding titles straight away, Everything connected, torrents that stop when
 they're done, and the settings that came with them."""
 
+import json
 import tempfile
 import threading
 import time
@@ -342,6 +343,48 @@ class PhoneTest(ServerBase):
         self.assertEqual((res["player"], res["entries"][0]["key"]), ("android", "1:1"))
         self.assertEqual(state["status"]["platform"], "android")
         self.assertEqual(self.spawned, [])                      # nothing started on a computer
+
+    def test_a_phone_hosting_a_party_plays_for_everyone(self):
+        video = self.media / "show" / "Breaking.Bad.S01E02.mkv"
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"x")
+        show = self.add("tv", "tmdb", "tv/1396")
+        self.call("PUT", f"/api/items/{show['id']}", {"local_folder": str(video.parent)})
+        host = mock.Mock(active=True, role="host", me="Ann", people={"Ann": {}, "Bo": {}}, server="s", room="r")
+        self.app.party = host
+        with mock.patch.object(launcher, "ANDROID", True):
+            status, res = self.call("POST", f"/api/items/{show['id']}/play", {"path": str(video), "season": 1, "episode": 2})
+        self.app.party = None
+        self.assertEqual(status, 200, res)
+        session = host.attach.call_args.args[0]
+        self.assertEqual(host.attach.call_args.kwargs, {"hold": True})       # paused until everyone's ready
+        self.assertEqual((res["session"], res["paused"], res["party"]), (session.id, True, True))
+        session.stop()
+
+    def test_a_phone_guest_gets_its_player_opened(self):
+        from watchlist import phone_player
+        show = self.add("tv", "tmdb", "tv/1396")
+        bridge = mock.Mock()
+        phone_player.set_bridge(bridge)
+        self.addCleanup(phone_player.set_bridge, None)
+        party = mock.Mock()
+        with mock.patch.object(launcher, "ANDROID", True):
+            self.app._party_open(party, {"item_id": show["id"], "path": "/x.mkv", "key": "1:1", "label": "E1"})
+        session = party.attach.call_args.args[0]
+        launch = json.loads(bridge.openPlayer.call_args.args[0])
+        self.assertEqual((launch["session"], launch["paused"], launch["keep_open"], launch["party"]),
+                         (session.id, True, True, True))
+        session.stop()
+
+    def test_a_torrent_episode_watched_on_a_phone_is_tidied_up(self):
+        from watchlist import phone_player
+        show = self.add("tv", "tmdb", "tv/1396")
+        session = phone_player.PhoneSession(show["id"], [{"path": "http://x/stream", "key": "1:1",
+                                                          "torrent": {"hash": "h", "index": 3}}])
+        with mock.patch.object(self.app.torrents, "finished_watching") as done:
+            self.call("POST", "/api/android/progress", {"item_id": show["id"], "key": "1:1", "finished": True})
+        done.assert_called_once_with("h", 3)
+        session.stop()
 
     def test_the_apps_own_file_browser(self):
         (self.media / "Anime" / "Frieren").mkdir(parents=True)

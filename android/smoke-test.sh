@@ -18,6 +18,7 @@ if [ "$ok" = 1 ]; then
   curl -sf http://127.0.0.1:8765/api/state | head -c 400; echo
   # The settings screen too (opened by tapping where the gear is would be fragile: ask the page).
   adb shell input keyevent 82 || true
+  timeout 600 bash android/torrent-test.sh || true
 fi
-adb logcat -d | grep -iE "python|chaquopy|watchanything|AndroidRuntime|FATAL" | tail -120
+adb logcat -d | grep -iE "python|chaquopy|jlibtorrent|libtorrent|watchanything|AndroidRuntime|FATAL" | tail -120
 [ "$ok" = 1 ]

@@ -9,12 +9,16 @@ itself, its screens in the app's WebView. What's different on a phone:
 - Links (streaming services, trailers, your sites) open in their phone apps
   or the browser, through `bridge.openUrl`.
 - Files and folders are chosen in the app's own file browser (/api/fs).
+- In a watch party the phone player is driven like the computer's
+  (phone_player.py): it reports what it's doing through player_event(), and
+  is told to pause, seek or play something else through the bridge.
+- Torrents use libtorrent built for Android (lt_android.py).
 """
 
 import threading
 from pathlib import Path
 
-from . import launcher
+from . import launcher, phone_player
 
 PORT = 8765
 
@@ -25,6 +29,7 @@ def start(bridge, files_dir):
     from .server import App, make_server, start_background_refresh
     launcher.ANDROID = True
     launcher.android_bridge = bridge
+    phone_player.set_bridge(bridge)
     app = App(Path(files_dir) / "data")
     try:
         server = make_server(app, PORT)          # the same port each time: the page's saved choices stay
@@ -33,3 +38,8 @@ def start(bridge, files_dir):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     start_background_refresh(app)
     return server.server_address[1]
+
+
+def player_event(session_id, data):
+    """The phone player: what it's doing now (JSON: index, pos, dur, paused, ended)."""
+    phone_player.event(session_id, data)

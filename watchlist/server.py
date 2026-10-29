@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, discover, importer, launcher, library, metadata, player, scanner, services, share, sites, sorter, syncplay
+from . import ai, dialogs, discover, importer, launcher, library, metadata, phone_player, player, scanner, services, share, sites, sorter, syncplay
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -347,6 +347,8 @@ class App:
         return self.settings.get()["party_name"] or syncplay.default_name()
 
     def _need_mpv(self):
+        if launcher.ANDROID:
+            return None                      # the phone's own player (phone_player.py)
         mpv = player.find_mpv()
         if not mpv:
             raise ApiError("watching together needs the built-in player, which is missing")
@@ -398,8 +400,10 @@ class App:
             subs = info["subtitles"]
             if target.get("stream"):
                 subs = self._ready_stream(target) or subs
-            self.play(item, {"path": target["path"], "subtitle": subs[0]["path"] if subs else None,
-                             "season": season, "episode": episode, "paused": True})
+            res = self.play(item, {"path": target["path"], "subtitle": subs[0]["path"] if subs else None,
+                                   "season": season, "episode": episode, "paused": True})
+            if res.get("player") == "android" and phone_player.current():
+                phone_player.current().open()     # (on a computer, play() opened the player itself)
             out["file"] = target["name"]
             threading.Thread(target=self._party_hello, args=(party,), daemon=True).start()
         return out
@@ -491,6 +495,13 @@ class App:
     def _party_open(self, party, entry):
         """A guest's player, opened for what the host plays (paused until it's in step)."""
         item = self.store.get(entry["item_id"])
+        if launcher.ANDROID:
+            session = phone_player.PhoneSession(item["id"], [entry], 0, paused=True, keep_open=True,
+                                                anime=item["type"] == "anime")
+            session.party = True
+            party.attach(session)
+            session.open()
+            return
         session = self.player.play(self._session(self._need_mpv(), item, [entry], 0,
                                                  ["--pause", "--keep-open=yes"]))
         party.attach(session)
@@ -1170,12 +1181,20 @@ class App:
         start = 0 if body.get("from_start") else player.resume_point(item["positions"].get(entries[0]["key"]))
         if launcher.ANDROID:
             # On a phone: the phone app's own player plays the list, and reports back
-            # where you are (/api/android/progress).
+            # where you are (/api/android/progress). In a party you host, it plays for
+            # everyone (paused until they're all ready), as on a computer.
+            with self._party_lock:
+                hosting = self.party if self.party and self.party.active and self.party.role == "host" else None
+            hold = bool(hosting and any(p != hosting.me for p in hosting.people))
+            session = phone_player.PhoneSession(item["id"], entries, start, paused=bool(body.get("paused") or hold),
+                                                anime=item["type"] == "anime")
+            if hosting:
+                session.party = True
+                hosting.attach(session, hold=hold and not body.get("paused"))
+                self._party_now(hosting, entries[0])
             self.store.update(item["id"], patch)
-            return {"ok": True, "player": "android", "item_id": item["id"], "start": start,
-                    "anime": item["type"] == "anime", "file": entries[0].get("name") or Path(path).name,
-                    "queued": len(entries) - 1, "resumed_at": start, "stream": bool(found),
-                    "entries": [{k: e.get(k) for k in ("path", "sub", "key", "label")} for e in entries]}
+            return dict(session.launch(), ok=True, player="android", file=entries[0].get("name") or Path(path).name,
+                        queued=len(entries) - 1, resumed_at=start, stream=bool(found))
         wanted = body.get("player") or s["player"]
         note = ""
         with self._party_lock:
@@ -1323,6 +1342,9 @@ class App:
     def phone_progress(self, item_id, key, pos, dur, finished=False):
         """The phone player: where you are in an episode, or that you watched it to the end."""
         entry = {"key": str(key)}
+        session = phone_player.current()
+        if session is not None and session.item_id == item_id:
+            entry = next((e for e in session.entries if e.get("key") == entry["key"]), entry)
         if finished:
             self._finished_entry(item_id, entry)
         elif pos and dur:

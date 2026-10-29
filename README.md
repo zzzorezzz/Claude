@@ -238,6 +238,22 @@ Earlier versions could take over as the default video player.
 To give that back to VLC, select a video in Finder, press **Cmd+I** (Get Info), choose **VLC** under **Open with** and click **Change All…**.
 Do this once for each kind of video you have (for example once for an `.mkv` and once for an `.mp4`).
 
+## Setup (Android phone)
+
+1. On GitHub, open the repo's **Actions** tab and click the latest green **Build Watch Anything** run that has an Android build. Under **Artifacts**, download **WatchAnything-android** and unzip it to get **WatchAnything.apk**.
+2. Copy the APK to your phone (or download it there) and open it. Android asks you to allow installing apps from that source (your browser or Files app): allow it, then tap **Install**. If Play Protect warns about an unknown developer, tap **More details → Install anyway**.
+3. Open Watch Anything and paste your TMDB token and MyAnimeList Client ID in **Settings**, as on a computer.
+4. To play your own video files, tap **Choose a folder** on a title. The app asks for **All files access** once: turn it on for Watch Anything and come back.
+
+The phone app has everything the computer app has, with a phone layout (a tab bar at the bottom, full-screen panels):
+
+- Videos play in the phone's player, with subtitles, the next episode after it, and Japanese audio for anime. Where you stopped is remembered.
+- **Torrents** work the same way: paste a magnet, use **Get magnet**, and an episode streams while it downloads. The **Torrents** button opens the same list of files, priorities and deletes.
+- **Watch together** works between phones and computers in any mix. The phone player pauses, plays and skips with everyone else, shows who did what at the top of the video, and opens by itself when the host plays something. Tap **Send…** to send the invite through any app.
+- Links (streaming services, trailers, your sites) open in their phone apps or your browser.
+
+The Windows/Mac-only settings (VLC, the player choice, the built-in browser and syncing through a shared folder) are hidden on a phone.
+
 ## Syncing between Windows and Mac
 
 Your list can stay in sync between your computers through a folder that both of them sync.

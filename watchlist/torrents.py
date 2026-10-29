@@ -41,7 +41,10 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"watchlis
 try:
     import libtorrent as lt
 except ImportError:  # pragma: no cover - the app still works without torrents
-    lt = None
+    try:
+        from . import lt_android as lt      # on a phone: libtorrent for Android (jlibtorrent)
+    except Exception:  # noqa: BLE001
+        lt = None
 
 DIR_NAME = "Watchlist torrents"
 DELETE_AFTER = 5 * 60         # an episode watched to the end is deleted this long after
@@ -755,6 +758,8 @@ class Torrents:
             if time.time() > deadline:
                 raise TorrentError("the torrent stopped sending data")
             time.sleep(0.05)
+        if getattr(lt, "PIECES_FROM_DISK", False):
+            return lt.piece_bytes(handle, piece, self.records[h]["save_path"])
         with self._piece_cond:
             self._pieces.pop((h, piece), None)
             handle.read_piece(piece)
