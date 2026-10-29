@@ -65,14 +65,23 @@ DEFAULT_SETTINGS = {
     # asked in: ["gemini", "groq", "openrouter", "custom:<id>", ...].
     "ai_custom": [],
     "ai_order": [],
+    # The app's colours: "violet", "crimson", "ocean", "emerald", "sunset", "rose" or "mono".
+    "theme": "violet",
     # Skip openings and endings in the built-in player (when the file marks them).
     "skip_intro": True,
     # Watch together (Syncplay): your name, the server and Syncplay's location.
     "party_name": "",
+    # Your picture in watch parties (a small "data:image/jpeg;base64,..."), or "".
+    "party_avatar": "",
     "party_server": "syncplay.pl:8999",
 }
 
 URL_KEYS = ("netflix_url", "hbomax_url")
+# Colour themes: name -> (accent, second accent, background), also used for the player's controls.
+THEMES = {"violet": ("7c5cff", "22d3ee", "0d0f1a"), "crimson": ("e5303f", "ff8a5c", "0e0b0d"),
+          "ocean": ("2f7dff", "2ee6c8", "0a0f19"), "emerald": ("16b67a", "a3e635", "0a110e"),
+          "sunset": ("ff6a3d", "ffc145", "120c0c"), "rose": ("ec4899", "c084fc", "110b12"),
+          "mono": ("e6e6e6", "9aa0aa", "0c0c0d")}
 # What older versions opened when nothing else fitted. Now you add it yourself.
 OLD_FALLBACK = "https://everythingmoe.com"
 OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
@@ -209,6 +218,15 @@ class Settings:
             if "torrent_sites" in patch:
                 from .sites import clean as clean_sites
                 data["torrent_sites"] = clean_sites(patch["torrent_sites"])
+            if "party_avatar" in patch:
+                pic = str(patch["party_avatar"] or "")
+                if pic and (not re.fullmatch(r"data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+", pic) or len(pic) > 12000):
+                    raise ValueError("that picture can't be used - choose a JPEG or PNG image")
+                data["party_avatar"] = pic
+            if "theme" in patch:
+                if patch["theme"] not in THEMES:
+                    raise ValueError("unknown colour theme")
+                data["theme"] = patch["theme"]
             if "player" in patch:
                 if patch["player"] not in ("mpv", "vlc", "custom"):
                     raise ValueError("player must be the built-in one, VLC or your own")

@@ -54,19 +54,26 @@ SKIP_SCRIPT = Path(__file__).resolve().parent / "mpv_scripts" / "watchlist_skip.
 UI_DIR = Path(__file__).resolve().parent / "mpv_config"
 
 
-def ui_args():
-    """Modern controls when they're bundled; otherwise mpv's own, tidied up."""
+def ui_args(theme="violet"):
+    """Modern controls when they're bundled (in the app's colour theme); otherwise mpv's own, tidied up."""
     if (UI_DIR / "scripts" / "uosc" / "main.lua").is_file():
+        from .config import THEMES
+        accent, second, bg = THEMES.get(theme) or THEMES["violet"]
+        text = "111111" if theme == "mono" else "ffffff"
+        colors = (f"foreground={accent},foreground_text={text},background={bg},background_text=e6e9f2,"
+                  f"curtain={bg},success=4ade80,error=ff6b81,match={second},heatmap={second}")
         return [f"--config-dir={UI_DIR}", "--osc=no", "--osd-bar=no", "--border=yes",
-                "--osd-font-size=30", "--osd-border-size=1.5", "--osd-color=#FFE6E9F2", "--osd-shadow-offset=1"]
+                "--osd-font-size=30", "--osd-border-size=1.5", "--osd-color=#FFE6E9F2", "--osd-shadow-offset=1",
+                f"--script-opts-append=uosc-color={colors}",
+                f"--script-opts-append=uosc-chapter_ranges=openings:{second}55,endings:{second}55,ads:ff6b8166"]
     return ["--script-opts-append=osc-layout=bottombar", "--script-opts-append=osc-seekbarstyle=bar",
             "--script-opts-append=osc-hidetimeout=900", "--script-opts-append=osc-fadeduration=150",
             "--osd-font-size=30", "--osd-border-size=1.5"]
 
 
-def script_args(skip_intro):
+def script_args(skip_intro, theme="violet"):
     """Loads the opening/ending skipper (Shift+S toggles it while watching) and the player's look."""
-    args = ui_args()
+    args = ui_args(theme)
     if SKIP_SCRIPT.is_file():
         args += [f"--script={SKIP_SCRIPT}", f"--script-opts-append=watchlist-skip={'yes' if skip_intro else 'no'}"]
     return args

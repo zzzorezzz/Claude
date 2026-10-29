@@ -151,7 +151,7 @@ def main(argv=None):
         if not args.no_open:
             browser = launcher.find_browser(Settings(data_dir / "settings.json").get()["browser_path"])
             browser = "" if browser == launcher.BUILTIN_BROWSER else browser
-            launcher.open_app_window(url, browser)
+            launcher.open_app_window(url, browser, storage=data_dir / "browser-data")
         return 0
 
     app = App(data_dir)
@@ -174,7 +174,7 @@ def main(argv=None):
             import threading
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
-            if launcher.open_app_window(url, browser):
+            if launcher.open_app_window(url, browser, storage=app.data_dir / "browser-data"):
                 # The pywebview window was closed: quit.
                 server.shutdown()
                 return 0

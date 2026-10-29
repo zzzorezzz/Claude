@@ -70,6 +70,9 @@ def _blank_item() -> dict:
         # Your own review, only in this app: {"stars": 1-5, "text", "at"}.
         "review": None,
         "opened_at": None,   # when its page was last opened (for "Recently opened")
+        # False: only in a collection (added from a shared one), not in your everyday rows.
+        "listed": True,
+        "pending": False,    # added straight away; its full info is still being fetched
         "updated": now,      # when the online info was last fetched
         "modified": now,     # when anything about it last changed (for sync)
     }

@@ -193,6 +193,7 @@ class Torrents:
         self._piece_cond = threading.Condition()
         self._dirty = False
         self._stop = False
+        self.external_ip = ""               # this computer as the internet sees it (for watch-party guests)
         if lt and self.records:
             self._start()
         for h, rec in self.records.items():
@@ -225,7 +226,7 @@ class Torrents:
             p.flags |= lt.torrent_flags.upload_mode       # only the list of files, for now
         p.save_path = rec["save_path"]
         p.flags &= ~lt.torrent_flags.auto_managed
-        if rec.get("paused"):
+        if rec.get("paused") or rec.get("done"):
             p.flags |= lt.torrent_flags.paused
         else:
             p.flags &= ~lt.torrent_flags.paused
@@ -275,6 +276,8 @@ class Torrents:
                     for k in list(self._pieces)[:16]:
                         self._pieces.pop(k, None)
                 self._piece_cond.notify_all()
+        elif isinstance(a, lt.external_ip_alert):
+            self.external_ip = str(a.external_address)
         elif isinstance(a, (lt.torrent_error_alert, lt.file_error_alert)):
             rec = self.records.get(_hash_of(a.handle))
             if rec:
@@ -289,6 +292,7 @@ class Torrents:
                 if not rec.get("files") and handle.status().has_metadata:
                     self._got_metadata(h, handle, rec)
             self._prefetch_next()
+            self._stop_when_done()
             self._delete_watched()
             if self._dirty:
                 self._save()
@@ -593,6 +597,7 @@ class Torrents:
             if rec.get("paused"):
                 rec["paused"] = False
                 handle.resume()
+            self._wake(h, rec)
             handle.file_priority(index, 7)
             handle.set_flags(lt.torrent_flags.sequential_download)
             self._save_soon()
@@ -651,6 +656,39 @@ class Torrents:
                 time.sleep(0.5)
             finally:
                 self.lock.acquire()
+
+    def my_address(self):
+        """"ip:port" where other people's apps can connect to this one's torrents
+        (a watch-party guest downloads straight from the host this way), or ""."""
+        if not self.ses or not self.external_ip:
+            return ""
+        try:
+            port = self.ses.listen_port()
+        except Exception:  # noqa: BLE001
+            return ""
+        ip = self.external_ip
+        return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
+
+    def add_peer(self, h, address):
+        """Connect a torrent to someone known to have it (the watch-party host)."""
+        handle = self.handles.get(h)
+        host, _, port = (address or "").rpartition(":")
+        host = host.strip("[]")
+        if handle is None or not host or not port.isdigit():
+            return False
+        try:
+            handle.connect_peer((host, int(port)))
+            return True
+        except Exception:  # noqa: BLE001 - an address that can't be used
+            return False
+
+    def file_in(self, h, index):
+        """(path in the torrent, size) of one file, once the list of files is known."""
+        with self.lock:
+            rec = self._rec(h)
+            self._wait_for_files(h, rec)
+            f = self._file(rec, index)
+            return f["path"], f["size"]
 
     def hash_of_magnet(self, magnet):
         try:
@@ -766,6 +804,32 @@ class Torrents:
                     handle.file_priority(nxt["index"], 4)
                     self._save_soon()
 
+    def _stop_when_done(self):
+        """Everything wanted is downloaded: the torrent stops, so it doesn't keep
+        uploading (sharing) in the background. It starts again when you play or
+        ask for something it doesn't have yet."""
+        now = time.time()
+        for h, rec in self.records.items():
+            handle = self.handles.get(h)
+            if handle is None or rec.get("paused") or rec.get("done") or not rec.get("files"):
+                continue
+            if any(now - at < 120 for (rh, _), at in self.reading.items() if rh == h):
+                continue                     # still streaming from it
+            progress = self._progress(h)
+            wanted = [f for f in rec["files"] if int(rec["priorities"].get(str(f["index"]), 0)) > 0]
+            if wanted and all(self.complete(rec, f, progress) for f in wanted):
+                rec["done"] = True
+                handle.pause()
+                self._save_soon()
+
+    def _wake(self, h, rec):
+        """A torrent stopped because it was done: going again (something new is wanted)."""
+        if rec.get("done") and not rec.get("paused"):
+            rec["done"] = False
+            handle = self.handles.get(h)
+            if handle is not None:
+                handle.resume()
+
     def _delete_watched(self):
         now = time.time()
         playing = self._playing_paths()
@@ -811,6 +875,8 @@ class Torrents:
             handle = self.handles.get(h)
             if handle is not None and rec.get("files"):
                 handle.file_priority(index, priority)
+                if priority:
+                    self._wake(h, rec)
             self._save_soon()
 
     def set_episode(self, h, index, key, item_id=None):
@@ -837,6 +903,7 @@ class Torrents:
         with self.lock:
             rec = self._rec(h)
             rec["paused"] = bool(paused)
+            rec["done"] = False              # (resumed by hand: it checks again)
             handle = self.handles.get(h)
             if handle is not None:
                 handle.pause() if paused else handle.resume()
@@ -1049,7 +1116,7 @@ class Torrents:
                                        else override),
                           "complete": self.complete(rec, f, progress),
                           "finished_at": rec["finished"].get(str(f["index"]))})
-        state = "paused" if rec.get("paused") else "loading" if not rec.get("files") else (
+        state = "paused" if rec.get("paused") else "done" if rec.get("done") else "loading" if not rec.get("files") else (
             str(st.state).split(".")[-1] if st else "stopped")
         return {"hash": h, "item_id": rec["item_id"], "title": item["title"] if item else "", "name": rec.get("name") or "",
                 "magnet": rec["magnet"], "save_path": rec["save_path"], "added": rec["added"], "state": state,

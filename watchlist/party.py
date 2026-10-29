@@ -14,7 +14,13 @@ finding their own copy (or streaming the host's torrent, getting it ready
 first), and opening their player if it was closed. While a guest gets ready,
 the room is told how far along it is, so the host sees "on the way 40%".
 A guest leaving changes nothing for the host; the host ending it ends it
-for everyone.
+for everyone, and the host closing the player closes the guests' players
+(the party stays on).
+
+The host says what it's about to play before its own copy is ready ("on the
+way"), with the torrent's exact file and the host's address, so everyone gets
+ready at the same time - a guest can download straight from the host. A link
+the host opens in the browser (Watch online) opens for the guests too.
 """
 
 import json
@@ -37,6 +43,8 @@ PING_WEIGHT = 0.85
 TICK = 0.2                       # how often the player is checked
 # What a guest is doing, as the room sees it (in the "file" each person sets).
 WAITING_STATUSES = ("idle", "finding", "preparing", "needs-file")
+# A chat message from the host's app asking the guests' apps to open a link.
+OPEN_LINK = "[Watch Anything] open: "
 
 
 class PartyError(Exception):
@@ -130,7 +138,7 @@ class Party:
     found by `resolve(file)`, and leaves when the leader does."""
 
     def __init__(self, server, room, name, role, resolve=None, leader=None, context=None, on_end=None,
-                 open_player=None, invite=""):
+                 open_player=None, invite="", avatar="", open_link=None):
         host, _, port = server.partition(":")
         self.server_host, self.server_port = host, int(port or 8999)
         self.server, self.room, self.name, self.role = server, room, name, role
@@ -139,6 +147,9 @@ class Party:
         # A guest's player opened for what the host plays (when there isn't one open).
         self.open_player = open_player
         self.invite = invite
+        self.avatar = avatar             # a small picture of you ("data:image/jpeg;base64,..."), shown to the others
+        self.open_link = open_link       # a guest: opens a link the host shared (Watch online)
+        self._following = None           # a guest: the key of what the host plays that's being followed
         self.mine = {"status": "idle"}   # a guest getting ready: what it's doing, how far along
         self._mine_sent = 0.0
         self._switch_gen = 0
@@ -164,6 +175,7 @@ class Party:
         self._init_pending = False   # a guest's new file waits for the room's position
         self._leader_file = None
         self._last_leader_key = None
+        self._hold_until = 0.0       # the host waiting for everyone before playing
 
     # ---- connecting
 
@@ -184,13 +196,52 @@ class Party:
             raise PartyError(self.ended)
         self.conn.send({"List": None})
         self._listed.wait(5)
+        # Everyone sees you (and your picture) straight away, before anything plays.
+        if self.people.get(self.me) is None:
+            self._set_file({"name": "", "duration": 0, "size": 0, "watchlist": {"status": "idle"}})
         threading.Thread(target=self._tick_loop, daemon=True).start()
         return self
 
-    def attach(self, session):
-        """Follow this player window (until it's closed; the party carries on)."""
+    def _set_file(self, file_):
+        """Tell the room what you're doing (your picture goes along)."""
+        meta = dict(file_.get("watchlist") or {})
+        if self.avatar:
+            meta["avatar"] = self.avatar
+        file_ = dict(file_, watchlist=meta)
+        self.people[self.me] = file_
+        try:
+            self.conn.send({"Set": {"file": file_}})
+        except OSError:
+            pass
+        return file_
+
+    def announce_upcoming(self, meta, label):
+        """The host is getting something ready: everyone starts getting it ready
+        now too (not once the host's copy is ready)."""
+        if self.role != "host" or not self.active:
+            return
+        with self.lock:
+            current = (self.people.get(self.me) or {}).get("watchlist") or {}
+            if current.get("key") == meta.get("key") and current.get("status") in ("preparing", "watching"):
+                return
+            self._set_file({"name": label, "duration": 0, "size": 0,
+                            "watchlist": dict(meta, label=label, status="preparing")})
+
+    def share_link(self, url, label=""):
+        """The host opened a link (Watch online): the guests' apps open it too."""
+        if self.role != "host" or not self.active:
+            return
+        try:
+            self.conn.send({"Chat": f"{OPEN_LINK}{url}" + (f" ({label})" if label else "")})
+        except OSError:
+            pass
+
+    def attach(self, session, hold=False):
+        """Follow this player window (until it's closed; the party carries on).
+        `hold`: the host's player waits, paused, until everyone's ready (then plays for all)."""
         with self.lock:
             self.session = session
+            self._hold_until = time.time() + 180 if hold else 0.0
             self._announced = False
             self._file_key = None
             self._player_at = None
@@ -241,9 +292,11 @@ class Party:
                 state, meta = self.person_state(f)
                 if n == self.me and self.role == "guest" and self.mine.get("status") in WAITING_STATUSES[1:]:
                     state, meta = self.mine["status"], self.mine
+                pic = ((f or {}).get("watchlist") or {}).get("avatar") or (self.avatar if n == self.me else "")
                 people.append({"name": n, "me": n == self.me, "leader": n == leader, "state": state,
                                "label": meta.get("label") or (f or {}).get("name", ""),
-                               "progress": meta.get("progress"), "eta": meta.get("eta")})
+                               "progress": meta.get("progress"), "eta": meta.get("eta"),
+                               "avatar": pic if isinstance(pic, str) and pic.startswith("data:image/") else ""})
             lead_state, lead_meta = self.person_state(self.leader_file())
             return {"active": self.active, "role": self.role, "room": self.room, "server": self.server,
                     "me": self.me, "leader": leader, "people": people, "invite": self.invite,
@@ -263,13 +316,8 @@ class Party:
             if not changed and time.time() - self._mine_sent < 1.0:
                 return
             self._mine_sent = time.time()
-            file_ = {"name": self.mine["label"] or "", "duration": 0, "size": 0,
-                     "watchlist": {k: v for k, v in self.mine.items() if v is not None}}
-            self.people[self.me] = file_
-        try:
-            self.conn.send({"Set": {"file": file_}})
-        except OSError:
-            pass
+            self._set_file({"name": self.mine["label"] or "", "duration": 0, "size": 0,
+                            "watchlist": {k: v for k, v in self.mine.items() if v is not None}})
 
     def osd(self, text, seconds=4):
         if self.session:
@@ -314,7 +362,15 @@ class Party:
             elif command == "State":
                 self._handle_state(value or {})
             elif command == "Chat":
-                self.osd(f'{value.get("username")}: {value.get("message")}', 6)
+                msg, who = str((value or {}).get("message") or ""), (value or {}).get("username")
+                if msg.startswith(OPEN_LINK):
+                    if self.role == "guest" and who == self.leader_name() and self.open_link:
+                        url = msg[len(OPEN_LINK):].split(" ")[0]
+                        if url.lower().startswith(("http://", "https://")):
+                            threading.Thread(target=self.open_link, args=(url,), daemon=True).start()
+                            self.osd(f"{who} opened a page - it's open on your computer too", 5)
+                else:
+                    self.osd(f'{who}: {msg}', 6)
 
     def _handle_set(self, settings):
         users = settings.get("user") or {}
@@ -368,12 +424,23 @@ class Party:
             return
         file_ = self.leader_file()
         state, meta = self.person_state(file_)
-        if state != "watching":
-            return                     # the host isn't playing anything (yet)
-        key = json.dumps({k: v for k, v in file_.items() if k != "duration"}, sort_keys=True)
-        if key == self._last_leader_key:
+        if state == "idle" and self._following:
+            # The host closed the player: yours closes too (the party stays on).
+            self._following = self._last_leader_key = None
+            self._switch_gen += 1
+            session = self.session
+            self.mine = {"status": "idle"}
+            if session and not session.ended:
+                self.osd(f"{self.leader_name()} closed the player", 2)
+                threading.Thread(target=lambda: (time.sleep(1.0), session.stop()), daemon=True).start()
             return
-        self._last_leader_key = key
+        if state not in ("watching", "preparing"):
+            return                     # the host isn't playing anything (yet)
+        # The same thing the host is getting ready, then playing, is followed once.
+        key = meta.get("key") or (file_ or {}).get("name") or ""
+        if not key or key == self._last_leader_key:
+            return
+        self._last_leader_key = self._following = key
         self._switch_gen += 1
         threading.Thread(target=self._switch_to, args=(file_, self._switch_gen), daemon=True).start()
 
@@ -440,9 +507,33 @@ class Party:
             try:
                 with self.lock:
                     self._announce_file(session)
+                    self._release_hold(session)
                     self._update_player(session)
             except OSError:
                 pass
+
+    def _release_hold(self, session):
+        """The host's new episode starts for everyone when they all have it ready
+        (or someone doesn't have it, or it's taking more than three minutes)."""
+        if not self._hold_until or not self._ready(session):
+            return
+        if not session.paused:
+            self._hold_until = 0.0           # you pressed play yourself
+            return
+        mine = ((self.people.get(self.me) or {}).get("watchlist") or {}).get("key")
+        waiting = []
+        for name, f in self.people.items():
+            if name == self.me:
+                continue
+            state, meta = self.person_state(f)
+            if state in ("finding", "preparing") or (state == "watching" and meta.get("key") != mine) \
+                    or (state == "idle" and time.time() < self._hold_until - 170):
+                waiting.append(name)
+        if waiting and time.time() < self._hold_until:
+            return
+        self._hold_until = 0.0
+        session.send(["set_property", "pause", False])
+        self.osd("Everyone's ready - playing for all of you" if not waiting else "Playing (not everyone was ready)", 3)
 
     def _player_closed(self, session):
         """A player window was closed: the party carries on without it. The host
@@ -458,12 +549,7 @@ class Party:
                 pos = self._global_position()
                 self._global_pos, self._global_paused, self._global_at = pos, True, time.time()
                 self._send_state(pos, True, False, None, True)
-                file_ = {"name": "", "duration": 0, "size": 0, "watchlist": {"status": "idle"}}
-                self.people[self.me] = file_
-                try:
-                    self.conn.send({"Set": {"file": file_}})
-                except OSError:
-                    pass
+                self._set_file({"name": "", "duration": 0, "size": 0, "watchlist": {"status": "idle"}})
 
     def _announce_file(self, session):
         """Tell the room what's playing once its length is known."""
@@ -477,11 +563,8 @@ class Party:
             size = os.path.getsize(entry["path"])
         except OSError:
             size = 0
-        file_ = {"name": entry.get("name") or os.path.basename(entry["path"]), "duration": round(session.dur, 3),
-                 "size": size,
-                 "watchlist": meta}
-        self.conn.send({"Set": {"file": file_}})
-        self.people[self.me] = file_
+        self._set_file({"name": entry.get("name") or os.path.basename(entry["path"]), "duration": round(session.dur, 3),
+                        "size": size, "watchlist": meta})
         self._announced = True
         self._file_key = entry["path"]
         if self.role == "host":

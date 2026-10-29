@@ -702,20 +702,26 @@ def sort_downloads(settings, items, questions, fresh=False):
 
 
 def connected_titles(settings, item):
-    """Everything officially connected to a title, as the AI knows it:
-    [{"title", "year", "kind": tv|movie|ova|ona|special, "relation"}]."""
+    """Everything connected to a title, as the AI knows it:
+    [{"title", "year", "kind": tv|movie|ova|ona|special, "relation", "group": main|other}]."""
     anime = item.get("type") == "anime"
+    what = 'anime' if anime else 'TV series' if item.get('format') == 'series' else 'film'
     prompt = (
-        f"List EVERYTHING officially connected to the {'anime' if anime else 'TV series' if item.get('format') == 'series' else 'film'} "
-        f"\"{item['title']}\" ({item.get('year') or 'year unknown'}): every TV season, film, OVA, ONA, special, "
-        "recap, short, sequel, prequel, side story, spin-off and remake that shares its story or characters. "
+        f"List EVERYTHING connected to the {what} \"{item['title']}\" ({item.get('year') or 'year unknown'}).\n"
+        + (f"Its summary: {item['overview'][:600]}\n" if item.get("overview") else "")
+        + "Two groups:\n"
+        "- main: the same story and continuity - every season, sequel, prequel, film, OVA, ONA, special, recap and side "
+        "story; the show or film it is a spin-off of; and spin-offs of it.\n"
+        "- other: the wider franchise - other versions, reboots, remakes, other continuities and universes, adaptations "
+        "(live action / animated), and other series or films of the same franchise or characters.\n"
+        "If it's new and you don't know it well, use its summary: a spin-off's summary usually names the show it comes from.\n"
         "Only real, released or announced titles; no fan works, no unrelated titles with similar names.\n"
         "For each give the exact title as listed on "
-        + ("MyAnimeList" if anime else "TMDB") +
-        ', its first release year, kind (one of "tv", "movie", "ova", "ona", "special") and how it\'s related '
-        '(e.g. "Season 2", "Sequel", "Prequel", "Spin-off", "Film", "OVA", "Recap").\n'
-        'Reply as JSON: {"connected": [{"title": ..., "year": ..., "kind": ..., "relation": ...}]}')
-    reply, _ = ask(settings, prompt, timeout=60, budget=120)
+        + ("MyAnimeList" if anime else "TMDB (anime as on MyAnimeList)") +
+        ', its first release year, kind (one of "tv", "movie", "ova", "ona", "special"), how it\'s related '
+        '(e.g. "Season 2", "Sequel", "Spin-off of", "Spin-off", "Reboot", "Other continuity", "Animated series") and its group.\n'
+        'Reply as JSON: {"connected": [{"title": ..., "year": ..., "kind": ..., "relation": ..., "group": "main" or "other"}]}')
+    reply, _ = ask(settings, prompt, timeout=50, budget=90)
     rows = reply.get("connected") if isinstance(reply, dict) else reply
     out = []
     for row in rows or []:
@@ -723,8 +729,9 @@ def connected_titles(settings, item):
             kind = str(row.get("kind") or "").lower()
             out.append({"title": str(row["title"]), "year": row.get("year") if isinstance(row.get("year"), int) else None,
                         "kind": kind if kind in ("tv", "movie", "ova", "ona", "special") else "tv",
-                        "relation": str(row.get("relation") or "Related")})
-    return out[:40]
+                        "relation": str(row.get("relation") or "Related"),
+                        "group": "other" if row.get("group") == "other" else "main"})
+    return out[:60]
 
 
 def streams_on(settings, item, region, services):
@@ -808,37 +815,35 @@ def story_guide(settings, item, entries):
             "story_order": list(dict.fromkeys(order)), "entries": out, "by": NAMES[provider]}
 
 
-def mood(settings, conversation, my_list, may_ask=True):
-    """"I'm in the mood for...": either one short follow-up question
-    ({"question"}) or picks: {"intro", "from_list": [{"id", "why"}],
-    "new": [{"title", "year", "type", "why"}]}."""
-    talk = "\n".join(f'{"Them" if m["role"] == "you" else "You"}: {m["text"]}' for m in conversation)
+def mood_picks(settings, text, kinds, seed, my_list, trending):
+    """Picks for I'm in the mood for: {"understood", "intro", "by", "from_list": [{"id", "why"}],
+    "new": [{"title", "year", "type", "why"}]}. Never a question: the kind was chosen first."""
+    today = time.strftime("%B %Y")
+    types = {"films": "movie", "TV shows": "tv", "anime": "anime"}
     prompt = (
-        "You help someone choose something to watch: TV shows, anime or films.\n"
-        f"Their watchlist (id|title|type|how far they've got):\n{chr(10).join(my_list)}\n\n"
-        f"The conversation so far:\n{talk}\n\n"
-        "Read what they wrote generously, however they put it: it may be a whole sentence, casual speech, "
-        "a single word, a genre, a mood, an actor or just a title. A title means that title (if it's real) and "
-        "things like it; a word like 'zombies' or 'cozy' means titles about or feeling like that. Never ask what "
-        "they mean when they've given a title, a word or a genre - just recommend.\n"
-        + ("Only if what they want is truly unclear, ask ONE short, friendly question and nothing else. "
-           "Otherwise recommend now.\n" if may_ask else "Recommend now; don't ask anything more.\n")
-        + "To recommend: pick up to 5 titles from their watchlist that fit (by id), and about 12 new titles that "
-          "aren't in it - real, released titles, anime named as on MyAnimeList, TV shows and films as on TMDB. "
-          "Each with a short reason that refers to what they asked for.\n"
-          'Reply as JSON, either {"question": "..."} or {"intro": "one short sentence", '
-          '"from_list": [{"id": ..., "why": ...}], '
-          '"new": [{"title": ..., "year": ..., "type": "anime" or "tv" or "movie", "why": ...}]}')
-    reply, provider = ask(settings, prompt, timeout=45, budget=80, fresh=True)
+        f"You help someone choose something to watch. Today is {today}. They want: {' or '.join(kinds)}.\n"
+        f'What they typed: "{text}". It may be a title, a word, a mood, a genre, an actor or a sentence, and it may '
+        "have typos (for example 'indterstella' means Interstellar): read it generously.\n"
+        + (f'It looks like they mean the title "{seed["title"]}" ({seed.get("year") or "?"}): recommend titles LIKE it '
+           "(the same feel, themes and tone), not that title itself.\n" if seed else "")
+        + ("New and popular right now (they may fit; you may know less about them):\n" + "\n".join(trending) + "\n"
+           if trending else "")
+        + "Their watchlist (id|title|how far they've got):\n" + ("\n".join(my_list) or "(empty)") + "\n\n"
+        "Recommend now; never ask a question. Pick up to 5 titles from their watchlist that fit (by id), and 15 new "
+        f"titles of the kind they want ({', '.join(kinds)}) that aren't in it: real, released titles (anime named as on "
+        "MyAnimeList, TV shows and films as on TMDB), best fit first. Include recent ones (from the last two years) "
+        "when they fit, like a new release with the same feel. Each with a short reason that refers to what they asked for.\n"
+        'Reply as JSON: {"understood": "what you took them to mean, a few words", "intro": "one short sentence", '
+        '"from_list": [{"id": ..., "why": ...}], "new": [{"title": ..., "year": ..., "type": '
+        + " or ".join(f'"{types[k]}"' for k in kinds) + ', "why": ...}]}')
+    reply, provider = ask(settings, prompt, timeout=40, budget=60, fresh=True)
     if not isinstance(reply, dict):
         raise AIError("the answer wasn't readable")
-    if reply.get("question") and may_ask and not reply.get("new"):
-        return {"question": str(reply["question"])[:300], "by": NAMES[provider]}
     pick = lambda rows, keys: [{k: r.get(k) for k in keys} for r in rows or [] if isinstance(r, dict)]
-    return {"intro": str(reply.get("intro") or "")[:300], "by": NAMES[provider],
-            "from_list": pick(reply.get("from_list"), ("id", "why"))[:8],
+    return {"understood": str(reply.get("understood") or "")[:120], "intro": str(reply.get("intro") or "")[:300],
+            "by": NAMES[provider], "from_list": pick(reply.get("from_list"), ("id", "why"))[:8],
             "new": [r for r in pick(reply.get("new"), ("title", "year", "type", "why"))
-                    if r.get("title") and r.get("type") in ("anime", "tv", "movie")][:16]}
+                    if r.get("title") and r.get("type") in ("anime", "tv", "movie")][:18]}
 
 
 def recap(settings, item, season, episode):

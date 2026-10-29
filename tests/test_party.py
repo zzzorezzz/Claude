@@ -138,9 +138,9 @@ class PartyTest(unittest.TestCase):
         self.assertTrue(wait_for(lambda: abs(self.pos(self.host) - self.pos(self.guest)) < 1.5, 8))
         self.assertLess(self.pos(self.guest), 15)
 
-        # The host closes the player: the party carries on (everyone paused).
+        # The host closes the player: the guest's closes too, and the party carries on.
         host_session.stop()
-        self.assertTrue(wait_for(lambda: guest_session.paused, 10))
+        self.assertTrue(wait_for(lambda: guest_session.ended, 10))
         time.sleep(1)
         self.assertTrue(self.host.party_status()["active"])
         self.assertTrue(self.guest.party_status()["active"])

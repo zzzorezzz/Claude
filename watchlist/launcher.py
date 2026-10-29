@@ -108,6 +108,8 @@ def open_url(url, browser=""):
     if browser == BUILTIN_BROWSER:
         if open_window(url, urllib.parse.urlsplit(url).hostname or "Watch Anything", 1280, 860):
             return
+        if _webview is not None:
+            raise LaunchError("the built-in browser window couldn't open")
         browser = ""                     # no app window (running in a browser): the default browser
     if browser:
         _spawn(_browser_command(browser, url))
@@ -363,27 +365,93 @@ def _browser_command(browser, url, new_window=False):
 
 
 _webview = None          # pywebview, once the app window is open
+_windows = {}            # the app's other windows by kind ("party", "browser")
+CLEAR_MARK = "clear-browser"     # in the browser data folder: sign out of everything at the next start
 
 
 def can_open_windows():
     return _webview is not None
 
 
-def open_window(url, title, width=1100, height=800):
+def open_window(url, title, width=1100, height=800, kind="", on_top=False):
     """Another window of the app's own (the watch party, the built-in browser).
-    False when there's no app window to do it with (running in a browser)."""
+    False when there's no app window to do it with (running in a browser).
+    A window of a `kind` that's already open is brought back instead of opened twice."""
     if _webview is None:
         return False
+    old = _windows.get(kind) if kind else None
+    if old is not None:
+        try:
+            old.restore()
+            old.show()
+            old.on_top = on_top
+            return True
+        except Exception:  # noqa: BLE001 - it was closed
+            _windows.pop(kind, None)
     try:
-        _webview.create_window(title, url, width=width, height=height, background_color="#0d0f1a",
-                               text_select=True)
-        return True
+        win = _webview.create_window(title, url, width=width, height=height, background_color="#0d0f1a",
+                                     text_select=True, on_top=on_top)
     except Exception:  # noqa: BLE001 - the window couldn't be made
+        return False
+    if kind:
+        _windows[kind] = win
+        try:
+            win.events.closed += lambda: _windows.pop(kind, None)
+        except Exception:  # noqa: BLE001 - (older pywebview)
+            pass
+    return True
+
+
+def set_on_top(kind, on_top):
+    """Keep one of the app's windows above all others, or not. False when it isn't open."""
+    win = _windows.get(kind)
+    if win is None:
+        return False
+    try:
+        win.on_top = bool(on_top)
+        return True
+    except Exception:  # noqa: BLE001
         return False
 
 
-def open_app_window(url, browser=""):
-    """Open the UI. Returns True if it blocks until the window is closed."""
+def close_window(kind):
+    win = _windows.pop(kind, None)
+    if win is not None:
+        try:
+            win.destroy()
+        except Exception:  # noqa: BLE001 - already closed
+            pass
+
+
+def sign_out_of_sites(storage):
+    """Forget every login made in the built-in browser: its cookies now, and its
+    whole saved data (local storage too) the next time the app starts."""
+    if storage:
+        Path(storage).mkdir(parents=True, exist_ok=True)
+        (Path(storage) / CLEAR_MARK).write_text("1", encoding="utf-8")
+    for win in [dialogs.window, *_windows.values()]:
+        try:
+            if win is not None:
+                win.clear_cookies()
+        except Exception:  # noqa: BLE001 - (no window, or an older pywebview)
+            pass
+
+
+def _prepare_storage(storage):
+    """The built-in browser's saved data (logins, cookies): wiped first if you signed out."""
+    if not storage:
+        return None
+    path = Path(storage)
+    if (path / CLEAR_MARK).exists():
+        shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def open_app_window(url, browser="", storage=None):
+    """Open the UI. Returns True if it blocks until the window is closed.
+    `storage` is where the app's windows keep logins and cookies, so a site you
+    signed in to in the built-in browser still knows you after a restart."""
     global _webview
     try:
         import webview  # pywebview, optional
@@ -395,7 +463,8 @@ def open_app_window(url, browser=""):
                 "Watch Anything", url, width=1440, height=900, min_size=(900, 600),
                 background_color="#0d0f1a")
             _webview = webview
-            webview.start()
+            path = _prepare_storage(storage)
+            webview.start(private_mode=not path, storage_path=path)
             return True
         except Exception:
             # e.g. the WebView2 runtime is missing: use the browser instead.

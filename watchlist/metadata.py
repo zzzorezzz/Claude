@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from . import net
 
@@ -144,6 +144,36 @@ class TMDB:
     def search(self, query, media):
         data = self._get(f"/search/{media}", query=query, include_adult="false")
         return [self.result(r, media) for r in data.get("results", [])[:20]]
+
+    def alike(self, source_id, limit=20):
+        """Titles like this one: TMDB's recommendations (what people who liked it
+        watched), then its similar titles."""
+        cached = _alike_cache.get(("tmdb", source_id))
+        if cached is not None:
+            return cached
+        media, _, tid = source_id.partition("/")
+        out, seen = [], set()
+        for path in ("recommendations", "similar"):
+            try:
+                rows = self._get(f"/{media}/{tid}/{path}").get("results", [])
+            except MetadataError:
+                continue
+            for r in rows:
+                if r.get("id") not in seen and r.get("id") != int(tid or 0):
+                    seen.add(r.get("id"))
+                    out.append(self.result(r, media))
+        out = out[:limit]
+        _alike_cache.put(("tmdb", source_id), out)
+        return out
+
+    def trending(self, media):
+        """What's popular this week (new releases rise here first)."""
+        cached = _alike_cache.get(("trending", media))
+        if cached is not None:
+            return cached
+        rows = [self.result(r, media) for r in self._get(f"/trending/{media}/week").get("results", [])]
+        _alike_cache.put(("trending", media), rows)
+        return rows
 
     def result(self, r, media):
         """A search or discover result, in the app's shape."""
@@ -383,6 +413,34 @@ class MAL:
             "aliases": self._titles(a)[2],
         }
 
+    def alike(self, mal_id, limit=20):
+        """Anime like this one: MyAnimeList's user recommendations."""
+        cached = _alike_cache.get(("mal", str(mal_id)))
+        if cached is not None:
+            return cached
+        rows = self._get(f"/anime/{int(mal_id)}", fields="recommendations").get("recommendations") or []
+        ids = [str((r.get("node") or {}).get("id")) for r in rows if (r.get("node") or {}).get("id")][:limit]
+
+        def one(i):
+            try:
+                return self._summary(self._get(f"/anime/{i}", fields=MAL_SEARCH_FIELDS))
+            except MetadataError:
+                return None
+        with ThreadPoolExecutor(8) as pool:
+            out = [r for r in pool.map(one, ids) if r]
+        _alike_cache.put(("mal", str(mal_id)), out)
+        return out
+
+    def airing_now(self, limit=40):
+        """The most popular anime airing right now."""
+        cached = _alike_cache.get(("mal-airing",))
+        if cached is not None:
+            return cached
+        rows = self._get("/anime/ranking", ranking_type="airing", limit=limit, fields=MAL_SEARCH_FIELDS).get("data", [])
+        out = [self._summary(r["node"]) for r in rows if r.get("node")]
+        _alike_cache.put(("mal-airing",), out)
+        return out
+
     def related(self, mal_id):
         """Sequels, prequels, side stories, spin-offs, OVAs, specials, films...
         directly related to an anime on MyAnimeList."""
@@ -423,35 +481,38 @@ class MAL:
         start = str(int(mal_id))
         seen = {start}
         found = {}                 # id -> summary
-        frontier = [(start, None)]
         names = {}
-        while frontier and len(found) < limit:
-            batch, frontier = frontier[:12], frontier[12:]
-            with ThreadPoolExecutor(8) as pool:
-                pages = list(pool.map(lambda job: self._expand(job[0], fields), batch))
-            if on_progress:
-                on_progress(len(found) + len(frontier))
-            for (node_id, _parent), page in zip(batch, pages):
-                if not page:
-                    continue
-                if node_id in found:
-                    found[node_id].update({k: v for k, v in self._summary(page).items() if k != "relation"})
-                names[node_id] = self._titles(page)[0]
-                for row in page.get("related_anime") or []:
-                    node = row.get("node") or {}
-                    rid = str(node.get("id") or "")
-                    kind = row.get("relation_type") or ""
-                    if not rid or rid in seen or kind == "character":
+        # Every entry's page is asked for the moment a link to it is found (not
+        # level by level), several at once: a long franchise comes in a few seconds.
+        with ThreadPoolExecutor(12) as pool:
+            pending = {pool.submit(self._expand, start, fields): start}
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    node_id = pending.pop(fut)
+                    page = fut.result()
+                    if not page:
                         continue
-                    seen.add(rid)
-                    found[rid] = {"source": "mal", "source_id": rid, "title": node.get("title", ""),
-                                  "original_title": "", "year": None, "overview": "", "rating": None,
-                                  "poster": self._picture(node), "format": "series", "media_type": "",
-                                  "media_kind": "", "type": "anime", "episodes_total": None, "aliases": [],
-                                  "relation": row.get("relation_type_formatted") or kind.replace("_", " ").title(),
-                                  "via": names[node_id] if node_id != start else ""}
-                    if kind in self._FOLLOW and len(seen) <= limit:
-                        frontier.append((rid, node_id))
+                    if node_id in found:
+                        found[node_id].update({k: v for k, v in self._summary(page).items() if k != "relation"})
+                    names[node_id] = self._titles(page)[0]
+                    for row in page.get("related_anime") or []:
+                        node = row.get("node") or {}
+                        rid = str(node.get("id") or "")
+                        kind = row.get("relation_type") or ""
+                        if not rid or rid in seen or kind == "character" or len(found) >= limit:
+                            continue
+                        seen.add(rid)
+                        found[rid] = {"source": "mal", "source_id": rid, "title": node.get("title", ""),
+                                      "original_title": "", "year": None, "overview": "", "rating": None,
+                                      "poster": self._picture(node), "format": "series", "media_type": "",
+                                      "media_kind": "", "type": "anime", "episodes_total": None, "aliases": [],
+                                      "relation": row.get("relation_type_formatted") or kind.replace("_", " ").title(),
+                                      "via": names[node_id] if node_id != start else ""}
+                        # Every entry is looked up (for its year and kind); only story links are followed further.
+                        pending[pool.submit(self._expand, rid, fields if kind in self._FOLLOW else MAL_SEARCH_FIELDS)] = rid
+                if on_progress:
+                    on_progress(len(found))
         out = sorted(found.values(), key=lambda r: (r.get("year") or 9999, r["title"]))[:limit]
         _related_cache.put(("franchise", str(mal_id)), out)
         return out
@@ -550,6 +611,7 @@ def search(settings, item_type, query):
 
 
 _twin_cache = _Cache(24 * 3600)
+_alike_cache = _Cache(6 * 3600)
 
 
 def tmdb_is_anime(r):

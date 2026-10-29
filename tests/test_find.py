@@ -1,11 +1,11 @@
-"""Find Media: top titles of a year, search and browse, and "I'm in the mood for..."."""
+"""Find Media: top titles of a year, and search and browse (I'm in the mood for... is in test_round9)."""
 
 import urllib.parse
 from unittest import mock
 
 from tests import fixtures
 from tests import test_server
-from watchlist import ai, discover, metadata
+from watchlist import discover, metadata
 
 
 def tmdb_row(i, name, **extra):
@@ -268,51 +268,3 @@ class FindTest(test_server.ServerBase):
         self.assertIn("TMDB", data["error"])
 
 
-class MoodTest(test_server.ServerBase):
-    def setUp(self):
-        super().setUp()
-        self.app.settings.update({"gemini_api_key": "key"})
-        self.prompts = []
-
-    def talk(self, replies, messages):
-        def fake_ask(settings, prompt, **kw):
-            self.prompts.append(prompt)
-            return replies.pop(0), "gemini"
-        with mock.patch.object(ai, "ask", side_effect=fake_ask):
-            return self.call("POST", "/api/find/mood", {"messages": messages})
-
-    def test_asks_then_recommends_from_your_list_and_new(self):
-        bb = self.add("tv", "tmdb", "tv/1396")
-        status, data = self.talk([{"question": "Funny or serious?"}], [{"role": "you", "text": "something good"}])
-        self.assertEqual(status, 200, data)
-        self.assertEqual(data["question"], "Funny or serious?")
-        self.assertIn("Breaking Bad", self.prompts[0])
-
-        picks = {"intro": "Here you go", "from_list": [{"id": bb["id"], "why": "you started it"}, {"id": "gone"}],
-                 "new": [{"title": "Frieren", "year": 2023, "type": "anime", "why": "calm"},
-                         {"title": "Made Up Show", "year": 2020, "type": "tv", "why": "?"}]}
-        messages = [{"role": "you", "text": "something good"}, {"role": "ai", "text": "Funny or serious?"},
-                    {"role": "you", "text": "serious"}]
-        status, data = self.talk([picks], messages)
-        self.assertEqual(status, 200, data)
-        self.assertEqual([r["title"] for r in data["from_list"]], ["Breaking Bad"])
-        self.assertEqual(data["from_list"][0]["why"], "you started it")
-        # Only titles really found on MyAnimeList / TMDB are shown.
-        self.assertEqual([r["source"] for r in data["new"]], ["mal"])
-        self.assertEqual(data["new"][0]["why"], "calm")
-
-    def test_no_more_than_two_questions(self):
-        messages = [{"role": "you", "text": "x"}, {"role": "ai", "text": "a?"},
-                    {"role": "you", "text": "y"}, {"role": "ai", "text": "b?"}, {"role": "you", "text": "z"}]
-        status, data = self.talk([{"question": "c?"}], messages)
-        self.assertEqual(status, 200, data)
-        self.assertNotIn("question", data)
-        self.assertIn("don't ask anything more", self.prompts[0])
-
-    def test_needs_an_ai_key_and_something_to_go_on(self):
-        status, _ = self.talk([], [])
-        self.assertEqual(status, 400)
-        self.app.settings.update({"gemini_api_key": ""})
-        status, data = self.talk([], [{"role": "you", "text": "x"}])
-        self.assertEqual(status, 400)
-        self.assertIn("AI", data["error"])

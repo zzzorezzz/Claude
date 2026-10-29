@@ -29,9 +29,14 @@ def new_room():
     return "watchanything-" + secrets.token_hex(5)
 
 
-def make_invite(server, room, item=None, season=None, episode=None, host=None):
-    """An invite to a room (and, with item, what it was started for)."""
+def make_invite(server, room, item=None, season=None, episode=None, host=None, now=None):
+    """An invite to a room (and, with item, what it was started for). `now` is
+    what the host is playing (with a torrent's magnet and exact file), so a guest's
+    app starts getting it ready the moment it joins."""
     data = {"s": server, "r": room}
+    if now:
+        data["now"] = {k: now[k] for k in ("src", "id", "type", "title", "season", "episode", "key", "label",
+                                            "magnet", "th", "ti", "peer") if now.get(k) not in (None, "")}
     if item:
         data.update({"t": item["title"], "y": item.get("year"), "k": item["type"],
                      "src": item["source"], "id": item["source_id"]})
@@ -68,4 +73,7 @@ def read_invite(code):
            "host": str(data.get("h") or "") or None}
     if data.get("ep"):
         out["season"], out["episode"] = int(data.get("se") or 1), int(data["ep"])
+    now = data.get("now")
+    if isinstance(now, dict) and str(now.get("magnet") or "").startswith("magnet:?"):
+        out["now"] = now
     return out

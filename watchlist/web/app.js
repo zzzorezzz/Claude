@@ -100,6 +100,30 @@ function upsert(item) {
   if (i >= 0) S.items[i] = item; else S.items.push(item);
 }
 
+// Settings → Look: the app's colour theme.
+const THEMES = [['violet', 'Violet', '#7c5cff', '#22d3ee'], ['crimson', 'Crimson', '#e5303f', '#ff8a5c'], ['ocean', 'Ocean', '#2f7dff', '#2ee6c8'],
+  ['emerald', 'Emerald', '#16b67a', '#a3e635'], ['sunset', 'Sunset', '#ff6a3d', '#ffc145'], ['rose', 'Rose', '#ec4899', '#c084fc'], ['mono', 'Mono', '#e6e6e6', '#8a8f99']];
+function applyTheme(theme) {
+  const t = theme && theme !== 'violet' ? theme : '';
+  if ((document.body.dataset.theme || '') === t) return;
+  if (t) document.body.dataset.theme = t; else delete document.body.dataset.theme;
+}
+
+// Spinners and loading shimmers keep turning smoothly when a panel redraws
+// (a new one starts where the old one was, instead of jumping back).
+const PHASED = '.spinner, .spin-dot, .rel-add.spin, .shimmer, .buf-shine, .pd-spin';
+new MutationObserver((records) => {
+  const now = performance.now();
+  for (const r of records) for (const n of r.addedNodes) {
+    if (n.nodeType !== 1) continue;
+    const found = n.matches(PHASED) ? [n, ...n.querySelectorAll(PHASED)] : n.querySelectorAll(PHASED);
+    for (const el of found) {
+      const d = parseFloat(getComputedStyle(el).animationDuration) * 1000;
+      if (d) el.style.animationDelay = `${-(now % d)}ms`;
+    }
+  }
+}).observe(document.documentElement, { childList: true, subtree: true });
+
 async function reload() {
   const data = await api('GET', '/api/state');
   // A party started or joined elsewhere (another window): its dock follows it.
@@ -107,6 +131,7 @@ async function reload() {
   S.items = data.items;
   S.collections = data.collections;
   S.status = data.status;
+  applyTheme(S.status.theme);
   S.library = data.library || {};
   S.version = data.version;
   render();
@@ -215,7 +240,8 @@ function sortItems(list) {
 }
 const applyGenre = (list) => (S.genre ? list.filter((i) => i.genres.includes(S.genre)) : list);
 // Your list: everything except what you've moved to Watched (that has its own page).
-const listed = () => S.items.filter((i) => !i.in_watched);
+// Your everyday list: not Watched, and not titles that are only in a shared collection.
+const listed = () => S.items.filter((i) => !i.in_watched && i.listed !== false);
 const ofType = (type) => sortItems(applyGenre(listed().filter((i) => i.type === type)));
 
 function matchesQuery(item, q) {
@@ -583,7 +609,7 @@ function filterNote() {
 function pickFeatured() {
   const current = S.featured && findItem(S.featured);
   if (current && (!S.genre || current.genres.includes(S.genre))) return current;
-  const pool = applyGenre(S.items);
+  const pool = applyGenre(listed());
   const withArt = pool.filter((i) => i.backdrop);
   const top = sortItems(withArt.length ? withArt : pool).slice(0, 5);
   const pick = top[Math.floor(Math.random() * top.length)];
@@ -713,7 +739,7 @@ function downloadsSectionHTML() {
 
 // Watched: titles you've finished, kept as your collection, out of the everyday rows.
 function renderWatched(view) {
-  const all = sortItems(applyGenre(S.items.filter((i) => i.in_watched)));
+  const all = sortItems(applyGenre(S.items.filter((i) => i.in_watched && i.listed !== false)));
   const groups = TYPES.map((t) => [t, all.filter((i) => i.type === t)]).filter(([, list]) => list.length);
   view.innerHTML = `<div class="page">
     <div class="page-head"><h1>Watched</h1>
@@ -873,8 +899,9 @@ function openSharedCollection() {
           <b title="${esc(x.title)}">${esc(x.title)}</b>
           <small>${[{ tv: 'TV show', anime: 'Anime', movie: 'Movie' }[x.type], x.year, x.rating ? `★ ${fmtRating(x.rating)}` : ''].filter(Boolean).map(esc).join(' · ')}</small>
           ${x.in_list ? `<small class="ok">${ICON.check} In your list</small>` : ''}</div>`).join('')}</div>
-        <div class="btns"><button class="btn btn-red" data-s="import">Add it to my list</button></div>
-        <p class="muted small">Adds a collection called "${esc(data.name)}" to your Collections${fresh ? `, and adds the ${fresh} title${fresh === 1 ? '' : 's'} you don't have yet to your list` : ' (every title in it is in your list already)'}.</p>`;
+        <label class="check-row"><input type="checkbox" id="shared-to-list"> <span>Also add ${fresh ? `the ${fresh} title${fresh === 1 ? '' : 's'} I don't have` : 'them'} to my watch list (TV Shows, Anime, Movies)</span></label>
+        <div class="btns"><button class="btn btn-red" data-s="import">Add the collection</button></div>
+        <p class="muted small">Adds a collection called "${esc(data.name)}" to your Collections, with every title in it. Unticked, the titles you don't have are only in that collection; ticked, they're in your everyday list too. You can add any of them to your list later from its page.</p>`;
     } catch (e) { out.innerHTML = `<div class="warn">${esc(e.message)}</div>`; }
   };
   wrap.addEventListener('click', async (e) => {
@@ -890,12 +917,12 @@ function openSharedCollection() {
       b.disabled = true;
       b.textContent = 'Adding…';
       try {
-        const r = await api('POST', '/api/shared/import', source);
+        const r = await api('POST', '/api/shared/import', { ...source, add_to_list: $('#shared-to-list', wrap)?.checked });
         closeModal(wrap);
         await reload();
-        toast(`Added "${r.collection.name}" - ${r.titles} title${r.titles === 1 ? '' : 's'}${r.failed ? ` (${r.failed} couldn't be found)` : ''}`);
+        toast(`Added "${r.collection.name}" - ${r.titles} title${r.titles === 1 ? '' : 's'}${r.listed ? ', also in your list' : ''}. Their full info fills in in the background.`);
         location.hash = `#/collections/${r.collection.id}`;
-      } catch (err) { fail(err); b.disabled = false; b.textContent = 'Add it to my list'; }
+      } catch (err) { fail(err); b.disabled = false; b.textContent = 'Add the collection'; }
     }
   });
 }
@@ -1481,7 +1508,7 @@ const THIS_YEAR = new Date().getFullYear();
 S.find = {
   top: { type: 'anime', year: THIS_YEAR, order: 'popular', results: null, error: '' },
   search: { types: [], q: '', genres: [], year: '', sort: 'popular', format: '', results: null, page: 1, more: false, error: '', notes: [], meta: null, panel: false },
-  mood: { messages: [], result: null, error: '', busy: false },
+  mood: { kind: '', job: null, error: '', busy: false },
 };
 const FIND_TABS = [['top', 'Top by year'], ['search', 'Search & browse'], ['mood', "I'm in the mood for…"]];
 const KIND_LABEL = { tv: 'TV shows', movie: 'Movies', anime: 'Anime' };
@@ -1507,7 +1534,7 @@ function drawFind(mode) {
     body.innerHTML = `<div class="find-start">
       <a class="find-tile" href="#/find/top"><span class="find-icon">🏆</span><b>Top by year</b><span>The 100 most popular or highest rated TV shows, movies or anime of any year.</span></a>
       <a class="find-tile" href="#/find/search"><span class="find-icon">🔎</span><b>Search & browse</b><span>Keywords, genres and types across TMDB and MyAnimeList, sorted by popularity, rating, box office or date.</span></a>
-      <a class="find-tile mood" href="#/find/mood"><span class="find-icon">✨</span><b>I'm in the mood for…</b><span>Tell the AI what you feel like watching. It may ask a question or two, then picks from your list and new things.</span></a></div>`;
+      <a class="find-tile mood" href="#/find/mood"><span class="find-icon">✨</span><b>I'm in the mood for…</b><span>Pick films, TV shows or anime, then say what you feel like - a title (typos are fine), a word or a sentence. Titles like it show in seconds, then your AI helper's picks.</span></a></div>`;
     return;
   }
   if (mode === 'top') drawFindTop(body);
@@ -1530,7 +1557,8 @@ function findCardHTML(r, list, i, rank) {
 
 function findList(list) {
   const st = S.find;
-  return { top: st.top.results, search: st.search.results, 'mood-new': st.mood.result?.new, 'mood-list': st.mood.result?.from_list, 'mood-quick': st.mood.quick }[list] || [];
+  const j = st.mood.job || {};
+  return { top: st.top.results, search: st.search.results, 'mood-like': j.like, 'mood-picks': j.picks, 'mood-list': j.from_list }[list] || [];
 }
 
 function refreshFindCards() {
@@ -1688,62 +1716,66 @@ function drawFindSearch(body) {
       : st.error ? '' : '<p class="muted">Nothing found - try fewer filters, other keywords or another year.</p>'}`;
 }
 
+const MOOD_KINDS = [['movie', 'Films'], ['tv', 'TV shows'], ['anime', 'Anime'], ['any', 'Anything']];
+
 function drawFindMood(body) {
   const st = S.find.mood;
   const hasAi = (S.status.ai || []).length;
-  const bubbles = st.messages.map((m) => `<div class="bubble ${m.role}">${esc(m.text)}</div>`).join('');
-  const r = st.result;
+  const j = st.job;
+  const picked = !!st.kind;
+  const moodGroup = (title, rows, list, extra = '') => (rows?.length ? `<h3>${title}${extra}</h3>
+    <div class="find-grid">${rows.map((x, i) => findCardHTML(list === 'mood-list' ? { ...x, in_list: x.id } : x, list, i)).join('')}</div>` : '');
   body.innerHTML = `<div class="mood">
-    ${hasAi ? '' : '<div class="warn">This needs an AI helper. Add a free key (Gemini, Groq or OpenRouter) in Settings. <button class="btn btn-sm btn-white" data-f="settings">Open Settings</button></div>'}
-    <div class="chat">${bubbles || '<div class="bubble ai">What are you in the mood for? Say it any way you like - a title, a single word, a genre, a feeling, something like a show you loved…</div>'}
-      ${st.busy ? `<div class="bubble ai typing"><i></i><i></i><i></i></div>
-        <div class="mood-progress"><div class="pd-bar big"><i id="mood-bar" style="width:${moodPct(st)}%"></i></div><div class="small muted" id="mood-stage">${esc(moodStage(st))}</div></div>` : ''}</div>
-    ${st.quick?.length && !r ? `<div class="mood-quick"><h3>Matches for “${esc(st.quickFor)}” <span class="muted small">while ${esc((S.status.ai || ['the AI'])[0])} picks more</span></h3>
-      <div class="find-grid">${st.quick.map((x, i) => findCardHTML(x, 'mood-quick', i)).join('')}</div></div>` : ''}
-    ${st.error ? `<div class="warn">${esc(st.error)}</div>` : ''}
-    ${r ? '' : `<form class="mood-form" data-f="mood-form"><textarea class="input" name="text" rows="2" placeholder="e.g. something cosy and funny, not too long, like Spy x Family" ${hasAi ? '' : 'disabled'}></textarea>
-      <button class="btn btn-red" type="submit" ${hasAi && !st.busy ? '' : 'disabled'}>Send</button></form>`}
-    ${r ? `<div class="mood-result">${r.intro ? `<p class="mood-intro">${esc(r.intro)} <span class="muted small">- ${esc(r.by || 'AI')}</span></p>` : ''}
-      ${st.quick?.length ? `<h3>Matches for “${esc(st.quickFor)}”</h3><div class="find-grid">${st.quick.map((x, i) => findCardHTML(x, 'mood-quick', i)).join('')}</div>` : ''}
-      ${r.from_list.length ? `<h3>From your list</h3><div class="find-grid">${r.from_list.map((x, i) => findCardHTML({ ...x, in_list: x.id }, 'mood-list', i)).join('')}</div>` : ''}
-      ${r.new.length ? `<h3>New for you</h3><div class="find-grid">${r.new.map((x, i) => findCardHTML(x, 'mood-new', i)).join('')}</div>` : '<p class="muted">No new titles could be confirmed on TMDB / MyAnimeList this time.</p>'}
-      <div class="center"><button class="btn btn-ghost" data-f="mood-again">Start over</button></div></div>` : ''}</div>`;
-  if (!r) setTimeout(() => $('.mood-form textarea')?.focus(), 30);
+    <div class="mood-step"><div class="mood-ask">What do you want to watch?</div>
+      <div class="seg mood-kinds">${MOOD_KINDS.map(([v, l]) => `<button type="button" data-f="mood-kind" data-v="${v}" class="${st.kind === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+    <form class="mood-form ${picked ? '' : 'waiting'}" data-f="mood-form">
+      <input class="input" name="text" autocomplete="off" spellcheck="false" value="${esc(st.text || '')}"
+        placeholder="${picked ? 'A title, a word or a sentence - e.g. Interstellar, cozy, a heist with a twist' : 'Pick films, TV shows or anime first'}" ${picked ? '' : 'disabled'}>
+      <button class="btn btn-red" type="submit" ${picked && !st.busy ? '' : 'disabled'}>Find</button></form>
+    ${hasAi ? '' : '<p class="muted small">Without an AI helper you get titles like the one you type. Add a free key in Settings for picks that follow any words. <button class="btn btn-sm btn-ghost" data-f="settings">Open Settings</button></p>'}
+    ${st.busy && j ? `<div class="mood-progress"><div class="pd-bar big"><i id="mood-bar" style="width:${j.pct || 3}%"></i></div>
+      <div class="mood-line"><span class="small muted" id="mood-stage"><span class="spin-dot"></span> ${esc(j.stage || 'Working…')}</span>
+      <button class="btn btn-ghost btn-sm" data-f="mood-cancel">Cancel</button></div></div>` : ''}
+    ${st.error || j?.error ? `<div class="warn">${esc(st.error || j.error)}</div>` : ''}
+    ${j ? `<div class="mood-result">
+      ${j.understood ? `<p class="mood-intro">Took it as <b>${esc(j.understood)}</b>${j.intro ? ` - ${esc(j.intro)}` : ''}${j.by ? ` <span class="muted small">(${esc(j.by)})</span>` : ''}</p>`
+        : j.intro ? `<p class="mood-intro">${esc(j.intro)} <span class="muted small">- ${esc(j.by || 'AI')}</span></p>` : ''}
+      ${moodGroup(j.seed ? `Like ${esc(j.seed.title)}` : 'Like it', j.like, 'mood-like')}
+      ${moodGroup('Picked for you', j.picks, 'mood-picks', j.by ? ` <span class="muted small">by ${esc(j.by)}</span>` : '')}
+      ${moodGroup('From your list', j.from_list, 'mood-list')}
+      ${j.note ? `<p class="muted small">${esc(j.note)}</p>` : ''}
+      ${j.done && !st.busy ? '<div class="center"><button class="btn btn-ghost" data-f="mood-again">Start over</button></div>' : ''}</div>` : ''}</div>`;
+  if (picked && !st.busy && !j) setTimeout(() => $('.mood-form input')?.focus(), 30);
 }
 
-// How far along the AI probably is (it doesn't say): quick at first, slowing near the end.
-const moodPct = (st) => Math.min(95, Math.round(100 * (1 - Math.exp(-((Date.now() - (st.started || Date.now())) / 1000) / 9))));
-function moodStage(st) {
-  const t = (Date.now() - (st.started || Date.now())) / 1000;
-  const who = (S.status.ai || ['the AI'])[0];
-  return t < 2 ? 'Reading what you asked…' : t < 14 ? `${who} is choosing…` : 'Checking the picks on MyAnimeList and TMDB…';
-}
+const moodSig = (j) => JSON.stringify([j.like.length, j.picks.length, j.from_list.length, j.understood, j.intro, j.error, j.done, j.note]);
 
 async function moodSend(text) {
   const st = S.find.mood;
-  st.messages.push({ role: 'you', text });
-  st.busy = true; st.error = ''; st.started = Date.now();
+  st.text = text;
+  st.busy = true; st.error = ''; st.job = null;
   drawFind('mood');
-  const timer = setInterval(() => {
-    const bar = $('#mood-bar');
-    if (!bar) return;
-    bar.style.width = `${moodPct(st)}%`;
-    $('#mood-stage').textContent = moodStage(st);
-  }, 400);
-  // A title or a word: its matches straight away, while the AI thinks.
-  const quick = text.trim().split(/\s+/).length <= 6
-    ? api('POST', '/api/find/quick', { q: text }).then((q) => {
-      if (q.results.length) { st.quick = q.results; st.quickFor = text.trim(); if (findShowing('mood')) drawFind('mood'); }
-    }).catch(() => {}) : null;
-  try {
-    const r = await api('POST', '/api/find/mood', { messages: st.messages });
-    if (r.question) st.messages.push({ role: 'ai', text: r.question });
-    else st.result = r;
-  } catch (e) { st.error = e.message; }
-  await quick;
-  clearInterval(timer);
-  st.busy = false;
+  let j;
+  try { j = await api('POST', '/api/find/mood', { text, kind: st.kind === 'any' ? '' : st.kind }); }
+  catch (e) { st.error = e.message; st.busy = false; if (findShowing('mood')) drawFind('mood'); return; }
+  st.job = j;
   if (findShowing('mood')) drawFind('mood');
+  let sig = moodSig(j);
+  while (st.busy && st.job?.id === j.id && !j.done) {
+    await new Promise((r) => setTimeout(r, 500));
+    if (!st.busy || st.job?.id !== j.id) return;
+    try { j = await api('GET', `/api/find/mood/${j.id}`); } catch (e) { st.error = e.message; break; }
+    st.job = j;
+    if (!findShowing('mood')) continue;
+    if (moodSig(j) !== sig) { sig = moodSig(j); drawFind('mood'); }
+    else {
+      const bar = $('#mood-bar');
+      if (bar) bar.style.width = `${j.pct}%`;
+      const stage = $('#mood-stage');
+      if (stage && !stage.textContent.endsWith(j.stage)) stage.innerHTML = `<span class="spin-dot"></span> ${esc(j.stage)}`;
+    }
+  }
+  if (st.job?.id === j.id) { st.busy = false; if (findShowing('mood')) drawFind('mood'); }
 }
 
 async function findOverview(r, wrap) {
@@ -1776,7 +1808,7 @@ function findPreview(r) {
 }
 
 async function findAdd(r) {
-  const added = await api('POST', '/api/items', { type: resultType(r), source: r.source, source_id: r.source_id });
+  const added = await api('POST', '/api/items', { type: resultType(r), source: r.source, source_id: r.source_id, hint: r });
   upsert(added);
   r.in_list = added.id;
   toast(`Added ${added.title} to ${TYPE_PLURAL[added.type]}`);
@@ -1827,7 +1859,24 @@ $('#view').addEventListener('click', async (e) => {
   }
   if (f === 'genre-clear') { st.genres = []; $$('.genre-chip.on').forEach((c) => c.classList.remove('on')); $('.genre-bar').outerHTML = genreBarHTML(); return; }
   if (f === 'settings') { openSettings(); return; }
-  if (f === 'mood-again') { S.find.mood = { messages: [], result: null, error: '', busy: false }; drawFind('mood'); return; }
+  if (f === 'mood-again') { S.find.mood = { kind: S.find.mood.kind, job: null, error: '', busy: false, text: '' }; drawFind('mood'); return; }
+  if (f === 'mood-kind') {
+    const m = S.find.mood;
+    if (m.busy) return;
+    m.kind = e.target.closest('[data-v]').dataset.v;
+    drawFind('mood');
+    if (m.text && m.job) moodSend(m.text);          // same words, another kind: look again
+    return;
+  }
+  if (f === 'mood-cancel') {
+    const m = S.find.mood;
+    if (m.job) api('POST', `/api/find/mood/${m.job.id}/cancel`).catch(() => {});
+    m.busy = false;
+    if (m.job) m.job.done = true;
+    drawFind('mood');
+    toast('Stopped');
+    return;
+  }
   if (card && !card.classList.contains('skeleton')) {
     const r = findList(card.dataset.list)[Number(card.dataset.i)];
     if (!r) return;
@@ -1866,7 +1915,7 @@ $('#view').addEventListener('submit', (e) => {
     findSearchLoad();
   } else if (form.dataset.f === 'mood-form') {
     const text = String(data.get('text') || '').trim();
-    if (text && !S.find.mood.busy) moodSend(text);
+    if (text && S.find.mood.kind && !S.find.mood.busy) moodSend(text);
   }
 });
 $('#view').addEventListener('keydown', (e) => {
@@ -1874,6 +1923,7 @@ $('#view').addEventListener('keydown', (e) => {
     e.preventDefault();
     e.target.closest('form').requestSubmit();
   }
+  if (e.key === 'Escape' && S.find.mood.busy && route().name === 'find') $('[data-f="mood-cancel"]')?.click();
 });
 
 /* ======================================================== Surprise me */
@@ -2036,7 +2086,7 @@ const PARTY_STATE = {
   watching: ['ok', 'Watching'], finding: ['busy', 'On the way'], preparing: ['busy', 'On the way'],
   'needs-file': ['bad', 'Needs the file'], idle: ['', 'Here'],
 };
-const party = { st: null, timer: null, open: true, endedShown: '' };
+const party = { st: null, timer: null, open: true, endedShown: '', onTop: true };
 
 function partyPersonHTML(p, st) {
   const [cls, word] = PARTY_STATE[p.state] || PARTY_STATE.idle;
@@ -2044,7 +2094,7 @@ function partyPersonHTML(p, st) {
   const pct = p.progress != null ? Math.floor(p.progress * 100) : null;
   const eta = p.eta != null ? ` · ~${p.eta < 60 ? `${p.eta} s` : `${Math.ceil(p.eta / 60)} min`}` : '';
   return `<div class="pd-person ${p.me ? 'me' : ''}">
-    <span class="pd-avatar">${esc((p.name || '?').slice(0, 1).toUpperCase())}</span>
+    <span class="pd-avatar">${p.avatar ? `<img src="${esc(p.avatar)}" alt="">` : esc((p.name || '?').slice(0, 1).toUpperCase())}</span>
     <div class="pd-who"><b>${esc(p.name)}</b>${p.leader ? '<span class="pd-tag">host</span>' : ''}${p.me ? '<span class="pd-tag you">you</span>' : ''}
       <div class="pd-state ${cls}">${busy ? '<span class="spin-dot"></span> ' : ''}${word}${busy && pct != null ? ` · ${pct}%${eta}` : ''}${p.state === 'watching' && p.label && !p.leader ? '' : p.label && p.state !== 'idle' && !p.leader ? ` · ${esc(p.label)}` : ''}</div>
       ${busy ? `<div class="pd-bar"><i style="width:${pct || 0}%"></i></div>` : ''}</div></div>`;
@@ -2063,18 +2113,19 @@ function drawPartyDock() {
   }
   dock.classList.toggle('collapsed', !party.open && !solo);
   if (!st.active) {
-    dock.innerHTML = `<div class="pd-head"><span class="pd-title">Watch party</span><button class="pd-icon" data-pd="close" title="Close">×</button></div>
-      <div class="pd-body"><div class="warn small">The watch party ended: ${esc(st.ended)}.</div></div>`;
+    setHTML(dock, `<div class="pd-head"><span class="pd-title">Watch party</span><button class="pd-icon" data-pd="close" title="Close">×</button></div>
+      <div class="pd-body"><div class="warn small">The watch party ended: ${esc(st.ended)}.</div></div>`);
     return;
   }
   const host = st.role === 'host';
   const mine = st.mine || {};
   const myBusy = !host && (mine.status === 'preparing' || mine.status === 'finding');
   const others = st.people.filter((p) => !p.me);
-  dock.innerHTML = `<div class="pd-head" data-pd="toggle">
+  setHTML(dock, `<div class="pd-head" data-pd="toggle">
       <span class="live-dot"></span><span class="pd-title">${host ? 'Your watch party' : `${esc(st.leader || 'The host')}'s watch party`}</span>
       <span class="pd-count">${st.people.length}</span>
-      ${S.status.windows && !solo ? `<button class="pd-icon" data-pd="popout" title="Open in its own window">⧉</button>` : ''}
+      ${S.status.windows && !solo ? `<button class="pd-icon" data-pd="popout" title="Open in its own window, above the player">⧉</button>` : ''}
+      ${solo ? `<button class="pd-icon ${party.onTop ? 'on' : ''}" data-pd="pin" title="${party.onTop ? 'Kept above every window (the player too) - click to let it go behind' : 'Keep this window above every window, the player too'}">📌</button>` : ''}
       ${solo ? '' : `<button class="pd-icon" data-pd="toggle" title="${party.open ? 'Minimise' : 'Open'}">${party.open ? '–' : '+'}</button>`}</div>
     <div class="pd-body">
       <div class="pd-now">${st.host_playing ? `${host ? 'You\'re playing' : `${esc(st.leader)} is playing`} <b>${esc(st.host_playing)}</b>`
@@ -2090,7 +2141,15 @@ function drawPartyDock() {
       ${host && st.invite ? `<div class="pd-invite"><div class="small muted">Invite - they paste it into <b>Watch together</b> (${ICON.people} at the top):</div>
           <div class="party-code-row"><code class="party-code">${esc(st.invite)}</code><button class="btn btn-sm btn-white" data-pd="copy">Copy</button></div></div>` : ''}
       <div class="btns pd-actions"><button class="btn btn-sm btn-ghost danger" data-pd="leave">${host ? 'End the party for everyone' : 'Leave the party'}</button></div>
-    </div>`;
+    </div>`);
+}
+
+// Redraw only when something changed: progress bars glide and nothing flickers.
+function setHTML(el, html) {
+  if (el._html === html) return false;
+  el._html = html;
+  el.innerHTML = html;
+  return true;
 }
 
 async function partyDockClick(e) {
@@ -2099,6 +2158,12 @@ async function partyDockClick(e) {
   e.stopPropagation();
   try {
     if (a === 'toggle') { party.open = !party.open; drawPartyDock(); }
+    else if (a === 'pin') {
+      party.onTop = !party.onTop;
+      await api('POST', '/api/window', { kind: 'party-on-top', on_top: party.onTop });
+      drawPartyDock();
+      toast(party.onTop ? 'Kept on top of every window' : 'It can go behind the player now (minimise it any time)');
+    }
     else if (a === 'close') { party.st = null; party.endedShown = ''; drawPartyDock(); }
     else if (a === 'popout') {
       await api('POST', '/api/window', { kind: 'party' });
@@ -2326,7 +2391,7 @@ function openAdd(type = 'tv', query = '', preCol = '', onAdded = null) {
     btn.textContent = 'Adding…';
     try {
       const col = $('#add-col', wrap).value;
-      const item = await api('POST', '/api/items', { type: st.type, source: r.source, source_id: r.source_id, collections: col ? [col] : [] });
+      const item = await api('POST', '/api/items', { type: st.type, source: r.source, source_id: r.source_id, collections: col ? [col] : [], hint: onAdded ? null : r });
       upsert(item);
       r.in_list = item.id;
       if (onAdded) { closeModal(wrap); onAdded(item); toast(`Added ${item.title} and sorted its files`); return; }
@@ -2446,6 +2511,7 @@ function drawTitle(wrap) {
           ${hasFiles(item) ? '<button class="btn btn-grey" data-t="vlc" title="Play the file in VLC instead of the built-in player">Play in VLC</button>' : ''}
           <button class="btn btn-grey ${hasFiles(item) ? '' : 'hidden'}" data-t="party" title="Watch in sync with someone else, each on your own computer">${ICON.people} Watch together</button>
           <button class="btn btn-grey" data-t="trailer">${ICON.play} ${item.trailer ? 'Trailer' : 'Find trailer'}</button>
+          <button class="btn btn-grey" data-t="all-watched" title="${item.in_watched ? 'Put it back in your everyday rows' : `Mark the whole ${isSeries(item) ? 'show' : 'film'} as watched: it moves to the Watched page`}">${item.in_watched ? '↩ Back to my list' : `${ICON.check} Watched it all`}</button>
           <button class="btn-round" data-t="menu" title="Collections & more">${ICON.plus}</button>
           <button class="btn-round" data-t="remove" title="Remove from list">${ICON.trash}</button>
         </div>
@@ -2458,7 +2524,9 @@ function drawTitle(wrap) {
         ${item.original_title ? `<p class="tm-tagline" style="font-style:normal">${esc(item.original_title)}</p>` : ''}
         ${progress}
         ${item.tagline ? `<p class="tm-tagline">${esc(item.tagline)}</p>` : ''}
-        <p class="tm-overview">${esc(item.overview || 'No summary available.')}</p>
+        ${item.listed === false ? `<div class="tm-note">Only in your collection${item.collections.length === 1 ? '' : 's'} - not in your everyday list. <button class="btn btn-white btn-sm" data-t="list-it">+ Add to my list</button></div>` : ''}
+        ${item.pending ? `<div class="tm-note muted small"><span class="spin-dot"></span> ${item.fill_error ? `Couldn't get its full info yet (${esc(item.fill_error)}) - it's tried again next time the app starts.` : 'Getting its full info…'}</div>` : ''}
+        <p class="tm-overview">${esc(item.overview || (item.pending ? '' : 'No summary available.'))}</p>
         ${animeOnTmdb(item) ? `<div class="mal-switch">${ICON.info || ''}<span>This anime's details come from TMDB, whose seasons and episode numbers don't match MyAnimeList's or most downloads'.</span>
           <button class="btn btn-sm btn-white" data-t="use-mal">Use MyAnimeList instead</button></div>` : ''}
         ${item.in_watched ? `<div class="watched-note">${ICON.check} In your Watched list <button class="linkish" data-t="unwatch">Move back to my list</button></div>` : ''}
@@ -2824,16 +2892,17 @@ function drawRelated(wrap) {
   data.running = !!job;
   const aiNames = data.ai || S.status.ai || [];
   const bar = job ? `<div class="rel-progress"><div class="pd-bar big"><i style="width:${Math.round((job.progress || 0) * 100)}%"></i></div>
-      <div class="small muted"><span class="spin-dot"></span> ${esc(job.stage)}${job.found ? ` · ${job.found} found` : ''}</div></div>` : '';
+      <div class="rel-line"><span class="small muted"><span class="spin-dot"></span> ${esc(job.stage)}${job.found ? ` · ${job.found} found` : ''}</span>
+      ${job.cancel ? '' : '<button class="btn btn-ghost btn-sm" data-r="cancel">Cancel</button>'}</div></div>` : '';
   const button = (label) => `<button class="btn btn-white rel-find" data-r="find" ${data.running ? 'disabled' : ''}>
     ${data.running ? '<span class="spin-dot"></span> Looking…' : label}</button>`;
   const head = `<div class="rel-head"><h3>Everything connected</h3>
     ${data.entries ? '<button class="rel-refresh" data-r="find" title="Look again">↻</button>' : ''}</div>`;
   if (!data.entries) {
-    box.innerHTML = head + `<p class="muted small">Every season, film, OVA, ONA, special, sequel, prequel and spin-off of ${esc(item.title)}${aiNames.length ? `, found through ${item.type === 'anime' ? 'MyAnimeList and ' : ''}${esc(aiNames[0])}` : item.type === 'anime' ? ', found through MyAnimeList' : ''}, with what's on your ${pcName()} and what isn't.</p>
+    setHTML(box, head + `<p class="muted small">Every season, film, OVA, ONA, special, sequel, prequel and spin-off of ${esc(item.title)}${aiNames.length ? `, found through ${item.type === 'anime' ? 'MyAnimeList and ' : ''}${esc(aiNames[0])}` : item.type === 'anime' ? ', found through MyAnimeList' : ''}, with what's on your ${pcName()} and what isn't.</p>
       ${button(`✨ Find everything connected`)}
       ${data.running ? `${bar}${'<div class="rel-row skeleton"><div class="sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(3)}` : ''}
-      ${data.note ? `<p class="bad small">${esc(data.note)}</p>` : ''}`;
+      ${data.note ? `<p class="bad small">${esc(data.note)}</p>` : ''}`);
     return;
   }
   const entries = data.entries;
@@ -2852,9 +2921,13 @@ function drawRelated(wrap) {
       <div class="rel-text"><b>${esc(x.title)}</b><small>${[kindName(x), x.year, x.relation].filter(Boolean).map(esc).join(' · ')}${x.via ? ` (of ${esc(x.via)})` : ''}</small>${status}</div>
       ${x.in_list ? '' : `<button class="rel-add" data-r="add" data-i="${i}" title="Add to your list">+</button>`}</div>`;
   };
-  const groups = KIND_GROUPS.map(([k, label]) => [label, entries.filter((x) => connectedKind(x) === k)])
+  // The same story first (by kind), then other versions and series of the franchise.
+  const main = entries.filter((x) => x.group !== 'other');
+  const other = entries.filter((x) => x.group === 'other');
+  const groups = KIND_GROUPS.map(([k, label]) => [label, main.filter((x) => connectedKind(x) === k)])
     .filter(([, list]) => list.length);
-  box.innerHTML = head + bar
+  if (other.length) groups.push(['Other versions & related series', other]);
+  setHTML(box, head + bar
     + `<button class="btn btn-red rel-guide" data-r="guide" ${job && !data.guide ? 'disabled' : ''}>📖 ${job && !data.guide ? 'The story guide is being written…' : 'Open the story guide'}</button>`
     + `<div class="rel-summary"><b>${entries.length}</b> connected · <span class="ok">${here.length} on your ${pcName()}</span>
         ${listed.length ? ` · ${listed.length} in your list, not downloaded` : ''} · <span class="${missing.length ? 'bad' : ''}">${missing.length} not in your list</span></div>`
@@ -2862,11 +2935,11 @@ function drawRelated(wrap) {
     + (entries.length ? groups.map(([g, list]) => `<div class="rel-group"><h5>${esc(g)} <span>${list.length}</span></h5>${list.map(row).join('')}</div>`).join('')
       : '<p class="muted small">Nothing connected was found.</p>')
     + (data.note ? `<p class="muted small">${esc(data.note)}</p>` : '')
-    + (data.at ? `<p class="muted small">Looked ${esc(ago(data.at))}.</p>` : '');
+    + (data.at ? `<p class="muted small">Looked ${esc(ago(data.at))}.</p>` : ''));
 }
 
 async function addRelated(wrap, x, quiet) {
-  const added = await api('POST', '/api/items', { type: x.type, source: x.source, source_id: x.source_id });
+  const added = await api('POST', '/api/items', { type: x.type, source: x.source, source_id: x.source_id, hint: x });
   upsert(added);
   x.in_list = added.id;
   if (!quiet) toast(`Added ${added.title}`);
@@ -2877,6 +2950,13 @@ async function relatedClick(wrap, e) {
   if (r) {
     const entries = wrap.st.related?.entries || [];
     if (r.dataset.r === 'find') { loadRelated(wrap, true); return true; }
+    if (r.dataset.r === 'cancel') {
+      const item = findItem(wrap.dataset.itemId);
+      wrap.st.relWanted = false;
+      await api('POST', `/api/items/${item.id}/connected/cancel`).catch(fail);
+      toast('Stopping - what was found so far is kept');
+      return true;
+    }
     if (r.dataset.r === 'guide') { openGuide(wrap); return true; }
     try {
       if (r.dataset.r === 'add') {
@@ -2983,6 +3063,12 @@ async function titleClick(wrap, e) {
     else if (t === 'youtube') api('POST', '/api/open', { url: `https://www.youtube.com/watch?v=${item.trailer}` }).catch(fail);
     else if (t === 'menu') { e.stopPropagation(); openItemMenu(item, e.target.closest('[data-t]'), { inTitle: true }); }
     else if (t === 'remove') removeItem(item.id);
+    else if (t === 'all-watched') toggleWatched(item.id);
+    else if (t === 'list-it') {
+      upsert(await api('PUT', `/api/items/${item.id}`, { listed: true }));
+      render(); refreshOpenTitle();
+      toast(`${item.title} is in your list now`);
+    }
     else if (t === 'recap') showRecap(item);
     else if (t === 'files') openTitleFiles(item, wrap.st.local);
     else if (t === 'party') openStartParty(item);
@@ -3114,7 +3200,7 @@ const fmtBytes = (n) => {
 const TORRENT_STATE = {
   loading: 'Getting the list of files…', downloading: 'Downloading', downloading_metadata: 'Getting the list of files…',
   finished: 'Ready', seeding: 'Ready (sharing)', checking_files: 'Checking files…', checking_resume_data: 'Checking files…',
-  paused: 'Paused', stopped: 'Stopped',
+  paused: 'Paused', stopped: 'Stopped', done: 'Done (stopped - not sharing)',
 };
 
 const hasTorrentSite = (item) => !!(S.status.torrent_sites || {})[item.type];
@@ -3992,8 +4078,19 @@ async function followPlayer(wrap) {
 }
 
 function watchBody(wrap, html) {
-  $('.modal', wrap).innerHTML = `<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">${html}</div>`;
+  $('.modal', wrap).innerHTML = `<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">${partyBanner()}${html}</div>`;
   return $('.modal-pad', wrap);
+}
+
+// While a party is on, what you start says where it plays.
+function partyBanner() {
+  const st = party.st;
+  if (!st?.active) return '';
+  const others = st.people.filter((p) => !p.me);
+  if (st.role === 'host') {
+    return `<div class="party-banner">${ICON.people}<span><b>Plays for your watch party</b> - ${others.length ? `${others.map((p) => esc(p.name)).join(', ')} get${others.length === 1 ? 's' : ''} it ready at the same time, and it starts for everyone once you're all ready` : 'nobody has joined yet'}. Watching online opens the page for them too.</span></div>`;
+  }
+  return `<div class="party-banner guest">${ICON.people}<span>You're in <b>${esc(st.leader || 'the host')}'s</b> watch party: what you start here is just for you - ${esc(st.leader || 'the host')} picks what the party watches.</span></div>`;
 }
 
 function watchChoice(wrap, { reason = '' } = {}) {
@@ -4314,6 +4411,7 @@ async function watchOnline(wrap, { reason = '', fix = false, service = '' } = {}
       ${reason ? `<div class="warn" style="margin-bottom:18px;justify-content:center">${esc(reason)}</div>` : ''}
       <div class="result-icon">${res.has_it ? '✅' : '🔎'}</div>
       <h2>Opened ${esc(res.service)}</h2>
+      ${res.party ? '<p class="ok small">Opened for everyone in your watch party too.</p>' : ''}
       <p class="sub">${res.kind === 'check' ? (res.has_it ? `${esc(item.title)} is on ${esc(res.service)} in ${esc(region)}.` : `Searched ${esc(res.service)} for ${esc(item.title)}.`)
         : `Searched ${esc(res.service)} for ${esc(item.title)}.`} It's open in ${browserName()}${isSeries(item) ? ` - you're up to ${epLabel(wrap.st.ep)}` : ''}.</p>
       ${res.services.length ? `<div class="muted small">Streaming in ${esc(region)} on:</div><div class="services" style="justify-content:center">${res.services.map((x) => `<span class="chip">${esc(x)}</span>`).join('')}</div>` : ''}
@@ -4500,6 +4598,27 @@ function playerOptions(s, data) {
   return opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
 }
 
+// A picture made small and square (a profile picture), as a JPEG data link.
+function smallPicture(file, size) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const side = Math.min(img.width, img.height);
+      c.getContext('2d').drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, size, size);
+      URL.revokeObjectURL(url);
+      let q = 0.82;
+      let out = c.toDataURL('image/jpeg', q);
+      while (out.length > 11000 && q > 0.3) { q -= 0.12; out = c.toDataURL('image/jpeg', q); }
+      resolve(out);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('unreadable')); };
+    img.src = url;
+  });
+}
+
 async function openSettings(focus = '') {
   let data;
   try { data = await api('GET', '/api/settings'); } catch (e) { fail(e); return; }
@@ -4538,8 +4657,9 @@ async function openSettings(focus = '') {
       <div class="input-row"><select class="select" id="browser-pick">${browserOptions(s, data)}</select>
       <button class="btn btn-ghost btn-sm" type="button" data-s="browser">Browse…</button></div>
       <input type="hidden" name="browser_path" value="${esc(s.browser_path)}">
-      <small>Your streaming services, sites and trailers open here. <b>Built-in browser</b> opens them in a simple window of this app${data.status.windows ? '' : ' (when the app runs in its own window)'};
-        <b>Recommended</b> uses Opera GX when it's installed, else your default browser.</small></label>
+      <small>Your streaming services, sites and trailers open here. <b>Built-in browser</b> opens them in a simple window of this app${data.status.windows ? '' : ' (when the app runs in its own window)'},
+        and remembers the sites you sign in to, even after you close the app; <b>Recommended</b> uses Opera GX when it's installed, else your default browser.</small>
+      <div class="btns" style="margin-top:6px"><button class="btn btn-ghost btn-sm" type="button" data-s="sign-out">Sign out of every site in the built-in browser</button></div></label>
     <div class="field" id="svc-field"><span>Your streaming services and sites</span>
       <div id="svc-list"></div>
       <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="svc-add">+ Add…</button></div>
@@ -4589,9 +4709,22 @@ async function openSettings(focus = '') {
       <small>${data.status.vlc ? `<span class="ok">✓ Found VLC:</span> ${esc(data.status.vlc)}. Leave empty to use this.` : `<span class="bad">VLC not found.</span> Install it from videolan.org or browse to ${mac ? 'VLC in Applications' : 'vlc.exe'}.`}</small></label>
     <label class="check-row"><input type="checkbox" name="queue_next_episodes" ${s.queue_next_episodes ? 'checked' : ''}> Play the following episodes after the one you start</label>
     <label class="check-row"><input type="checkbox" name="skip_intro" ${s.skip_intro ? 'checked' : ''}> <span>Skip openings and endings in the built-in player (when the file marks them with chapters; press <b>Shift+S</b> while watching to toggle)</span></label>
+    <h4>Look</h4>
+    <div class="field"><span>Colour theme</span>
+      <div class="theme-pick">${THEMES.map(([v, l, a, b]) => `<button type="button" class="theme-chip ${(s.theme || 'violet') === v ? 'on' : ''}" data-s="theme" data-theme="${v}">
+        <i style="background:linear-gradient(135deg, ${a}, ${b})"></i>${l}</button>`).join('')}</div>
+      <input type="hidden" name="theme" value="${esc(s.theme || 'violet')}">
+      <small>Changes the whole app, and the built-in player's controls. You see it straight away; Save keeps it.</small></div>
     <h4>Watch together</h4>
     <label class="field"><span>Your name in watch parties</span>
       <input class="input" name="party_name" value="${esc(s.party_name)}" placeholder="e.g. Ali"></label>
+    <div class="field"><span>Your picture in watch parties</span>
+      <div class="avatar-row"><span class="pd-avatar big" id="avatar-preview">${s.party_avatar ? `<img src="${esc(s.party_avatar)}" alt="">` : esc((s.party_name || '?').slice(0, 1).toUpperCase())}</span>
+        <button class="btn btn-ghost btn-sm" type="button" data-s="avatar">Choose a picture…</button>
+        <button class="btn btn-ghost btn-sm ${s.party_avatar ? '' : 'hidden'}" type="button" data-s="avatar-off">Remove</button>
+        <input type="file" id="avatar-file" accept="image/*" hidden></div>
+      <input type="hidden" name="party_avatar" value="${esc(s.party_avatar || '')}">
+      <small>Shown next to your name to everyone in a party you're in (it's sent through the watch-party server, made small).</small></div>
     <label class="field"><span>Watch-party server</span>
       <input class="input" name="party_server" value="${esc(s.party_server)}" placeholder="syncplay.pl:8999">
       <small>A Syncplay server: the free public one works. Only the host's setting counts - it's in the invite.</small></label>
@@ -4599,6 +4732,17 @@ async function openSettings(focus = '') {
       <button class="btn btn-ghost" type="button" data-s="cancel">Cancel</button></div>
   </form>`, 'settings-modal');
   const form = $('form', wrap);
+  wrap.onClose = () => applyTheme(S.status.theme);       // a theme tried but not saved goes back
+  $('#avatar-file', wrap).addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const pic = await smallPicture(file, 96);
+      form.party_avatar.value = pic;
+      $('#avatar-preview', wrap).innerHTML = `<img src="${pic}" alt="">`;
+      $('[data-s="avatar-off"]', wrap).classList.remove('hidden');
+    } catch { toast("That picture couldn't be read", 'error'); }
+  });
   wrap.svc = JSON.parse(JSON.stringify(s.services || []));
   wrap.sites = JSON.parse(JSON.stringify(s.torrent_sites || []));
   drawSites(wrap);
@@ -4650,8 +4794,8 @@ async function openSettings(focus = '') {
       downloads_folder: f.get('downloads_folder'), player: f.get('player'), queue_next_episodes: form.queue_next_episodes.checked,
       gemini_api_key: f.get('gemini_api_key'), groq_api_key: f.get('groq_api_key'), openrouter_api_key: f.get('openrouter_api_key'),
       ...(() => { const st = readAiList(wrap); return { ai_custom: st.custom.map(({ keys, ...c }) => c), ai_order: st.order }; })(),
-      skip_intro: form.skip_intro.checked,
-      party_name: f.get('party_name'), party_server: f.get('party_server'),
+      skip_intro: form.skip_intro.checked, theme: f.get('theme'),
+      party_name: f.get('party_name'), party_server: f.get('party_server'), party_avatar: f.get('party_avatar'),
     };
   };
   const save = async () => {
@@ -4667,7 +4811,22 @@ async function openSettings(focus = '') {
     const a = e.target.closest('[data-s]')?.dataset.s;
     if (!a) return;
     try {
-      if (a === 'cancel') closeModal(wrap);
+      if (a === 'cancel') { applyTheme(S.status.theme); closeModal(wrap); }
+      else if (a === 'avatar') $('#avatar-file', wrap).click();
+      else if (a === 'avatar-off') {
+        form.party_avatar.value = '';
+        $('#avatar-preview', wrap).textContent = (form.party_name.value || '?').slice(0, 1).toUpperCase();
+        e.target.classList.add('hidden');
+      } else if (a === 'sign-out') {
+        if (!(await confirmModal('Sign out of every site?', 'Every login and cookie saved in the built-in browser is forgotten (fully, the next time the app opens). Your list and settings stay.', 'Sign out'))) return;
+        await api('POST', '/api/window', { kind: 'sign-out' });
+        toast('Signed out of every site in the built-in browser');
+      } else if (a === 'theme') {
+        const b = e.target.closest('[data-theme]');
+        form.theme.value = b.dataset.theme;
+        $$('.theme-chip', wrap).forEach((c) => c.classList.toggle('on', c === b));
+        applyTheme(b.dataset.theme);
+      }
       else if (a === 'show') {
         $$('input[type=password], input[data-shown]', form).forEach((i) => {
           i.dataset.shown = '1';

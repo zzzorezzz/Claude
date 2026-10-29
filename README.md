@@ -11,23 +11,27 @@ Two things are optional, and everything works without them:
 
 - **Home screen:** three rows (TV Shows, Anime, Movies), each showing your 5–6 most popular titles and a **Show more** tile for the full list.
   - Movies are ordered by box office, TV shows by TMDB popularity, and anime by MyAnimeList members.
+- **Colour theme:** **Settings → Look**: Violet, Crimson, Ocean, Emerald, Sunset, Rose or Mono. It changes the whole app and the built-in player's controls.
 - **About:** at the bottom of the home screen, what the app does in a few lines (**Hide this** to put it away).
 - **Top bar:** the sections (folded into **Browse ▾** when the window is narrow, or while you search), the search (click the magnifier), **Sort ▾**, a **Genre** filter, **🎲 Surprise me**, **Torrents** (once you have one), **Watch together** and **Settings**.
 - **Sort ▾:** most popular, newest or oldest release, **date added** (newest or oldest first), **recently opened**, **recently played**, rating, **your review**, or title A–Z / Z–A. Your choice is remembered.
 - **🎲 Surprise me:** picks something from your list for you. Narrow it down by type, the time you have (under 30 minutes, about an hour, a whole evening), something new or something to carry on with, genre, or only what's on your computer. **Pick another** rolls again.
-- **Adding titles:** use **+** in any row. The summary, ratings, cast, seasons and trailer are filled in automatically, from TMDB for movies and TV and from MyAnimeList for anime.
+- **Adding titles:** use **+** in any row. It's in your list the moment you click: the summary, ratings, cast, seasons and trailer are filled in right after, in the background (from TMDB for movies and TV and from MyAnimeList for anime), and that carries on even if you close the window or the app (it finishes the next time it opens).
   - Anime always come from MyAnimeList: adding an anime from TMDB (say from TV Shows) adds its MyAnimeList entry instead.
   - An anime added from TMDB before this version shows **Use MyAnimeList instead** on its page (also in **⋯ → Use MyAnimeList info**). Pick the right entry: its files, where you're up to, folders and collections are kept, episode numbers are converted (TMDB's season 2 episode 3 becomes episode 10 when season 1 had 7), and it moves to Anime. If that entry is already in your list, the two become one.
 - **Folders:** on the TV Shows, Anime and Movies pages, click **New folder** to make your own folders. Drag a poster onto a folder to move it there, or right-click a poster (or use **⋯**) → **Move to folder**. A title is in one folder at a time.
 - **Collections:** these can mix TV shows, anime and movies, and a title can be in several. Find them on the **Collections** page.
   - **Share** (next to each collection) gives a share code to paste into any chat, or **Save as a file instead** (saved to your Downloads folder). Only the titles are shared: no files, progress or keys.
-  - **Open a shared collection…** (top of the Collections page): paste the code or choose the file to see every title, then **Add it to my list** adds the collection and the titles you don't have yet.
-- **Watched:** **⋯ → Mark as watched** on any title moves it out of your everyday rows (Home, TV Shows, Anime, Movies, Continue watching) into the **Watched** page, kept as your collection. **⋯ → Move back to my list** undoes it. Watched titles still show in collections and search, marked WATCHED.
+  - **Open a shared collection…** (top of the Collections page): paste the code or choose the file to see every title, then **Add the collection** adds it to your Collections with every title in it, straight away. Tick **Also add them to my watch list** to have the titles you don't have in your everyday rows (TV Shows, Anime, Movies) too; unticked, they're only in that collection, and **+ Add to my list** on a title's page adds one later.
+- **Watched:** **✓ Watched it all** on a title's page (or **⋯ → Mark as watched**) on any title moves it out of your everyday rows (Home, TV Shows, Anime, Movies, Continue watching) into the **Watched** page, kept as your collection. **⋯ → Move back to my list** undoes it. Watched titles still show in collections and search, marked WATCHED.
 - **Continue watching:** the first row on the home screen. Click a poster to carry on where you stopped.
 - **Title page:** backdrop, summary, ratings and an episode list. The trailer only plays when you click it.
   - **Personal Review:** give it 1 to 5 stars and, if you like, a few words. Only for you: it stays in the app (and syncs with your list). Sort by **Your review** to see your favourites first.
   - **See how the episodes are connected:** every episode and the file it plays from (your downloads, the title's own folder or a torrent's file). **Change…** next to a file sets which episode it is (or that it isn't part of this title, or to go by its name again); **Choose a file…** on an episode without one picks its file. **Sort again** forgets how the title's files were matched and works them out from scratch (with your AI helper, if you have one).
-  - **Everything connected**, on the right: press **Find everything connected** to find every season, sequel, prequel, OVA, ONA, special, film and spin-off. A progress bar shows how far along it is: MyAnimeList's relations and your AI helper are asked at the same time, and titles are checked several at once. When it's done, the **story guide** opens (and **Open the story guide** brings it back):
+  - **Everything connected**, on the right: press **Find everything connected** to find every season, sequel, prequel, OVA, ONA, special, film and spin-off. A progress bar shows how far along it is, what's found shows as soon as it's found (MyAnimeList's links come in a few seconds; your AI helper's finds follow), and **Cancel** stops it, keeping what was found.
+    - **The same story** comes first, by kind. A spin-off finds the show it comes from, even a brand-new one, from its summary ("a spin-off of Rick and Morty").
+    - **Other versions & related series** come after: reboots, other continuities and other series or films of the franchise (for Spider-Man: Brand New Day, the earlier Spider-Man films, Spider-Verse and the animated series).
+    - When it's done, the **story guide** opens (and **Open the story guide** brings it back):
     - At the top, how the whole franchise fits together and the best way into it, and how many titles are complete on your computer, partly downloaded or missing.
     - Every title in **Release order** or **Story order** (the order things happen in the story), numbered. Each one says how it connects to the main story, when to watch it, whether it's canon, anime-original, non-canon or a recap, and whether it's essential, recommended, optional or skippable, plus what it's about.
     - Everything is spoiler-free; switch on **Show spoilers** to also see how each one ties into the story.
@@ -50,7 +54,10 @@ Two things are optional, and everything works without them:
     - Results come 50 at a time, with **Show 50 more**. For example: Movies, Horror, 2025, Highest rated lists every horror film of 2025.
     - TMDB has no Horror, Romance, Thriller, Fantasy or Science fiction genre of their own for TV shows, so those use TMDB's tags.
     - Anime come only from MyAnimeList's official API, with your Client ID. Its API can't search by genre, so the first time you open Find Media the app collects every anime from MyAnimeList's popularity ranking, with their genres (about 30,000, a minute or two in the background), keeps them in your data folder and refreshes them weekly. Anime results fill in while that runs. Like MyAnimeList's genre pages, every anime of a genre can then be sorted by popularity, score or date.
-  - **I'm in the mood for…:** tell your AI helper what you feel like watching: a sentence, a few words, a single word ("cozy") or a title ("like Frieren"). Titles whose name matches what you typed show straight away, and a progress bar follows the AI while it picks a few titles from your list and about a dozen new ones, each with a reason. It may ask one or two questions first. New titles are checked on MyAnimeList / TMDB, so made-up ones don't show.
+  - **I'm in the mood for…:** first pick **Films**, **TV shows**, **Anime** or **Anything**, then type what you feel like: a title (typos are fine: "indterstella" is Interstellar), a single word ("cozy"), or a sentence.
+    - When it's a title, **Like it** shows titles like it in a couple of seconds (from TMDB's and MyAnimeList's recommendations).
+    - Your AI helper then adds **Picked for you**, knowing what you meant and what's new and popular right now (so a new film with the same feel can come up), and **From your list**. Each pick is checked on MyAnimeList / TMDB and shows the moment it is. It never stops to ask questions.
+    - **Cancel** (or Esc) stops it. Without an AI key you still get the titles like the one you typed.
   - Click any poster for its summary; **+ Add** puts it in your list, and titles already in it say so.
 - **Import from MyAnimeList:** **Settings → Import my MyAnimeList list…** brings in your list by user name (if it's public) or from MyAnimeList's export file. Your watched episodes set where you're up to.
 - **Downloads:** choose the one folder your downloads go into (**Settings → Your downloads**).
@@ -72,7 +79,7 @@ Two things are optional, and everything works without them:
   - **On your computer:** it plays the episode you're up to in the **built-in player** (mpv), followed by the next episodes in order, with matching `.srt`/`.ass` subtitles.
     - The player handles MKV and HEVC files, several audio and subtitle tracks, and fully styled anime subtitles.
     - It remembers where you stopped, even on your other computer, and resumes from there. An episode counts as watched once you reach the end credits, and you move on to the next one.
-    - Its controls are modern and light: a slim timeline that shows chapters (openings and endings highlighted), and buffering, with subtitle, audio, speed, playlist and fullscreen buttons, in the app's colours.
+    - Its controls are modern and light: play/pause, previous/next, a slim timeline that shows chapters (openings and endings highlighted) and buffering, with subtitle, audio, chapter, speed, playlist and fullscreen buttons, in the app's colour theme.
     - **Play in VLC** on the title page, or **Open in VLC instead** while something is playing, switches to VLC at the same spot.
     - **Settings → Player** can also be **Another player of your choice**: pick one the app found (MPC-HC, PotPlayer, IINA, Infuse…) or **Browse** to any player. The file (or a torrent's stream) is handed to it; the built-in player is still needed for watch parties, skipping openings and remembering where you stopped.
     - Click any episode in the episode list to play it, or use **Choose file…** to pick any file.
@@ -82,7 +89,7 @@ Two things are optional, and everything works without them:
     - **Watch online** shows them all with ✓ or ✗ for whether each has it, and opens the one you pick; **Best match** opens the first in your order that fits.
     - Nothing is opened that you didn't add. When none of them fits, it says so, and you can pick one anyway or add a site. (Earlier versions opened everythingmoe.com then; add it as your own site if you'd like that back.)
     - They open in your browser (see **Browser** below). The app only opens the search; it doesn't read or play anything from the site.
-  - **Deleting an episode:** the bin button next to an episode's file. Your own files go to the Recycle Bin / Trash (so you can put them back); a torrent's is deleted. Your own files are never deleted by the app itself.
+  - **Deleting an episode:** the bin button next to an episode's file. Your own files go to the Recycle Bin / Trash (so you can put them back); a torrent's file is deleted for good (not to the Recycle Bin), the same as the ones deleted after you watch them. Your own files are never deleted by the app itself.
 - **When a file doesn't work:** press **Not working**. It's in the play window, and in the **On your PC** section of the title page.
   - Watch now then goes online for that title, and its poster shows **FILE ISSUE**.
   - Fix it later from the title page with **Choose file…** or **Use a different folder…**, or press **It works now**.
@@ -96,6 +103,7 @@ On a show's page, under **Stream from a torrent**, paste its **magnet link**.
 - **Keep downloaded episodes** (on the show's page): off, an episode you watch to the end credits is deleted **5 minutes** later; one you stop part way through is kept. On, they stay. The bin button next to an episode deletes it any time.
 - **Torrents window** (the download icon at the top, or **Files & downloads…**): every torrent and file, live: progress, speed, peers. Each torrent folds open and closed (**Expand all / Collapse all**), its files are grouped in their folders (each folder folds too), and full file names are shown. **Filter** finds files by name, episode or folder, and **Videos only** hides the rest. Choose which files download and how urgently (**Skip / Normal / High / Now**, for subtitles or extras too), say which episode a file is if it was matched wrong, delete files, pause, resume, open the folder, or remove a torrent.
 - Files go in **Watchlist torrents** inside your downloads folder (download sorting skips that folder). Episodes you've finished downloading count as on your computer.
+- **A torrent stops when it's done:** once everything you want from it is downloaded, it stops completely (no more uploading in the background) and shows **Done**. It starts again by itself when you play or ask for something it doesn't have yet.
 - It's as fast as the torrent: with few people sharing it, or a download slower than the video, it pauses to buffer. While a torrent downloads it also uploads to others in it, as torrents do. The first time, Windows may ask whether Watch Anything may accept connections.
 - **Packs** (a whole franchise in one torrent, like "Haikyuu!! S01+02+03+04+Movies+OVAs"): see below. Adding the same pack on another of its titles just shows it there.
 - **Watch parties** work with streamed episodes: see **Watch together** below.
@@ -136,20 +144,23 @@ Each file then shows up on its own title, numbered the way MyAnimeList numbers i
 
 Watch an episode or a film in step with people on other computers. Each of you plays your own copy (a download or the same torrent) in the built-in player; when anyone pauses, presses play or skips, everyone's player does the same. Nothing else needs installing: the app talks to Syncplay's free public server itself.
 
-**The party lives in its own panel**, not in the player: the **Watch together** button at the top opens it, and on Windows and Mac **⧉** pops it out into its own small window. Closing the player doesn't end the party, and you can play another episode or title without leaving it.
+**The party lives in its own panel**, not in the player: the **Watch together** button at the top opens it, and on Windows and Mac **⧉** pops it out into its own small window that stays above every other window (the player too); **📌** lets it go behind, and it can be minimised like any window.
 
-1. **Host:** click **Watch together** at the top (or on a title's page), and **Start a watch party**, with or without something playing yet. Copy the invite code (it starts with `WLP1.`) and send it.
+1. **Host:** click **Watch together** at the top (or on a title's page), and **Start a watch party**, with or without something playing yet. Copy the invite code (it starts with `WLP1.`) and send it. When you're streaming a torrent, the invite carries it (the exact file), so your guests' apps start downloading it the moment they join.
 2. **Guests:** click **Watch together** at the top, paste the code and click **Join**.
-3. Whatever the host plays, each guest's app gets the same thing ready by itself:
-   - **The host streams a torrent:** the guest's app adds the same torrent (the same magnet) and gets that episode ready, with a load bar.
+3. **While a party is on, everything the host plays is for the party**, from any title (the play window says so at the top), always in the built-in player. Each guest's app gets the same thing ready by itself, **at the same time as the host's**, not after:
+   - **The host streams a torrent:** the guest's app adds the same torrent and downloads that exact file (without working out the whole torrent first), straight from the host too when it can, with a load bar.
    - **The host plays a downloaded file:** the guest's app finds the same episode in their own downloads (even if it's named differently or not sorted yet), and adds the show to their list if needed. If it isn't there, they're asked to choose the file.
-4. Everyone sees everyone in the panel: **Watching**, **On the way** (with how far along, and the time left) or **Needs the file**. The host also gets a note in the player when someone is ready. Press **Space** to start for everyone.
+4. The host's player waits, paused, until everyone has it ready, then plays for all of you (or press **Space** to start anyway). Everyone sees everyone in the panel, with their picture: **Watching**, **On the way** (with how far along, and the time left) or **Needs the file**.
 
 While you watch:
 
 - When the host moves on to the next episode (or another title), everyone's app gets it ready the same way.
-- **A guest can leave** any time (**Leave the party**): the host and everyone else carry on. **When the host ends the party** (or closes its window), it ends for everyone.
+- **When the host closes the player**, everyone's player closes too; the party stays on for whatever's next.
+- **Watch online** while hosting opens the same page on your guests' computers too (in their own browser).
+- **A guest can leave** any time (**Leave the party**): the host and everyone else carry on. **When the host ends the party**, it ends for everyone.
 - Messages appear in the player when someone joins, leaves, pauses or skips.
+- **Your name and picture:** **Settings → Watch together** (**Choose a picture…**). The picture is made small and shown to everyone in the parties you're in.
 - Someone using the Syncplay app can join too, with the server and room name shown under the invite.
 
 The free public server (`syncplay.pl:8999`) is used unless you change it in **Settings → Watch together**. The connection is encrypted when the server allows it.
@@ -261,7 +272,7 @@ If you'd rather run the Python code directly:
 Your streaming services, sites and YouTube trailers open in the browser you choose in **Settings → Browser**:
 
 - **Recommended:** Opera GX when it's installed, otherwise your default browser.
-- **Built-in browser:** a simple window of the app itself, for sites that don't need a full browser.
+- **Built-in browser:** a simple window of the app itself. Sites you sign in to there (HBO Max, Crunchyroll…) remember you, even after you close the app. **Sign out of every site in the built-in browser** (under Browser in Settings) forgets every login.
 - **Any browser found on your computer** (Chrome, Edge, Firefox, Brave, Opera, Safari…), listed by name.
 - **Another… (Browse):** pick any browser's program (`.exe` on Windows, the app in Applications on a Mac).
 
