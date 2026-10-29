@@ -36,13 +36,14 @@ from pathlib import Path
 from . import ai, library, metadata, packs, scanner
 
 MAX_SITES = 10
+TYPES = ("anime", "tv", "movie")
 MAX_PAGE = 4 * 1024 * 1024
 MAX_TORRENT_FILE = 8 * 1024 * 1024
 OPEN_PAGES = 10          # result pages opened to find a magnet
 CHECK = 6                # torrents whose list of files is fetched
 PEEK_WAIT = 30           # seconds to wait for those lists
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-      "Chrome/128.0 Safari/537.36 Watchlist")
+      "Chrome/128.0 Safari/537.36 WatchAnything")
 
 
 class SiteError(Exception):
@@ -76,9 +77,15 @@ def clean(sites):
         if sid in seen:
             sid = new_id()
         seen.add(sid)
+        types = [t for t in TYPES if t in (x.get("types") or [])] or (
+            ["anime"] if "types" not in x else list(TYPES))          # (sites added before types were anime only)
         out.append({"id": sid, "name": name or urllib.parse.urlsplit(url).hostname or "My site", "url": url,
-                    "on": bool(x.get("on", True))})
+                    "types": types, "on": bool(x.get("on", True))})
     return out
+
+
+def sites_for(settings, item_type):
+    return [s for s in settings.get("torrent_sites") or [] if s["on"] and item_type in (s.get("types") or ["anime"])]
 
 
 def search_url(site, query):
@@ -477,14 +484,17 @@ class Finder:
 
     def _run(self):
         settings = self.app.settings.get()
-        sites = [s for s in settings.get("torrent_sites") or [] if s["on"]]
         item = self.item
+        sites = sites_for(settings, item["type"])
         if not sites:
-            raise SiteError("add your torrent site in Settings first")
-        if item.get("source") != "mal" or not settings.get("mal_client_id"):
-            raise SiteError("this works for anime from MyAnimeList (with a MyAnimeList Client ID in Settings)")
-        self.stage("Getting the series from MyAnimeList…")
-        ents = packs.entries(settings, item["source_id"])
+            kind = {"anime": "anime", "tv": "TV shows", "movie": "movies"}[item["type"]]
+            raise SiteError(f"add a torrent site for {kind} in Settings first")
+        if item.get("source") == "mal" and settings.get("mal_client_id"):
+            # An anime: every season, film and OVA is its own entry on MyAnimeList (packs.py).
+            self.stage("Getting the series from MyAnimeList…")
+            ents = packs.entries(settings, item["source_id"])
+        else:
+            ents = []
         me = next((e for e in ents if e["source_id"] == item["source_id"]), None)
         item_names = list(dict.fromkeys(n for n in [item["title"], item.get("original_title"), *(item.get("aliases") or [])]
                                         if n))[:6]
@@ -520,7 +530,7 @@ class Finder:
             mine = _entry_fit(r["name"], me, common) if me else 0
             elsewhere = max((_entry_fit(r["name"], e, common) for e in others), default=0)
             r["elsewhere"] = elsewhere >= 60 and elsewhere > mine and not r["release"]["pack"]
-        wanted = me["episodes"] if me and me.get("episodes") else None
+        wanted = me["episodes"] if me and me.get("episodes") else self._season_wanted()[1]
         found = [r for r in found if r["about"] >= 60 and not r["release"]["bad"]]
         film = item.get("format") == "movie" or (wanted == 1)
         if not film:
@@ -648,9 +658,15 @@ class Finder:
         base = packs._base(library.norm(romaji or item["title"]))
         if common:
             base = " ".join(w for w in library.norm(romaji or item["title"]).split() if w in common) or base
-        if base and base.lower() not in (x.lower() for x in out):
+        if base and base.lower() not in (x.lower() for x in out) and item.get("source") == "mal":
             out.append(base)
-        return out[:3]
+        title = " ".join(re.sub(r"[^\w\s'-]", " ", item["title"]).split())
+        if item.get("format") == "movie" and item.get("year"):
+            out.insert(0, f"{title} {item['year']}")          # films: with the year, then without
+        elif item.get("source") != "mal" and item.get("format") == "series":
+            season = (item.get("progress") or {}).get("season") or 1
+            out.insert(1, f"{title} S{season:02d}")           # the season you're on, then the whole show
+        return list(dict.fromkeys(out))[:4]
 
     @staticmethod
     def _unique(rows):
@@ -714,11 +730,23 @@ class Finder:
         return {"hash": t["hash"], "files": t["files"], "trackers": t["trackers"],
                 "size": sum(f["size"] for f in t["files"])}
 
+    def _season_wanted(self):
+        """(season, episodes in it) a TV show's torrent should have: the season you're on."""
+        item = self.item
+        if item.get("format") == "movie" or item.get("source") == "mal":
+            return None, None
+        season = (item.get("progress") or {}).get("season") or 1
+        count = next((x["episodes"] for x in item.get("seasons") or [] if x["number"] == season), None)
+        return season, count
+
     def _cover(self, settings, r, ents):
         """How much of this title a torrent really has, from its list of files."""
         files = [{"key": f["index"], "rel": f["path"], "size": f["size"]} for f in r.get("files") or []
                  if Path(f["path"]).suffix.lower() in scanner.VIDEO_EXTS]
         if not files:
+            return
+        if not ents:
+            self._cover_plain(r, files)
             return
         result = packs.plan(settings, self.item["source_id"], files, use_ai=False, ents=ents)
         sid = self.item["source_id"]
@@ -741,6 +769,26 @@ class Finder:
         r["complete"] = bool(r["has"]) and (r["has"] >= (r["wanted"] or r["has"]))
         r["others"] = len(others)
         r["file_resolution"] = best_res
+
+    def _cover_plain(self, r, files):
+        """A TV show (the season you're on) or a film, from TMDB."""
+        from .torrents import Torrents
+        item = self.item
+        videos = [dict(Torrents._describe(f["rel"], f["size"]), path=f["rel"]) for f in files]
+        videos = [v for v in videos if v.get("kind") != "extra"]
+        r["file_resolution"] = max((quality(f["rel"]) for f in files), default=0)
+        r["others"] = 0
+        if item.get("format") == "movie":
+            big = [v for v in videos if (v.get("size") or 0) > 150 * 1024 * 1024 or len(videos) == 1]
+            r["has"], r["wanted"] = (1 if big else 0), 1
+        else:
+            season, wanted = self._season_wanted()
+            found = scanner.episode_map(item, videos)
+            r["has"] = len({e for s, e in found if s == season})
+            r["wanted"] = wanted or r["has"]
+            r["season"] = season
+            r["seasons"] = sorted({s for s, _ in found if s})
+        r["complete"] = bool(r["has"]) and r["has"] >= r["wanted"]
 
     def _final_score(self, r, wanted):
         score = r["score"]
@@ -797,6 +845,7 @@ class Finder:
                 "seeders": r.get("live_seeders", r.get("seeders")), "resolution": r.get("file_resolution") or rel["resolution"],
                 "bd": rel["bd"], "pack": rel["pack"], "has": r.get("has"), "wanted": r.get("wanted"),
                 "complete": r.get("complete"), "others": r.get("others", 0), "checked": "has" in r,
+                "season": r.get("season"), "seasons": r.get("seasons") or [],
                 "why": r.get("why", ""), "score": r.get("final"), "magnet": r.get("magnet") or "",
                 "files": [{"path": f["path"], "size": f["size"]} for f in (r.get("files") or [])][:400]}
 

@@ -170,7 +170,7 @@ class _Peeker:
 
 
 class Torrents:
-    SETTINGS = {"user_agent": "Watchlist", "listen_interfaces": "0.0.0.0:6881,[::]:6881",
+    SETTINGS = {"user_agent": "WatchAnything", "listen_interfaces": "0.0.0.0:6881,[::]:6881",
                 "enable_dht": True, "enable_lsd": True, "enable_upnp": True, "enable_natpmp": True}
 
     def __init__(self, app, data_dir):

@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from . import net
 
-UA = "Watchlist/1.0 (personal desktop app)"
+UA = "WatchAnything/1.0 (personal desktop app)"
 TIMEOUT = 15
 
 TMDB_API = "https://api.themoviedb.org/3"
@@ -411,7 +411,7 @@ class MAL:
     _FOLLOW = {"sequel", "prequel", "side_story", "parent_story", "full_story", "summary",
                "alternative_setting", "alternative_version", "spin_off"}
 
-    def franchise(self, mal_id, limit=45):
+    def franchise(self, mal_id, limit=45, on_progress=None):
         """Everything connected to an anime, following MyAnimeList's links from
         entry to entry (sequels of sequels, the OVAs of the second season...),
         up to `limit` entries. Each found entry is a summary with its "relation"
@@ -426,9 +426,11 @@ class MAL:
         frontier = [(start, None)]
         names = {}
         while frontier and len(found) < limit:
-            batch, frontier = frontier[:8], frontier[8:]
-            with ThreadPoolExecutor(4) as pool:
+            batch, frontier = frontier[:12], frontier[12:]
+            with ThreadPoolExecutor(8) as pool:
                 pages = list(pool.map(lambda job: self._expand(job[0], fields), batch))
+            if on_progress:
+                on_progress(len(found) + len(frontier))
             for (node_id, _parent), page in zip(batch, pages):
                 if not page:
                     continue

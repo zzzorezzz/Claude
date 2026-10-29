@@ -1,5 +1,8 @@
-"""Optional AI helpers, all with free keys: Google Gemini (aistudio.google.com),
-Groq (console.groq.com) and OpenRouter's free models (openrouter.ai).
+"""Optional AI helpers: three with free keys - Google Gemini (aistudio.google.com),
+Groq (console.groq.com) and OpenRouter's free models (openrouter.ai) - and any
+of your own: a service with the OpenAI-style API (OpenAI, DeepSeek, Mistral,
+xAI, Cerebras, Together, or one on your computer such as Ollama or LM Studio)
+or Anthropic's Claude. You choose the order they're asked in.
 
 Without any key the app's own rules and searches do everything. With keys,
 they're asked in that order: when one has run out for the day, is overloaded
@@ -48,9 +51,51 @@ class AIError(Exception):
 NEXT_MODEL = {"limit", "busy", "timeout", "model", "toolarge"}
 
 
+# Your own helpers: Settings → AI helpers → Add your own. "kind" is the API it speaks.
+CUSTOM_KINDS = ("openai", "anthropic")
+CUSTOM_PRESETS = [
+    {"name": "OpenAI (ChatGPT)", "kind": "openai", "url": "https://api.openai.com/v1", "keys": "platform.openai.com/api-keys"},
+    {"name": "Claude (Anthropic)", "kind": "anthropic", "url": "https://api.anthropic.com/v1", "keys": "console.anthropic.com"},
+    {"name": "DeepSeek", "kind": "openai", "url": "https://api.deepseek.com/v1", "keys": "platform.deepseek.com"},
+    {"name": "Mistral", "kind": "openai", "url": "https://api.mistral.ai/v1", "keys": "console.mistral.ai"},
+    {"name": "xAI (Grok)", "kind": "openai", "url": "https://api.x.ai/v1", "keys": "console.x.ai"},
+    {"name": "Cerebras", "kind": "openai", "url": "https://api.cerebras.ai/v1", "keys": "cloud.cerebras.ai"},
+    {"name": "Together AI", "kind": "openai", "url": "https://api.together.xyz/v1", "keys": "api.together.ai"},
+    {"name": "Ollama (on this computer)", "kind": "openai", "url": "http://localhost:11434/v1", "keys": ""},
+    {"name": "LM Studio (on this computer)", "kind": "openai", "url": "http://localhost:1234/v1", "keys": ""},
+]
+
+
+def custom_helpers(settings):
+    return {f"custom:{c['id']}": c for c in settings.get("ai_custom") or []}
+
+
+def key_of(settings, provider):
+    if provider in KEY_SETTINGS:
+        return (settings.get(KEY_SETTINGS[provider]) or "").strip()
+    conf = custom_helpers(settings).get(provider)
+    if not conf:
+        return ""
+    # A service on your own computer may need no key: its address stands in for one.
+    return (conf.get("key") or "").strip() or (conf["url"] if _is_local(conf["url"]) else "")
+
+
+def _is_local(url):
+    return re.match(r"https?://(localhost|127\.0\.0\.1|\[::1\])[:/]", url or "") is not None
+
+
+def order(settings):
+    """Every helper, in the order they're asked (Settings → AI helpers)."""
+    known = list(PROVIDERS) + list(custom_helpers(settings))
+    wanted = [p for p in settings.get("ai_order") or [] if p in known]
+    return wanted + [p for p in known if p not in wanted]
+
+
 def available(settings):
-    """The helpers that have a key, in the order they're tried."""
-    return [p for p in PROVIDERS if (settings.get(KEY_SETTINGS[p]) or "").strip()]
+    """The helpers that are set up, in the order they're tried."""
+    for pid, conf in custom_helpers(settings).items():
+        NAMES[pid] = conf["name"]
+    return [p for p in order(settings) if key_of(settings, p)]
 
 
 def parse_json(text):
@@ -418,7 +463,7 @@ class OpenRouter(_OpenAIStyle):
                  "llama-4", "mistral-small", "qwen3", "gemma", "gpt-oss-20b")
 
     def _headers(self):
-        return {"Authorization": f"Bearer {self.key}", "X-Title": "Watchlist"}
+        return {"Authorization": f"Bearer {self.key}", "X-Title": "Watch Anything"}
 
     def _usable(self, m):
         free = str(m.get("id", "")).endswith(":free")
@@ -439,11 +484,104 @@ class OpenRouter(_OpenAIStyle):
         return AIError(f"this free model is busy right now{where}", "limit")
 
 
+class Custom(_OpenAIStyle):
+    """Your own helper with the OpenAI-style chat API."""
+
+    def __init__(self, conf, key):
+        self.conf = conf
+        self.id = f"custom:{conf['id']}"
+        self.key = key
+        self.name = conf.get("name") or "Your AI"
+        self.API = conf["url"].rstrip("/")
+
+    def _headers(self):
+        key = (self.conf.get("key") or "").strip()
+        return {"Authorization": f"Bearer {key}"} if key else {}
+
+    def models(self):
+        if (self.conf.get("model") or "").strip():
+            return [self.conf["model"].strip()]
+        return super().models()
+
+    def _usable(self, m):
+        return not re.search(r"embed|whisper|tts|audio|image|dall-e|moderation|vision|transcribe|realtime|search",
+                             str(m.get("id", "")), re.I)
+
+    @classmethod
+    def rank(cls, names):
+        # Small, quick, cheap models first: these jobs are short.
+        quick = ("mini", "flash", "small", "haiku", "chat", "8b", "lite", "instant", "turbo")
+        return sorted(names, key=lambda n: (not any(q in n.lower() for q in quick), n))
+
+    def _call(self, model, prompt, timeout):
+        return super()._call(model, prompt + "\n\nAnswer with JSON only.", timeout)
+
+
+class Anthropic(_Provider):
+    """Anthropic's Claude, with your own key (console.anthropic.com)."""
+    VERSION = "2023-06-01"
+
+    def __init__(self, conf, key):
+        self.conf = conf
+        self.id = f"custom:{conf['id']}"
+        self.key = key
+        self.name = conf.get("name") or "Claude"
+        self.API = (conf.get("url") or "https://api.anthropic.com/v1").rstrip("/")
+
+    def _headers(self):
+        return {"x-api-key": self.conf.get("key") or "", "anthropic-version": self.VERSION}
+
+    def models(self):
+        if (self.conf.get("model") or "").strip():
+            return [self.conf["model"].strip()]
+        return super().models()
+
+    def _list(self):
+        data = net.request_json(f"{self.API}/models?limit=100", self.name, self._headers(), timeout=20)
+        return [m.get("id", "") for m in data.get("data", [])]
+
+    @classmethod
+    def rank(cls, names):
+        # The quick Haiku models first (newest first, as they're listed), then the rest.
+        return sorted(names, key=lambda n: ("haiku" not in n, "sonnet" not in n))
+
+    def _call(self, model, prompt, timeout):
+        body = {"model": model, "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt + "\n\nAnswer with JSON only."}]}
+        data = net.request_json(f"{self.API}/messages", self.name, self._headers(), body, timeout=timeout)
+        try:
+            return "".join(b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text")
+        except (AttributeError, TypeError):
+            raise AIError(f"{self.name} didn't answer", "refused") from None
+
+    def _error(self, e, model=""):
+        d = (e.detail or "").lower()
+        where = f" ({model})" if model else ""
+        if e.status is None:
+            return AIError(str(e), "timeout" if e.kind == "timeout" else "offline")
+        if e.status in (401, 403) and ("key" in d or "auth" in d or e.status == 401):
+            return AIError(f"{self.name} rejected your key - check it in Settings", "key")
+        if "credit balance" in d or e.status == 402:
+            return AIError(f"{self.name} says this account has no credit left", "credit")
+        if e.status == 429:
+            return AIError(f"the rate limit is used up for now{where}", "limit")
+        if e.status in (500, 502, 503, 529):
+            return AIError(f"{self.name} is overloaded right now{where}", "busy")
+        if e.status in (400, 404) and "model" in d:
+            return AIError(f"that model isn't available{where}", "model")
+        return AIError(f"{self.name} returned an error (HTTP {e.status}) {e.detail[:120]}".strip(), "other")
+
+
 _CLASSES = {"gemini": Gemini, "groq": Groq, "openrouter": OpenRouter}
 
 
-def helper(provider, key):
-    return _CLASSES[provider](key)
+def helper(provider, key, settings=None):
+    if provider in _CLASSES:
+        return _CLASSES[provider](key)
+    conf = custom_helpers(settings or {}).get(provider)
+    if not conf:
+        raise AIError("that AI helper isn't set up any more", "key")
+    return (Anthropic if conf.get("kind") == "anthropic" else Custom)(conf, key)
 
 
 def resting(settings):
@@ -451,7 +589,7 @@ def resting(settings):
     now = time.time()
     with _lock:
         return {p: (int(until - now), why) for (p, k), (until, why, _kind) in _resting.items()
-                if until > now and settings.get(KEY_SETTINGS[p], "").strip() == k}
+                if until > now and key_of(settings, p) == k}
 
 
 def _rest(provider, key, err):
@@ -469,14 +607,14 @@ def ask(settings, prompt, timeout=60, budget=None, fresh=False):
     errors = []
     now = time.time()
     for provider in available(settings):
-        key = settings[KEY_SETTINGS[provider]].strip()
+        key = key_of(settings, provider)
         with _lock:
             until, why, kind = _resting.get((provider, key), (0, "", ""))
         if until > now and not (fresh and kind in SHORT_RESTS):
             errors.append(f"{NAMES[provider]}: {why} (resting for {max(1, int((until - now) / 60))} min)")
             continue
         try:
-            reply, _model = helper(provider, key).ask(prompt, timeout, budget)
+            reply, _model = helper(provider, key, settings).ask(prompt, timeout, budget)
             return reply, provider
         except AIError as e:
             _rest(provider, key, e)
@@ -486,17 +624,19 @@ def ask(settings, prompt, timeout=60, budget=None, fresh=False):
     raise AIError("; ".join(errors))
 
 
-def test_key(provider, key):
+def test_key(provider, key, settings=None):
     """{"ok", "model" or "error", "tried": [...]} - quick enough for a Settings button.
     Several models are tried at once; the first to answer is used from then on."""
     log = []
     key = (key or "").strip()
+    if settings is not None:
+        available(settings)
     with _lock:
         _resting.pop((provider, key), None)   # you're checking it: give it a fresh chance
         for k in [k for k in _bad if k[0] == provider and k[1] == key]:
             del _bad[k]
     try:
-        _reply, model = helper(provider, key).probe('Reply with exactly this JSON: {"ok": true}', timeout=30, log=log)
+        _reply, model = helper(provider, key, settings).probe('Reply with exactly this JSON: {"ok": true}', timeout=30, log=log)
         return {"ok": True, "model": model, "tried": log}
     except AIError as e:
         return {"ok": False, "error": str(e), "kind": e.kind, "tried": log}
@@ -587,6 +727,23 @@ def connected_titles(settings, item):
     return out[:40]
 
 
+def streams_on(settings, item, region, services):
+    """Which of `services` (names) have a title to stream in a country, as the
+    AI knows it: {name: True/False}. Best knowledge, not live data."""
+    kind = "anime" if item.get("type") == "anime" else "TV series" if item.get("format") == "series" else "film"
+    prompt = (
+        f"Country code: {region}. For the {kind} \"{item['title']}\" ({item.get('year') or 'year unknown'}), "
+        "say for each of these streaming services whether it is available to stream there right now "
+        "(subscription, free or with ads; not rent or buy): " + ", ".join(json.dumps(n) for n in services) + ".\n"
+        "If you are not sure, say false.\n"
+        'Reply as JSON: {"available": {"<service name>": true or false, ...}}')
+    reply, _ = ask(settings, prompt, timeout=30, budget=45)
+    got = reply.get("available") if isinstance(reply, dict) else None
+    got = got if isinstance(got, dict) else {}
+    norm = {re.sub(r"\W", "", str(k)).lower(): v for k, v in got.items()}
+    return {n: norm.get(re.sub(r"\W", "", n).lower()) is True for n in services}
+
+
 GUIDE_CANON = ("canon", "anime original", "non-canon", "recap", "alternate version", "unknown")
 GUIDE_IMPORTANCE = ("essential", "recommended", "optional", "skippable")
 
@@ -658,9 +815,13 @@ def mood(settings, conversation, my_list, may_ask=True):
     talk = "\n".join(f'{"Them" if m["role"] == "you" else "You"}: {m["text"]}' for m in conversation)
     prompt = (
         "You help someone choose something to watch: TV shows, anime or films.\n"
-        f"Their watchlist (what they've added, with how far they've got):\n{json.dumps(my_list, ensure_ascii=False)}\n\n"
+        f"Their watchlist (id|title|type|how far they've got):\n{chr(10).join(my_list)}\n\n"
         f"The conversation so far:\n{talk}\n\n"
-        + ("If you really need to know more to choose well, ask ONE short, friendly question and nothing else. "
+        "Read what they wrote generously, however they put it: it may be a whole sentence, casual speech, "
+        "a single word, a genre, a mood, an actor or just a title. A title means that title (if it's real) and "
+        "things like it; a word like 'zombies' or 'cozy' means titles about or feeling like that. Never ask what "
+        "they mean when they've given a title, a word or a genre - just recommend.\n"
+        + ("Only if what they want is truly unclear, ask ONE short, friendly question and nothing else. "
            "Otherwise recommend now.\n" if may_ask else "Recommend now; don't ask anything more.\n")
         + "To recommend: pick up to 5 titles from their watchlist that fit (by id), and about 12 new titles that "
           "aren't in it - real, released titles, anime named as on MyAnimeList, TV shows and films as on TMDB. "
@@ -668,7 +829,7 @@ def mood(settings, conversation, my_list, may_ask=True):
           'Reply as JSON, either {"question": "..."} or {"intro": "one short sentence", '
           '"from_list": [{"id": ..., "why": ...}], '
           '"new": [{"title": ..., "year": ..., "type": "anime" or "tv" or "movie", "why": ...}]}')
-    reply, provider = ask(settings, prompt, timeout=60, budget=120, fresh=True)
+    reply, provider = ask(settings, prompt, timeout=45, budget=80, fresh=True)
     if not isinstance(reply, dict):
         raise AIError("the answer wasn't readable")
     if reply.get("question") and may_ask and not reply.get("new"):

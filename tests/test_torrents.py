@@ -253,6 +253,43 @@ class TorrentTest(test_server.ServerBase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("End of file", result.stdout + result.stderr)
 
+    def test_a_guest_gets_the_hosts_torrent_ready_and_says_how_far_along(self):
+        item = self.app.store.get(self.item["id"])
+        reports = []
+        file_ = {"name": "[Group] Mystery Show - 02 [1080p].mkv", "duration": 1400,
+                 "watchlist": {"src": "mal", "id": "1", "type": "anime", "title": "Mystery Show",
+                               "season": 1, "episode": 2, "magnet": self.magnet, "label": "Mystery Show - S1 E2"}}
+
+        def connect_when_added():
+            for _ in range(400):
+                for h in list(self.app.torrents.handles):
+                    self.connected(h)
+                    return
+                time.sleep(0.05)
+        import threading
+        threading.Thread(target=connect_when_added, daemon=True).start()
+        entry = self.app.party_resolve(file_, report=lambda *a: reports.append(a), at=0.5)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["key"], "1:2")
+        self.assertEqual(entry["item_id"], item["id"])
+        self.assertEqual(reports[0][0], "preparing")             # finding the host's torrent's files
+        self.assertEqual(reports[0][3], "Mystery Show - S1 E2")
+
+    def test_a_guest_waits_for_the_part_the_room_is_at(self):
+        """A bigger episode: its progress, told to the room, until it's ready."""
+        steps = iter([{"need": 100, "have": h, "ready": h >= 100, "rate": 50_000, "peers": 3, "seeds": 1, "done": 0}
+                      for h in (0, 40, 80, 100)])
+        reports, asked = [], []
+        url = self.app.torrents.stream_url("ab" * 20, 1, "x.mkv")
+        with mock.patch.object(self.app.torrents, "parse_url", return_value=("ab" * 20, 1)), \
+                mock.patch.object(self.app.torrents, "buffer", side_effect=lambda h, i, at: asked.append(at) or next(steps)), \
+                mock.patch("watchlist.server.time.sleep"):
+            self.app._party_buffer({"path": url, "torrent": {"complete": False}}, lambda *a: reports.append(a),
+                                   "Mystery Show - S1 E3", at=0.5)
+        self.assertEqual([r[1] for r in reports], [0.0, 0.4, 0.8, 1.0])
+        self.assertEqual(asked, [0.5] * 4)                       # from where the room is
+        self.assertTrue(all(r[0] == "preparing" and r[3] == "Mystery Show - S1 E3" for r in reports))
+
     def test_getting_an_episode_ready_first(self):
         """Before the player opens: its start and end, from this file alone."""
         h = self.add()

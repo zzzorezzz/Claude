@@ -31,7 +31,7 @@ const ICON = {
 
 const S = {
   items: [], collections: [], status: {},
-  sort: 'popular',     // popular | newest | oldest
+  sort: (() => { try { return localStorage.getItem('sort') || 'popular'; } catch { return 'popular'; } })(),   // see SORTS
   genre: '',
   query: '',
   featured: null,
@@ -65,7 +65,7 @@ async function api(method, path, body) {
   try {
     res = await fetch(path, opts);
   } catch {
-    throw new Error('The Watchlist window lost its connection - is the app still running?');
+    throw new Error('The Watch Anything window lost its connection - is the app still running?');
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `request failed (${res.status})`);
@@ -91,7 +91,8 @@ const epLabel = (p) => `S${p.season} E${p.episode}`;
 const isSeries = (item) => item.format === 'series';
 const isMac = () => S.status.platform === 'darwin';
 const pcName = () => (isMac() ? 'Mac' : 'PC');
-const browserName = () => (/opera\s*gx/i.test(S.status.browser || '') ? 'Opera GX' : 'your browser');
+const browserName = () => (S.status.browser === 'builtin' ? 'a window of this app'
+  : /opera\s*gx/i.test(S.status.browser || '') ? 'Opera GX' : 'your browser');
 const findItem = (id) => S.items.find((i) => i.id === id);
 
 function upsert(item) {
@@ -101,9 +102,8 @@ function upsert(item) {
 
 async function reload() {
   const data = await api('GET', '/api/state');
-  if (S.status?.party && !data.status.party) {
-    api('GET', '/api/party').then((st) => { if (st.ended) toast(`The watch party ended: ${st.ended}`); }).catch(() => {});
-  }
+  // A party started or joined elsewhere (another window): its dock follows it.
+  if (data.status.party && !party.st?.active) pollParty();
   S.items = data.items;
   S.collections = data.collections;
   S.status = data.status;
@@ -181,11 +181,36 @@ function byPopularity(a, b) {
   const pa = popularity(a); const pb = popularity(b);
   return (pb[0] - pa[0]) || (pb[1] - pa[1]) || a.title.localeCompare(b.title);
 }
+// How the list can be sorted (the Sort menu at the top), and what each one says.
+const SORTS = [
+  ['popular', 'Most popular', 'most popular first'],
+  ['newest', 'Newest release', 'newest first'],
+  ['oldest', 'Oldest release', 'oldest first'],
+  ['added', 'Recently added', 'recently added first'],
+  ['added-old', 'Added longest ago', 'added longest ago first'],
+  ['opened', 'Recently opened', 'recently opened first'],
+  ['played', 'Recently watched', 'recently watched first'],
+  ['rating', 'Highest rated', 'highest rated first'],
+  ['review', 'Your rating', 'your highest rated first'],
+  ['az', 'A to Z', 'A to Z'],
+  ['za', 'Z to A', 'Z to A'],
+];
+const byTime = (key) => (a, b) => (b[key] || 0) - (a[key] || 0) || byPopularity(a, b);
 function sortItems(list) {
   const arr = [...list];
-  if (S.sort === 'newest') arr.sort((a, b) => (b.year || 0) - (a.year || 0) || byPopularity(a, b));
-  else if (S.sort === 'oldest') arr.sort((a, b) => (a.year || 9999) - (b.year || 9999) || byPopularity(a, b));
-  else arr.sort(byPopularity);
+  const sorts = {
+    newest: (a, b) => (b.year || 0) - (a.year || 0) || byPopularity(a, b),
+    oldest: (a, b) => (a.year || 9999) - (b.year || 9999) || byPopularity(a, b),
+    added: byTime('added'),
+    'added-old': (a, b) => (a.added || 0) - (b.added || 0) || byPopularity(a, b),
+    opened: byTime('opened_at'),
+    played: byTime('last_played'),
+    rating: (a, b) => (b.rating || 0) - (a.rating || 0) || byPopularity(a, b),
+    review: (a, b) => (b.review?.stars || 0) - (a.review?.stars || 0) || byTime('opened_at')(a, b),
+    az: (a, b) => a.title.localeCompare(b.title),
+    za: (a, b) => b.title.localeCompare(a.title),
+  };
+  arr.sort(sorts[S.sort] || byPopularity);
   return arr;
 }
 const applyGenre = (list) => (S.genre ? list.filter((i) => i.genres.includes(S.genre)) : list);
@@ -282,8 +307,9 @@ function renderNavButtons() {
   $('#btn-party').classList.toggle('in-party', !!S.status?.party);
   $('#btn-party').title = S.status?.party ? 'Your watch party' : 'Join a watch party';
   const yearBtn = $('#btn-year');
-  yearBtn.textContent = S.sort === 'newest' ? 'Newest ↓' : S.sort === 'oldest' ? 'Oldest ↑' : 'Popular';
-  yearBtn.title = S.sort === 'popular' ? 'Most popular first - click to sort by year' : `By year, ${S.sort} first - click to change`;
+  const sort = SORTS.find(([k]) => k === S.sort) || SORTS[0];
+  yearBtn.innerHTML = `${esc(sort[1])} <span class="caret">▾</span>`;
+  yearBtn.title = `Sorted: ${sort[2]} - click to change`;
   yearBtn.classList.toggle('on', S.sort !== 'popular');
   // The section links, folded into a menu when the window is narrow.
   const r = route();
@@ -294,9 +320,19 @@ function renderNavButtons() {
   genreBtn.classList.toggle('on', !!S.genre);
 }
 
-$('#btn-year').addEventListener('click', () => {
-  S.sort = { popular: 'newest', newest: 'oldest', oldest: 'popular' }[S.sort];
-  toast(S.sort === 'popular' ? 'Sorted by popularity' : `Sorted by year, ${S.sort} first`);
+$('#btn-year').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const menu = $('#sort-menu');
+  if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
+  menu.innerHTML = SORTS.map(([k, label]) => `<button data-sort="${k}" class="${k === S.sort ? 'sel' : ''}">${esc(label)}</button>`).join('');
+  menu.classList.remove('hidden');
+});
+$('#sort-menu').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-sort]');
+  if (!b) return;
+  S.sort = b.dataset.sort;
+  prefSet('sort', S.sort);
+  $('#sort-menu').classList.add('hidden');
   render();
 });
 
@@ -334,7 +370,7 @@ $('#genre-menu').addEventListener('click', (e) => {
   render();
 });
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('.dropdown')) { $('#genre-menu').classList.add('hidden'); $('#browse-menu').classList.add('hidden'); }
+  if (!e.target.closest('.dropdown')) { $('#genre-menu').classList.add('hidden'); $('#browse-menu').classList.add('hidden'); $('#sort-menu').classList.add('hidden'); }
   if (!e.target.closest('.ctx')) closeMenu();
 });
 
@@ -583,13 +619,13 @@ function renderHome(view) {
   if (!S.items.length) {
     view.innerHTML = `<section class="hero hero-empty"><div class="hero-content">
       <div class="hero-kind">WELCOME</div>
-      <h1>Your watchlist is empty</h1>
-      <p>Add the TV shows, anime and movies you plan to watch. Summaries, ratings and trailers are filled in for you.</p>
+      <h1>Welcome to Watch Anything</h1>
+      <p>Your own list of the shows, anime and movies you plan to watch - with your streaming services, your downloads and torrents all in one place. Add your first title to start; summaries, ratings and trailers are filled in for you.</p>
       <div class="btns">
         <button class="btn btn-white" data-add="tv">+ TV show</button>
         <button class="btn btn-white" data-add="anime">+ Anime</button>
         <button class="btn btn-white" data-add="movie">+ Movie</button>
-      </div></div></section>${setupBanner()}`;
+      </div></div></section>${aboutHTML(true)}${setupBanner()}`;
     return;
   }
   const downloaded = listed().filter(hasFiles);
@@ -606,8 +642,29 @@ function renderHome(view) {
     ${continueRowHTML()}
     ${downloadsSectionHTML()}
     <div class="section-head"><h2>Your list</h2><span class="muted small">everything you've added, downloaded or not</span></div>
-    ${rows}</div>`;
+    ${rows}${aboutHTML()}</div>`;
 }
+
+// What Watch Anything is for (at the bottom of the home screen; it can be hidden).
+function aboutHTML(always = false) {
+  let hidden = false;
+  try { hidden = localStorage.getItem('about-hidden') === '1'; } catch { /* storage off: show it */ }
+  if (hidden && !always) return '';
+  return `<section class="about-box" id="about">
+    <h2>About Watch Anything</h2>
+    <p>Watch Anything is an app for making your own watch list of the shows, anime and movies you plan to watch.
+      Connect all your streaming services in one place and open any title on the one that has it, watch what you've already
+      downloaded straight from your device, or stream and download legal torrents directly - with your progress kept for you.</p>
+    <div class="about-points"><span>📋 Your own watch list</span><span>📺 All your streaming services</span>
+      <span>💾 Your downloads, sorted</span><span>🧲 Legal torrents, streamed</span><span>👥 Watch together</span></div>
+    ${always ? '' : '<button class="btn btn-ghost btn-sm about-close" data-about="hide">Hide this</button>'}</section>`;
+}
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-about="hide"]')) {
+    try { localStorage.setItem('about-hidden', '1'); } catch { /* fine */ }
+    $('#about')?.remove();
+  }
+});
 
 function continueRowHTML() {
   const items = continueItems();
@@ -681,8 +738,7 @@ function renderDownloads(view, type) {
 }
 
 function sortLabel() {
-  return S.sort === 'newest' ? 'newest first' : S.sort === 'oldest' ? 'oldest first'
-    : 'most popular first';
+  return (SORTS.find(([k]) => k === S.sort) || SORTS[0])[2];
 }
 
 function renderCategory(view, type) {
@@ -756,14 +812,14 @@ function renderCollection(view, id) {
   </div>`;
 }
 
-/* ---- sharing a collection with someone else who has Watchlist */
+/* ---- sharing a collection with someone else who has Watch Anything */
 
 async function openShareCollection(id) {
   const col = S.collections.find((c) => c.id === id);
   if (!col) return;
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>Share "${esc(col.name)}"</h2>
-    <p class="sub">Anyone with Watchlist can open it with <b>Collections → Open a shared collection…</b>, see every title, and add the collection to their own list.
+    <p class="sub">Anyone with Watch Anything can open it with <b>Collections → Open a shared collection…</b>, see every title, and add the collection to their own list.
       Only the titles are shared - not your files, progress or keys.</p>
     <div id="share-out"><div class="spinner"></div></div></div>`, 'share-modal');
   try {
@@ -817,7 +873,7 @@ function openSharedCollection() {
           <b title="${esc(x.title)}">${esc(x.title)}</b>
           <small>${[{ tv: 'TV show', anime: 'Anime', movie: 'Movie' }[x.type], x.year, x.rating ? `★ ${fmtRating(x.rating)}` : ''].filter(Boolean).map(esc).join(' · ')}</small>
           ${x.in_list ? `<small class="ok">${ICON.check} In your list</small>` : ''}</div>`).join('')}</div>
-        <div class="btns"><button class="btn btn-red" data-s="import">Add it to my Watchlist</button></div>
+        <div class="btns"><button class="btn btn-red" data-s="import">Add it to my list</button></div>
         <p class="muted small">Adds a collection called "${esc(data.name)}" to your Collections${fresh ? `, and adds the ${fresh} title${fresh === 1 ? '' : 's'} you don't have yet to your list` : ' (every title in it is in your list already)'}.</p>`;
     } catch (e) { out.innerHTML = `<div class="warn">${esc(e.message)}</div>`; }
   };
@@ -839,7 +895,7 @@ function openSharedCollection() {
         await reload();
         toast(`Added "${r.collection.name}" - ${r.titles} title${r.titles === 1 ? '' : 's'}${r.failed ? ` (${r.failed} couldn't be found)` : ''}`);
         location.hash = `#/collections/${r.collection.id}`;
-      } catch (err) { fail(err); b.disabled = false; b.textContent = 'Add it to my Watchlist'; }
+      } catch (err) { fail(err); b.disabled = false; b.textContent = 'Add it to my list'; }
     }
   });
 }
@@ -1295,6 +1351,85 @@ function ago(t) {
   return `${Math.round(s / 86400)} d ago`;
 }
 
+const AI_FREE = {
+  gemini: ['Gemini (Google) - free', 'gemini_api_key', 'Go to <b>aistudio.google.com</b>, sign in with your Google account, click <b>Get API key</b> → Create API key. Google may use what\'s sent on the free tier to improve its products.'],
+  groq: ['Groq - free', 'groq_api_key', 'Go to <b>console.groq.com</b>, sign up (no card needed), open <b>API Keys</b> → Create API Key. Fast open models such as gpt-oss and Llama.'],
+  openrouter: ['OpenRouter - free models', 'openrouter_api_key', 'Go to <b>openrouter.ai</b>, sign up, open <b>Keys</b> → Create Key. Only its free models are used (about 50 requests a day, shared between them).'],
+};
+
+// Settings → AI helpers: the free three and your own, in the order they're asked.
+function drawAiList(wrap) {
+  const box = $('#ai-list', wrap);
+  if (!box) return;
+  const st = wrap.st.ai;
+  const ids = st.order;
+  box.innerHTML = ids.map((id, i) => {
+    const tools = `<div class="svc-tools">
+        <button type="button" class="svc-btn" data-s="ai-up" title="Ask it earlier" ${i ? '' : 'disabled'}>↑</button>
+        <button type="button" class="svc-btn" data-s="ai-down" title="Ask it later" ${i < ids.length - 1 ? '' : 'disabled'}>↓</button>
+        ${AI_FREE[id] ? '' : '<button type="button" class="svc-btn danger" data-s="ai-del" title="Remove">✕</button>'}</div>`;
+    if (AI_FREE[id]) {
+      const [label, field, help] = AI_FREE[id];
+      return `<div class="ai-row" data-id="${id}"><span class="ai-n">${i + 1}</span><div class="svc-main">${aiKeyRow(st.settings, st.status, id, label, field, help)}</div>${tools}</div>`;
+    }
+    const c = st.custom.find((x) => `custom:${x.id}` === id);
+    if (!c) return '';
+    const rest = (st.status.ai_resting || {})[id];
+    return `<div class="ai-row custom" data-id="${id}"><span class="ai-n">${i + 1}</span><div class="svc-main">
+        <div class="svc-line"><input class="input ai-name" value="${esc(c.name)}" placeholder="Name">
+          <select class="select ai-kind" title="The kind of API it has"><option value="openai" ${c.kind !== 'anthropic' ? 'selected' : ''}>OpenAI-style API</option><option value="anthropic" ${c.kind === 'anthropic' ? 'selected' : ''}>Anthropic (Claude) API</option></select></div>
+        <div class="svc-line"><input class="input ai-url" value="${esc(c.url)}" placeholder="https://api.example.com/v1" spellcheck="false"></div>
+        <div class="svc-line"><input class="input ai-key" type="password" value="${esc(c.key)}" placeholder="API key${/localhost|127\.0\.0\.1/.test(c.url) ? ' (not needed on your computer)' : ''}">
+          <input class="input ai-model" value="${esc(c.model)}" placeholder="Model (empty: the app picks a quick one)" spellcheck="false">
+          <button class="btn btn-ghost btn-sm" type="button" data-s="ai-test-custom">Test</button></div>
+        <small id="ai-out-custom-${esc(c.id)}">${rest ? `<span class="bad">Resting for ${Math.max(1, Math.round(rest[0] / 60))} min: ${esc(rest[1])}.</span> ` : ''}${c.keys ? `Get a key at <b>${esc(c.keys)}</b>.` : ''}</small>
+      </div>${tools}</div>`;
+  }).join('');
+}
+
+function readAiList(wrap) {
+  const st = wrap.st.ai;
+  $$('#ai-list .ai-row.custom', wrap).forEach((row) => {
+    const c = st.custom.find((x) => `custom:${x.id}` === row.dataset.id);
+    if (!c) return;
+    c.name = $('.ai-name', row).value.trim();
+    c.kind = $('.ai-kind', row).value;
+    c.url = $('.ai-url', row).value.trim();
+    c.key = $('.ai-key', row).value.trim();
+    c.model = $('.ai-model', row).value.trim();
+  });
+  // The free ones' keys are kept as typed too (they're redrawn when the order changes).
+  for (const [id, [, field]] of Object.entries(AI_FREE)) {
+    const input = $(`#ai-list [name="${field}"]`, wrap);
+    if (input) st.settings[field] = input.value;
+  }
+  return st;
+}
+
+async function aiListAction(wrap, a, btn) {
+  const st = readAiList(wrap);
+  const row = btn?.closest('[data-id]');
+  const i = row ? st.order.indexOf(row.dataset.id) : -1;
+  if (a === 'ai-up' && i > 0) [st.order[i - 1], st.order[i]] = [st.order[i], st.order[i - 1]];
+  else if (a === 'ai-down' && i >= 0 && i < st.order.length - 1) [st.order[i + 1], st.order[i]] = [st.order[i], st.order[i + 1]];
+  else if (a === 'ai-del') {
+    st.custom = st.custom.filter((c) => `custom:${c.id}` !== row.dataset.id);
+    st.order = st.order.filter((x) => x !== row.dataset.id);
+  } else if (a === 'ai-test-custom') {
+    const c = st.custom.find((x) => `custom:${x.id}` === row.dataset.id);
+    const out = $(`#ai-out-custom-${c.id}`, wrap);
+    out.innerHTML = '<span class="testing"><i></i>Testing…</span>';
+    btn.disabled = true;
+    try {
+      const r = await api('POST', '/api/settings/ai', { provider: 'custom', conf: c });
+      out.innerHTML = r.ok ? `<span class="ok">✓ Working</span> - using ${esc(r.model)}. Press Save to keep it.` : `<span class="bad">✗ ${esc(r.error)}</span>`;
+    } catch (err) { out.innerHTML = `<span class="bad">✗ ${esc(err.message)}</span>`; }
+    btn.disabled = false;
+    return;
+  }
+  drawAiList(wrap);
+}
+
 function aiKeyRow(s, st, provider, label, field, help) {
   const rest = (st.ai_resting || {})[provider];
   return `<label class="field"><span>${label}</span>
@@ -1395,7 +1530,7 @@ function findCardHTML(r, list, i, rank) {
 
 function findList(list) {
   const st = S.find;
-  return { top: st.top.results, search: st.search.results, 'mood-new': st.mood.result?.new, 'mood-list': st.mood.result?.from_list }[list] || [];
+  return { top: st.top.results, search: st.search.results, 'mood-new': st.mood.result?.new, 'mood-list': st.mood.result?.from_list, 'mood-quick': st.mood.quick }[list] || [];
 }
 
 function refreshFindCards() {
@@ -1560,28 +1695,53 @@ function drawFindMood(body) {
   const r = st.result;
   body.innerHTML = `<div class="mood">
     ${hasAi ? '' : '<div class="warn">This needs an AI helper. Add a free key (Gemini, Groq or OpenRouter) in Settings. <button class="btn btn-sm btn-white" data-f="settings">Open Settings</button></div>'}
-    <div class="chat">${bubbles || '<div class="bubble ai">What are you in the mood for? Describe it any way you like - a feeling, a genre, something like a show you loved, how much time you have…</div>'}
-      ${st.busy ? '<div class="bubble ai typing"><i></i><i></i><i></i></div>' : ''}</div>
+    <div class="chat">${bubbles || '<div class="bubble ai">What are you in the mood for? Say it any way you like - a title, a single word, a genre, a feeling, something like a show you loved…</div>'}
+      ${st.busy ? `<div class="bubble ai typing"><i></i><i></i><i></i></div>
+        <div class="mood-progress"><div class="pd-bar big"><i id="mood-bar" style="width:${moodPct(st)}%"></i></div><div class="small muted" id="mood-stage">${esc(moodStage(st))}</div></div>` : ''}</div>
+    ${st.quick?.length && !r ? `<div class="mood-quick"><h3>Matches for “${esc(st.quickFor)}” <span class="muted small">while ${esc((S.status.ai || ['the AI'])[0])} picks more</span></h3>
+      <div class="find-grid">${st.quick.map((x, i) => findCardHTML(x, 'mood-quick', i)).join('')}</div></div>` : ''}
     ${st.error ? `<div class="warn">${esc(st.error)}</div>` : ''}
     ${r ? '' : `<form class="mood-form" data-f="mood-form"><textarea class="input" name="text" rows="2" placeholder="e.g. something cosy and funny, not too long, like Spy x Family" ${hasAi ? '' : 'disabled'}></textarea>
       <button class="btn btn-red" type="submit" ${hasAi && !st.busy ? '' : 'disabled'}>Send</button></form>`}
     ${r ? `<div class="mood-result">${r.intro ? `<p class="mood-intro">${esc(r.intro)} <span class="muted small">- ${esc(r.by || 'AI')}</span></p>` : ''}
+      ${st.quick?.length ? `<h3>Matches for “${esc(st.quickFor)}”</h3><div class="find-grid">${st.quick.map((x, i) => findCardHTML(x, 'mood-quick', i)).join('')}</div>` : ''}
       ${r.from_list.length ? `<h3>From your list</h3><div class="find-grid">${r.from_list.map((x, i) => findCardHTML({ ...x, in_list: x.id }, 'mood-list', i)).join('')}</div>` : ''}
       ${r.new.length ? `<h3>New for you</h3><div class="find-grid">${r.new.map((x, i) => findCardHTML(x, 'mood-new', i)).join('')}</div>` : '<p class="muted">No new titles could be confirmed on TMDB / MyAnimeList this time.</p>'}
       <div class="center"><button class="btn btn-ghost" data-f="mood-again">Start over</button></div></div>` : ''}</div>`;
   if (!r) setTimeout(() => $('.mood-form textarea')?.focus(), 30);
 }
 
+// How far along the AI probably is (it doesn't say): quick at first, slowing near the end.
+const moodPct = (st) => Math.min(95, Math.round(100 * (1 - Math.exp(-((Date.now() - (st.started || Date.now())) / 1000) / 9))));
+function moodStage(st) {
+  const t = (Date.now() - (st.started || Date.now())) / 1000;
+  const who = (S.status.ai || ['the AI'])[0];
+  return t < 2 ? 'Reading what you asked…' : t < 14 ? `${who} is choosing…` : 'Checking the picks on MyAnimeList and TMDB…';
+}
+
 async function moodSend(text) {
   const st = S.find.mood;
   st.messages.push({ role: 'you', text });
-  st.busy = true; st.error = '';
+  st.busy = true; st.error = ''; st.started = Date.now();
   drawFind('mood');
+  const timer = setInterval(() => {
+    const bar = $('#mood-bar');
+    if (!bar) return;
+    bar.style.width = `${moodPct(st)}%`;
+    $('#mood-stage').textContent = moodStage(st);
+  }, 400);
+  // A title or a word: its matches straight away, while the AI thinks.
+  const quick = text.trim().split(/\s+/).length <= 6
+    ? api('POST', '/api/find/quick', { q: text }).then((q) => {
+      if (q.results.length) { st.quick = q.results; st.quickFor = text.trim(); if (findShowing('mood')) drawFind('mood'); }
+    }).catch(() => {}) : null;
   try {
     const r = await api('POST', '/api/find/mood', { messages: st.messages });
     if (r.question) st.messages.push({ role: 'ai', text: r.question });
     else st.result = r;
   } catch (e) { st.error = e.message; }
+  await quick;
+  clearInterval(timer);
   st.busy = false;
   if (findShowing('mood')) drawFind('mood');
 }
@@ -1868,113 +2028,167 @@ function openImportMal() {
 
 /* ======================================================== watch together */
 
-const PARTY_NOTE = '<p class="muted small">Each of you plays your own copy in the built-in player. Pausing, playing or skipping on either side does the same for both of you, the next episode follows along, and the party ends when the host closes their player.</p>';
+// A watch party lives in its own dock (or its own window), not in a player:
+// whatever the host plays, on any title, everyone follows; closing a player
+// doesn't end it, a guest leaving doesn't either; the host ending it does.
+const PARTY_NOTE = '<p class="muted small">Each of you plays your own copy in the built-in player: your own download, or the host\'s torrent streamed (made ready first, with its progress shown to everyone). Pausing, playing or skipping on either side does the same for all of you, and whatever the host plays next - another episode or another title - everyone moves to it.</p>';
+const PARTY_STATE = {
+  watching: ['ok', 'Watching'], finding: ['busy', 'On the way'], preparing: ['busy', 'On the way'],
+  'needs-file': ['bad', 'Needs the file'], idle: ['', 'Here'],
+};
+const party = { st: null, timer: null, open: true, endedShown: '' };
 
-function partyClicks(wrap) {
-  wrap.addEventListener('click', async (e) => {
-    const p = e.target.closest('[data-p]')?.dataset.p;
-    if (p === 'copy') {
-      const code = $('.party-code', wrap).textContent.trim();
-      navigator.clipboard?.writeText(code).then(() => toast('Invite copied - send it to them'), () => {
-        const r = document.createRange(); r.selectNodeContents($('.party-code', wrap));
-        getSelection().removeAllRanges(); getSelection().addRange(r);
-        toast('Press Ctrl+C (Cmd+C) to copy');
-      });
-    } else if (p === 'leave') {
-      try { await api('POST', '/api/party/leave'); toast('You left the watch party'); closeModal(wrap); } catch (err) { fail(err); }
-    }
-  });
+function partyPersonHTML(p, st) {
+  const [cls, word] = PARTY_STATE[p.state] || PARTY_STATE.idle;
+  const busy = p.state === 'preparing' || p.state === 'finding';
+  const pct = p.progress != null ? Math.floor(p.progress * 100) : null;
+  const eta = p.eta != null ? ` · ~${p.eta < 60 ? `${p.eta} s` : `${Math.ceil(p.eta / 60)} min`}` : '';
+  return `<div class="pd-person ${p.me ? 'me' : ''}">
+    <span class="pd-avatar">${esc((p.name || '?').slice(0, 1).toUpperCase())}</span>
+    <div class="pd-who"><b>${esc(p.name)}</b>${p.leader ? '<span class="pd-tag">host</span>' : ''}${p.me ? '<span class="pd-tag you">you</span>' : ''}
+      <div class="pd-state ${cls}">${busy ? '<span class="spin-dot"></span> ' : ''}${word}${busy && pct != null ? ` · ${pct}%${eta}` : ''}${p.state === 'watching' && p.label && !p.leader ? '' : p.label && p.state !== 'idle' && !p.leader ? ` · ${esc(p.label)}` : ''}</div>
+      ${busy ? `<div class="pd-bar"><i style="width:${pct || 0}%"></i></div>` : ''}</div></div>`;
 }
 
-// Who's there and what's playing, kept up to date while the window is open.
-function followParty(wrap, box) {
-  const draw = async () => {
-    if (!wrap.isConnected) return;
-    let st;
-    try { st = await api('GET', '/api/party'); } catch { st = null; }
-    if (st) {
-      box.innerHTML = st.active ? `<div class="party-live">
-          <div class="party-row"><span class="live-dot"></span><b>${st.role === 'host' ? 'Your watch party' : `${esc(st.leader || 'The host')}'s watch party`}</b>
-            <span class="muted small">${st.encrypted ? 'encrypted · ' : ''}${esc(st.server)}</span></div>
-          ${st.playing ? `<div class="small">Playing <b>${esc(st.playing)}</b></div>` : ''}
-          ${st.missing ? `<div class="warn small">They're playing ${esc(st.missing)}, which isn't in your downloads.</div>` : ''}
-          <div class="party-people">${st.people.map((p) => `<span class="person${p.me ? ' me' : ''}">${esc(p.name)}${p.me ? ' (you)' : ''}${p.file ? '' : ' <i>no file</i>'}</span>`).join('')}</div>
-          ${st.people.length < 2 && st.role === 'host' ? '<div class="muted small">Waiting for them to join…</div>' : ''}
-          <button class="btn btn-sm btn-ghost" data-p="leave">${st.role === 'host' ? 'End the watch party' : 'Leave'}</button></div>`
-        : st.ended ? `<div class="warn">The watch party ended: ${esc(st.ended)}.</div>` : '';
-    }
-    setTimeout(draw, 1500);
-  };
-  draw();
+function drawPartyDock() {
+  let dock = $('#party-dock');
+  const st = party.st;
+  const solo = document.body.classList.contains('party-window');
+  if (!st || (!st.active && !st.ended)) { dock?.remove(); return; }
+  if (!dock) {
+    dock = document.createElement('aside');
+    dock.id = 'party-dock';
+    document.body.append(dock);
+    dock.addEventListener('click', partyDockClick);
+  }
+  dock.classList.toggle('collapsed', !party.open && !solo);
+  if (!st.active) {
+    dock.innerHTML = `<div class="pd-head"><span class="pd-title">Watch party</span><button class="pd-icon" data-pd="close" title="Close">×</button></div>
+      <div class="pd-body"><div class="warn small">The watch party ended: ${esc(st.ended)}.</div></div>`;
+    return;
+  }
+  const host = st.role === 'host';
+  const mine = st.mine || {};
+  const myBusy = !host && (mine.status === 'preparing' || mine.status === 'finding');
+  const others = st.people.filter((p) => !p.me);
+  dock.innerHTML = `<div class="pd-head" data-pd="toggle">
+      <span class="live-dot"></span><span class="pd-title">${host ? 'Your watch party' : `${esc(st.leader || 'The host')}'s watch party`}</span>
+      <span class="pd-count">${st.people.length}</span>
+      ${S.status.windows && !solo ? `<button class="pd-icon" data-pd="popout" title="Open in its own window">⧉</button>` : ''}
+      ${solo ? '' : `<button class="pd-icon" data-pd="toggle" title="${party.open ? 'Minimise' : 'Open'}">${party.open ? '–' : '+'}</button>`}</div>
+    <div class="pd-body">
+      <div class="pd-now">${st.host_playing ? `${host ? 'You\'re playing' : `${esc(st.leader)} is playing`} <b>${esc(st.host_playing)}</b>`
+    : host ? 'Play anything - an episode or a film from any title - and everyone follows.' : `Waiting for ${esc(st.leader || 'the host')} to play something…`}</div>
+      ${myBusy ? `<div class="pd-mine"><div class="small"><span class="spin-dot"></span> Getting <b>${esc(mine.label || 'it')}</b> ready${mine.progress != null ? ` · ${Math.floor(mine.progress * 100)}%` : ''}${mine.eta != null ? ` · about ${mine.eta < 60 ? `${mine.eta} s` : `${Math.ceil(mine.eta / 60)} min`} left` : ''}</div>
+          <div class="pd-bar big"><i style="width:${Math.floor((mine.progress || 0) * 100)}%"></i></div>
+          <div class="muted small">Your player opens at the same moment as theirs once it's ready.</div></div>` : ''}
+      ${!host && mine.status === 'needs-file' ? `<div class="pd-mine warn small">You don't have <b>${esc(st.missing || mine.label || 'what they\'re playing')}</b>.
+          <div class="btns"><button class="btn btn-white btn-sm" data-pd="choose">Choose the file…</button></div></div>` : ''}
+      ${!host && st.host_playing && !st.player_open && !myBusy && mine.status !== 'needs-file' ? `<div class="btns"><button class="btn btn-white btn-sm" data-pd="follow">${ICON.play} Watch along again</button></div>` : ''}
+      <div class="pd-people">${st.people.map((p) => partyPersonHTML(p, st)).join('')}</div>
+      ${host && !others.length ? '<div class="muted small">Waiting for someone to join…</div>' : ''}
+      ${host && st.invite ? `<div class="pd-invite"><div class="small muted">Invite - they paste it into <b>Watch together</b> (${ICON.people} at the top):</div>
+          <div class="party-code-row"><code class="party-code">${esc(st.invite)}</code><button class="btn btn-sm btn-white" data-pd="copy">Copy</button></div></div>` : ''}
+      <div class="btns pd-actions"><button class="btn btn-sm btn-ghost danger" data-pd="leave">${host ? 'End the party for everyone' : 'Leave the party'}</button></div>
+    </div>`;
 }
 
-async function openStartParty(item) {
-  const series = isSeries(item);
-  // The same episodes, and files, the title page shows.
-  let local = {};
-  try { local = await api('GET', `/api/items/${item.id}/local`); } catch { /* the server says what's missing */ }
-  const byEp = local.by_episode || {};
-  const avail = series ? Object.keys(byEp).sort((a, b) => {
-    const [as, ae] = a.split(':').map(Number);
-    const [bs, be] = b.split(':').map(Number);
-    return as - bs || ae - be;
-  }) : [];
-  const current = `${item.progress.season}:${item.progress.episode}`;
-  const options = avail.map((k) => { const [s, n] = k.split(':').map(Number); return `<option value="${k}" ${k === current ? 'selected' : ''}>${esc(epLabel({ season: s, episode: n }))}</option>`; }).join('');
+async function partyDockClick(e) {
+  const a = e.target.closest('[data-pd]')?.dataset.pd;
+  if (!a) return;
+  e.stopPropagation();
+  try {
+    if (a === 'toggle') { party.open = !party.open; drawPartyDock(); }
+    else if (a === 'close') { party.st = null; party.endedShown = ''; drawPartyDock(); }
+    else if (a === 'popout') {
+      await api('POST', '/api/window', { kind: 'party' });
+      party.open = false; drawPartyDock();
+    } else if (a === 'copy') {
+      const code = party.st.invite;
+      navigator.clipboard?.writeText(code).then(() => toast('Invite copied - send it to them'), () => toast(code));
+    } else if (a === 'leave') {
+      const host = party.st.role === 'host';
+      if (host && !(await confirmModal('End the watch party?', 'It ends for everyone in it.', 'End it'))) return;
+      await api('POST', '/api/party/leave');
+      toast(host ? 'The watch party is over' : 'You left the watch party');
+      if (document.body.classList.contains('party-window')) window.close();
+      pollParty();
+    } else if (a === 'choose') {
+      const { path } = await api('POST', '/api/browse', { kind: 'file', title: 'Choose the episode to watch' });
+      if (path) { await api('POST', '/api/party/use-file', { path }); toast('Playing your copy'); }
+    } else if (a === 'follow') {
+      await api('POST', '/api/party/follow');
+    }
+  } catch (err) { fail(err); }
+}
+
+async function pollParty() {
+  clearTimeout(party.timer);
+  let st = null;
+  try { st = await api('GET', '/api/party'); } catch { /* the app is busy: next time */ }
+  if (st) {
+    const was = party.st;
+    if (st.active) party.st = st;
+    else if (was?.active) { party.st = st; party.open = true; }   // just ended: say so
+    else if (!was) party.st = null;
+    if (S.status) S.status.party = !!st.active;
+    renderNavButtons();
+  }
+  drawPartyDock();
+  if (party.st?.active || document.body.classList.contains('party-window')) party.timer = setTimeout(pollParty, 1000);
+}
+
+async function openStartParty(item = null) {
+  const inParty = party.st?.active;
+  let options = '', avail = [], local = {};
+  const series = item && isSeries(item);
+  const current = item ? `${item.progress.season}:${item.progress.episode}` : '';
+  if (item) {
+    try { local = await api('GET', `/api/items/${item.id}/local`); } catch { /* the server says what's missing */ }
+    const byEp = local.by_episode || {};
+    avail = series ? Object.keys(byEp).sort((a, b) => {
+      const [as, ae] = a.split(':').map(Number);
+      const [bs, be] = b.split(':').map(Number);
+      return as - bs || ae - be;
+    }) : [];
+    options = avail.map((k) => { const [s, n] = k.split(':').map(Number); return `<option value="${k}" ${k === current ? 'selected' : ''}>${esc(epLabel({ season: s, episode: n }))}</option>`; }).join('');
+  }
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
-    <h2>${ICON.people} Watch ${esc(item.title)} together</h2>
-    <p class="sub">With someone on another computer, kept in step over the internet.</p>
+    <h2>${ICON.people} ${item ? `Watch ${esc(item.title)} together` : 'Watch together'}</h2>
+    <p class="sub">With people on other computers, kept in step over the internet.</p>
     ${S.status.mpv ? '' : '<div class="warn">This needs the built-in player, which is missing.</div>'}
-    ${series && avail.length ? `<label class="field"><span>Episode</span><select class="select" id="party-ep">${options}</select></label>` : ''}
-    <div class="btns"><button class="btn btn-red" data-p="start">Start the watch party</button></div>
-    <div id="party-out"></div><div id="party-live"></div>${PARTY_NOTE}</div>`, 'party-modal');
-  partyClicks(wrap);
+    ${item && series && avail.length ? `<label class="field"><span>Episode</span><select class="select" id="party-ep">${options}</select></label>` : ''}
+    <div class="party-choice">
+      <div class="party-box"><h4>${inParty && party.st.role === 'host' ? 'Your party is on' : 'Host a party'}</h4>
+        <p class="muted small">${item ? 'Starts this for everyone. After that, whatever you play, they follow.' : 'Starts an empty party: send the invite, then play anything and everyone follows.'}</p>
+        <button class="btn btn-red" data-p="start">${inParty && party.st.role === 'host' ? (item ? 'Play this in the party' : 'Show the party') : 'Start the watch party'}</button></div>
+      ${item ? '' : `<div class="party-box"><h4>Join someone's party</h4>
+        <textarea class="input party-paste" rows="3" placeholder="Paste the invite (WLP1.…)"></textarea>
+        <div id="party-peek"></div>
+        <button class="btn btn-white" data-p="join" disabled>Join</button></div>`}
+    </div>
+    <div id="party-out"></div>${PARTY_NOTE}</div>`, 'party-modal');
+  const out = $('#party-out', wrap);
   $('[data-p="start"]', wrap).addEventListener('click', async (e) => {
+    if (!item && party.st?.active) { party.open = true; drawPartyDock(); closeModal(wrap); return; }
     const key = $('#party-ep', wrap)?.value || current;
-    const [season, episode] = key.split(':').map(Number);
-    const path = series ? byEp[key]?.path : local.target?.path;
+    const [season, episode] = (key || '1:1').split(':').map(Number);
+    const path = item ? (series ? local.by_episode?.[key]?.path : local.target?.path) : '';
     e.target.disabled = true;
     e.target.textContent = 'Starting…';
     try {
-      const r = await api('POST', '/api/party/start', { item_id: item.id, season, episode, path: path || '' });
-      if (!r.ok) { $('#party-out', wrap).innerHTML = `<div class="warn">${esc(r.message)}</div>`; return; }
-      e.target.closest('.btns').remove();
-      $('#party-ep', wrap)?.closest('.field').remove();
-      $('#party-out', wrap).innerHTML = `<div class="party-invite">
-        <p><b>The player is open, paused on ${esc(r.file)}.</b> Send this invite; they paste it into <b>Join a watch party</b> (the ${ICON.people} button at the top of their Watchlist):</p>
-        <div class="party-code-row"><code class="party-code">${esc(r.code)}</code><button class="btn btn-sm btn-white" data-p="copy">Copy</button></div>
-        <p class="muted small">When they've joined, press Space in the player to start for both of you.
-          Someone using the Syncplay app instead can join server <b>${esc(r.server)}</b>, room <b>${esc(r.room)}</b>.</p></div>`;
-      followParty(wrap, $('#party-live', wrap));
+      const r = await api('POST', '/api/party/start', item ? { item_id: item.id, season, episode, path: path || '' } : {});
+      if (r.need_file) out.innerHTML = `<div class="warn">${esc(r.message)}</div>`;
+      party.open = true;
+      await pollParty();
+      if (!r.need_file) { toast(r.file ? `Playing ${r.file} for the party` : 'Watch party on - send the invite'); closeModal(wrap); }
     } catch (err) {
-      $('#party-out', wrap).innerHTML = `<div class="warn">${esc(err.message)}</div>`;
-    } finally { e.target.disabled = false; if (e.target.isConnected) e.target.textContent = 'Start the watch party'; }
+      out.innerHTML = `<div class="warn">${esc(err.message)}</div>`;
+    } finally { if (e.target.isConnected) { e.target.disabled = false; e.target.textContent = 'Start the watch party'; } }
   });
-}
-
-async function openJoinParty() {
-  // In a party already: show it.
-  try {
-    const st = await api('GET', '/api/party');
-    if (st.active) {
-      const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
-        <h2>${ICON.people} Watch party</h2><div id="party-live"></div>${PARTY_NOTE}</div>`, 'party-modal');
-      partyClicks(wrap);
-      followParty(wrap, $('#party-live', wrap));
-      return;
-    }
-  } catch { /* show the join window */ }
-  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
-    <h2>${ICON.people} Join a watch party</h2>
-    <p class="sub">Paste the invite you were sent. It starts with WLP1.</p>
-    <textarea class="input party-paste" rows="3" placeholder="WLP1.…"></textarea>
-    <div id="party-peek"></div>
-    <div class="btns"><button class="btn btn-red" data-p="join" disabled>Join</button></div>
-    <div id="party-out"></div><div id="party-live"></div>${PARTY_NOTE}</div>`, 'party-modal');
-  partyClicks(wrap);
   const box = $('.party-paste', wrap);
+  if (!box) return;
   const join = $('[data-p="join"]', wrap);
-  box.focus();
   box.addEventListener('input', async () => {
     const code = box.value.trim();
     join.disabled = true;
@@ -1982,37 +2196,30 @@ async function openJoinParty() {
     if (!code) return;
     try {
       const inv = await api('POST', '/api/party/peek', { code });
-      $('#party-peek', wrap).innerHTML = `<div class="party-what">${esc(inv.title)}${inv.episode ? ` · ${esc(epLabel({ season: inv.season, episode: inv.episode }))}` : ''}
-        <span class="muted small">${inv.host ? `from ${esc(inv.host)} · ` : ''}${inv.in_list ? 'in your list' : 'not in your list yet - it will be added'}</span></div>`;
+      $('#party-peek', wrap).innerHTML = `<div class="party-what">${inv.host ? `${esc(inv.host)}'s party` : 'A watch party'}${inv.title ? ` · started with ${esc(inv.title)}` : ''}</div>`;
       join.disabled = false;
     } catch (err) {
       $('#party-peek', wrap).innerHTML = `<p class="bad small">${esc(err.message)}</p>`;
     }
   });
-  const go = async (path = '') => {
+  join.addEventListener('click', async () => {
     join.disabled = true;
     join.textContent = 'Joining…';
     try {
-      const r = await api('POST', '/api/party/join', { code: box.value.trim(), path });
-      if (r.ok) {
-        $('#party-out', wrap).innerHTML = `<p class="ok"><b>✓ Joined.</b> Playing your copy: ${esc(r.file)}. It starts when ${esc(r.leader || 'the host')} presses play.</p>`;
-        join.closest('.btns').remove();
-        box.remove();
-        followParty(wrap, $('#party-live', wrap));
-        await reload();
-        return;
-      }
-      $('#party-out', wrap).innerHTML = `<div class="warn">${esc(r.message)} <button class="btn btn-sm btn-white" data-p="choose">Choose the file…</button></div>`;
-      $('[data-p="choose"]', wrap).addEventListener('click', async () => {
-        const { path: chosen } = await api('POST', '/api/browse', { kind: 'file', title: 'Choose the episode to watch' });
-        if (chosen) go(chosen);
-      });
-      await reload();
+      const r = await api('POST', '/api/party/join', { code: box.value.trim() });
+      toast(`Joined ${r.leader || 'the'}'s watch party`);
+      party.open = true;
+      await pollParty();
+      closeModal(wrap);
     } catch (err) {
-      $('#party-out', wrap).innerHTML = `<div class="warn">${esc(err.message)}</div>`;
+      out.innerHTML = `<div class="warn">${esc(err.message)}</div>`;
     } finally { if (join.isConnected) { join.disabled = false; join.textContent = 'Join'; } }
-  };
-  join.addEventListener('click', () => go());
+  });
+}
+
+async function openJoinParty() {
+  if (party.st?.active) { party.open = true; drawPartyDock(); return; }
+  openStartParty(null);
 }
 
 /* ======================================================== collections */
@@ -2162,6 +2369,11 @@ function openTitle(id) {
   drawTitle(wrap);
   loadLocal(wrap);
   loadRelated(wrap);
+  // Remembered for "Recently opened" (quietly: the page isn't redrawn for it).
+  api('PUT', `/api/items/${id}`, { opened: true }).then((updated) => {
+    upsert(updated);
+    if (wrap.isConnected) wrap.dataset.sig = titleSig(updated);
+  }).catch(() => {});
 }
 
 function refreshOpenTitle() {
@@ -2253,7 +2465,11 @@ function drawTitle(wrap) {
       </div>
       <aside class="tm-side">${side.join('')}</aside>
     </div>
-    <section class="tm-section"><h3>On your ${pcName()}</h3><div class="folder-line" id="folder-line"></div></section>
+    <section class="tm-section review-section"><h3>Personal Review<span class="muted small review-note">just for you - it stays in this app</span></h3>
+      <div id="review">${reviewHTML(item, wrap.st.reviewEdit)}</div></section>
+    <section class="tm-section"><h3>On your ${pcName()}<span class="spacer"></span>
+      <button class="btn btn-ghost btn-sm" data-t="ep-links" title="Every ${series ? 'episode' : 'file'} and the file or torrent it plays from - change any of them">${series ? 'See how the episodes are connected' : 'See which file plays'}</button></h3>
+      <div class="folder-line" id="folder-line"></div></section>
     <section class="tm-section" id="torrent-section"><h3>Stream from a torrent<span class="spacer"></span>
       <button class="btn btn-ghost btn-sm" data-t="torrents-window">${ICON.download || '⇩'} Torrents window</button></h3>
       <div id="torrent-box"><div class="muted small">…</div></div></section>
@@ -2270,6 +2486,165 @@ function drawTitle(wrap) {
   modal.onclick = (e) => titleClick(wrap, e);
 }
 
+/* "See how the episodes are connected": every episode, the file or torrent it
+   plays from, and the title's other files. Anything can be changed; Sort again
+   works the whole title out from scratch. */
+const SOURCE_NAME = { download: 'Downloads', torrent: 'Torrent', folder: 'Own folder' };
+
+async function openConnections(item, titleWrap) {
+  const series = isSeries(item);
+  const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>${series ? 'How the episodes are connected' : 'Which file plays'}</h2>
+    <p class="sub">${esc(item.title)} - every ${series ? 'episode' : 'copy'} and where it plays from: your downloads, this title's own folder or a torrent. If the app matched something wrong, press <b>Change</b> next to it.</p>
+    <div class="cx-tools"><input class="input cx-filter" placeholder="Find an episode or file…" spellcheck="false">
+      <label class="check-row small"><input type="checkbox" class="cx-missing"> Only episodes without a file</label>
+      <span class="spacer"></span><button class="btn btn-ghost btn-sm" data-cx="redo" title="Forget how this title's files were matched and work them out again${(S.status.ai || []).length ? ', with your AI helper' : ''}">↻ Sort again</button></div>
+    <div id="cx-body"><div class="spinner"></div></div></div>`, 'cx-modal');
+  m.st = { data: null, open: '' };
+  const draw = () => {
+    const d = m.st.data;
+    const body = $('#cx-body', m);
+    if (!d || !body) return;
+    const q = $('.cx-filter', m).value.trim().toLowerCase();
+    const onlyMissing = $('.cx-missing', m).checked;
+    const byPath = Object.fromEntries(d.files.map((f) => [f.path, f]));
+    const chip = (f) => `<span class="cx-file" title="${esc(f.path)}"><span class="cx-src ${f.source}">${SOURCE_NAME[f.source]}</span>
+      <span class="cx-name">${esc(f.name)}</span>${f.torrent && !f.torrent.complete ? `<span class="muted small">${Math.round((f.torrent.progress || 0) * 100)}%</span>` : ''}</span>`;
+    const editor = (f, current) => `<div class="cx-edit" data-path="${esc(f.path)}">
+        ${series ? `<label>Season <input class="input cx-s" type="number" min="0" value="${current ? current.split(':')[0] : (item.progress.season || 1)}"></label>
+        <label>Episode <input class="input cx-e" type="number" min="1" value="${current ? current.split(':')[1] : ''}"></label>
+        <button class="btn btn-white btn-sm" data-cx="set">Use this episode</button>` : '<button class="btn btn-white btn-sm" data-cx="film">This is the film</button>'}
+        <button class="btn btn-ghost btn-sm" data-cx="auto" title="Go by the file's name again">From the name</button>
+        <button class="btn btn-ghost btn-sm danger" data-cx="none">Not part of this title</button></div>`;
+    const fileRow = (f, current) => `<div class="cx-row-file">${chip(f)}
+        ${f.source === 'folder' ? '<span class="muted small">goes by its name</span>' : `<button class="btn btn-ghost btn-sm" data-cx="open" data-path="${esc(f.path)}">Change…</button>`}</div>
+        ${m.st.open === f.path ? editor(f, current) : ''}`;
+    const used = new Set(d.episodes.map((e) => e.path).filter(Boolean));
+    // Seasons in order, specials last.
+    const eps = [...d.episodes].sort((a, b) => (a.season === 0) - (b.season === 0) || a.season - b.season || a.episode - b.episode);
+    const picker = (e) => `<div class="cx-edit cx-pick" data-key="${esc(e.key)}"><select class="select cx-pick-file">
+        <option value="">Choose the file for ${esc(series ? epLabel({ season: e.season, episode: e.episode }) : item.title)}…</option>
+        ${d.files.filter((f) => f.source !== 'folder').map((f) => `<option value="${esc(f.path)}">${esc(f.name)}${used.has(f.path) ? ' (now another episode)' : ''}</option>`).join('')}</select>
+        <button class="btn btn-ghost btn-sm" data-cx="pick-cancel">Cancel</button></div>`;
+    let rows = eps.filter((e) => !onlyMissing || !e.path).map((e) => {
+      const f = e.path ? byPath[e.path] : null;
+      const label = series ? epLabel({ season: e.season, episode: e.episode }) : item.title;
+      if (q && !label.toLowerCase().includes(q) && !(f && f.name.toLowerCase().includes(q))) return '';
+      return `<div class="cx-row ${f ? '' : 'missing'}"><div class="cx-ep">${esc(label)}</div>
+        <div class="cx-files">${f ? fileRow(f, e.key) : `<div class="cx-row-file"><span class="muted small">No file</span>
+          ${d.files.some((f) => f.source !== 'folder') ? `<button class="btn btn-ghost btn-sm" data-cx="pick" data-key="${esc(e.key)}">Choose a file…</button>` : ''}</div>
+          ${m.st.pick === e.key ? picker(e) : ''}`}</div></div>`;
+    });
+    if (series && !onlyMissing) {
+      // Episodes in seasons, a heading where each season starts.
+      let last = null;
+      rows = eps.map((e, i) => {
+        const head = e.season !== last ? `<h4 class="cx-season">${e.season === 0 ? 'Specials' : `Season ${e.season}`}</h4>` : '';
+        last = e.season;
+        return head + (rows[i] || '');
+      });
+    }
+    const others = d.files.filter((f) => !used.has(f.path) && (!q || f.name.toLowerCase().includes(q)));
+    body.innerHTML = `<div class="cx-list">${rows.join('') || '<p class="muted">Nothing matches.</p>'}</div>
+      ${others.length ? `<h4 class="cx-season">Other files of this title <span class="muted small">extras, copies, or files the app couldn't number</span></h4>
+        <div class="cx-list">${others.map((f) => `<div class="cx-row other"><div class="cx-ep">${f.kind === 'extra' ? 'Extra' : f.keys.length ? 'Copy' : '?'}</div>
+          <div class="cx-files">${fileRow(f, '')}</div></div>`).join('')}</div>` : ''}`;
+  };
+  const load = async () => {
+    try { m.st.data = await api('GET', `/api/items/${item.id}/connections`); draw(); } catch (err) { fail(err); }
+  };
+  $('.cx-filter', m).addEventListener('input', draw);
+  $('.cx-missing', m).addEventListener('change', draw);
+  // A file chosen for an episode that had none.
+  m.addEventListener('change', async (e) => {
+    const sel = e.target.closest('.cx-pick-file');
+    if (!sel || !sel.value) return;
+    try {
+      m.st.data = await api('POST', `/api/items/${item.id}/connections`, { path: sel.value, key: sel.closest('.cx-pick').dataset.key });
+      m.st.pick = '';
+      draw();
+      toast('Changed');
+      await reload();
+      if (titleWrap?.isConnected) loadLocal(titleWrap);
+    } catch (err) { fail(err); }
+  });
+  m.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-cx]');
+    if (!b) return;
+    const a = b.dataset.cx;
+    try {
+      if (a === 'open') { m.st.open = m.st.open === b.dataset.path ? '' : b.dataset.path; m.st.pick = ''; draw(); return; }
+      if (a === 'pick' || a === 'pick-cancel') { m.st.pick = a === 'pick' && m.st.pick !== b.dataset.key ? b.dataset.key : ''; m.st.open = ''; draw(); return; }
+      if (a === 'redo') {
+        if (!(await confirmModal('Sort this title again?', `How ${item.title}'s files were matched is forgotten and worked out again from scratch${(S.status.ai || []).length ? ' (with your AI helper)' : ''}. Episodes you set by hand for its downloads are worked out again too.`, 'Sort again'))) return;
+        b.disabled = true; b.textContent = 'Sorting…';
+        const r = await api('POST', `/api/items/${item.id}/connections/redo`);
+        toast(`Working it out again: ${r.files} download${r.files === 1 ? '' : 's'}${r.torrents ? `, ${r.torrents} torrent${r.torrents === 1 ? '' : 's'}` : ''}`);
+        setTimeout(async () => { await load(); b.disabled = false; b.textContent = '↻ Sort again'; await reload(); if (titleWrap?.isConnected) loadLocal(titleWrap); }, 2500);
+        return;
+      }
+      const ed = b.closest('.cx-edit');
+      const path = ed.dataset.path;
+      let key = a;
+      if (a === 'set') key = `${Number($('.cx-s', ed).value) || 0}:${Number($('.cx-e', ed).value) || 1}`;
+      if (a === 'film') key = 'movie';
+      m.st.data = await api('POST', `/api/items/${item.id}/connections`, { path, key });
+      m.st.open = '';
+      draw();
+      toast(a === 'none' ? 'Taken off this title' : a === 'auto' ? 'Going by its name again' : 'Changed');
+      await reload();
+      if (titleWrap?.isConnected) loadLocal(titleWrap);
+    } catch (err) { fail(err); }
+  });
+  load();
+}
+
+// Personal Review: 1 to 5 stars and, if you like, a few words.
+function reviewHTML(item, editing) {
+  const r = item.review;
+  const stars = (n, live) => [1, 2, 3, 4, 5].map((k) => `<button type="button" class="rv-star ${k <= (n || 0) ? 'on' : ''}" ${live ? `data-rv-star="${k}"` : 'tabindex="-1"'} aria-label="${k} star${k === 1 ? '' : 's'}">★</button>`).join('');
+  if (r && !editing) {
+    return `<div class="rv-show"><div class="rv-stars">${stars(r.stars, false)}</div>
+      ${r.stars ? `<span class="rv-word">${['', 'Didn\'t like it', 'It was OK', 'Liked it', 'Really liked it', 'Loved it'][r.stars]}</span>` : ''}
+      ${r.text ? `<p class="rv-text">${esc(r.text).replace(/\n/g, '<br>')}</p>` : ''}
+      <div class="btns"><button class="btn btn-ghost btn-sm" data-rv="edit">Edit</button><span class="muted small">${esc(ago(r.at))}</span></div></div>`;
+  }
+  return `<div class="rv-edit" data-stars="${r?.stars || 0}"><div class="rv-stars live">${stars(r?.stars, true)}</div>
+    <textarea class="input rv-input" rows="3" maxlength="5000" placeholder="What did you think? (optional)">${esc(r?.text || '')}</textarea>
+    <div class="btns"><button class="btn btn-red btn-sm" data-rv="save">Save review</button>
+      ${r ? '<button class="btn btn-ghost btn-sm" data-rv="cancel">Cancel</button><button class="btn btn-ghost btn-sm danger" data-rv="clear">Delete review</button>' : ''}</div></div>`;
+}
+
+async function reviewClick(wrap, item, e) {
+  const box = $('#review', wrap);
+  const star = e.target.closest('[data-rv-star]');
+  if (star) {
+    const ed = $('.rv-edit', box);
+    const n = Number(star.dataset.rvStar);
+    ed.dataset.stars = ed.dataset.stars === String(n) ? '0' : String(n);    // the same star again: none
+    $$('.rv-star', ed).forEach((b, i) => b.classList.toggle('on', i < Number(ed.dataset.stars)));
+    return true;
+  }
+  const a = e.target.closest('[data-rv]')?.dataset.rv;
+  if (!a) return false;
+  try {
+    if (a === 'edit') { wrap.st.reviewEdit = true; box.innerHTML = reviewHTML(item, true); $('.rv-input', box)?.focus(); }
+    else if (a === 'cancel') { wrap.st.reviewEdit = false; box.innerHTML = reviewHTML(item, false); }
+    else if (a === 'save' || a === 'clear') {
+      const ed = $('.rv-edit', box);
+      const review = a === 'clear' ? null : { stars: Number(ed.dataset.stars) || null, text: $('.rv-input', ed).value };
+      if (review && !review.stars && !review.text.trim()) { toast('Pick some stars or write something first'); return true; }
+      const updated = await api('PUT', `/api/items/${item.id}`, { review });
+      upsert(updated);
+      wrap.st.reviewEdit = false;
+      wrap.dataset.sig = titleSig(updated);
+      box.innerHTML = reviewHTML(updated, false);
+      toast(a === 'clear' ? 'Review deleted' : 'Review saved');
+    }
+  } catch (err) { fail(err); }
+  return true;
+}
+
 function absoluteIndex(item, p) {
   if (p.season === 0) return 1;
   let n = 0;
@@ -2284,11 +2659,21 @@ const seasonName = (n) => (n === 0 ? 'Specials' : `Season ${n}`);
 // (MyAnimeList's links through the whole franchise, plus the AI), remembered after.
 async function loadRelated(wrap, run = false) {
   const item = findItem(wrap.dataset.itemId);
-  if (run) { wrap.st.related = { running: true, entries: wrap.st.related?.entries || null }; drawRelated(wrap); }
+  clearTimeout(wrap.relTimer);
+  if (run) {
+    wrap.st.relWanted = true;
+    wrap.st.related = { ...(wrap.st.related || {}), job: { running: true, stage: 'Starting…', progress: 0.02 } };
+    drawRelated(wrap);
+  }
   try {
     wrap.st.related = await api(run ? 'POST' : 'GET', `/api/items/${item.id}/connected`);
-    // Asked for it: show the whole guide as soon as it's ready.
-    if (run && wrap.isConnected && wrap.st.related.entries) openGuide(wrap);
+    const job = wrap.st.related.job;
+    if (job?.running) wrap.relTimer = setTimeout(() => { if (wrap.isConnected) loadRelated(wrap); }, 700);
+    else if (wrap.st.relWanted && wrap.st.related.entries) {
+      // Asked for it: the whole guide, once it's written.
+      wrap.st.relWanted = false;
+      if (wrap.isConnected) openGuide(wrap);
+    }
   } catch (e) {
     wrap.st.related = { entries: wrap.st.related?.entries || null, note: e.message, failed: true };
   }
@@ -2435,7 +2820,11 @@ function drawRelated(wrap) {
   if (!box) return;
   const item = findItem(wrap.dataset.itemId);
   const data = wrap.st.related || {};
+  const job = data.job?.running ? data.job : null;
+  data.running = !!job;
   const aiNames = data.ai || S.status.ai || [];
+  const bar = job ? `<div class="rel-progress"><div class="pd-bar big"><i style="width:${Math.round((job.progress || 0) * 100)}%"></i></div>
+      <div class="small muted"><span class="spin-dot"></span> ${esc(job.stage)}${job.found ? ` · ${job.found} found` : ''}</div></div>` : '';
   const button = (label) => `<button class="btn btn-white rel-find" data-r="find" ${data.running ? 'disabled' : ''}>
     ${data.running ? '<span class="spin-dot"></span> Looking…' : label}</button>`;
   const head = `<div class="rel-head"><h3>Everything connected</h3>
@@ -2443,7 +2832,7 @@ function drawRelated(wrap) {
   if (!data.entries) {
     box.innerHTML = head + `<p class="muted small">Every season, film, OVA, ONA, special, sequel, prequel and spin-off of ${esc(item.title)}${aiNames.length ? `, found through ${item.type === 'anime' ? 'MyAnimeList and ' : ''}${esc(aiNames[0])}` : item.type === 'anime' ? ', found through MyAnimeList' : ''}, with what's on your ${pcName()} and what isn't.</p>
       ${button(`✨ Find everything connected`)}
-      ${data.running ? `<p class="muted small">This can take up to a minute for a big franchise.</p>${'<div class="rel-row skeleton"><div class="sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(3)}` : ''}
+      ${data.running ? `${bar}${'<div class="rel-row skeleton"><div class="sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(3)}` : ''}
       ${data.note ? `<p class="bad small">${esc(data.note)}</p>` : ''}`;
     return;
   }
@@ -2465,8 +2854,8 @@ function drawRelated(wrap) {
   };
   const groups = KIND_GROUPS.map(([k, label]) => [label, entries.filter((x) => connectedKind(x) === k)])
     .filter(([, list]) => list.length);
-  box.innerHTML = head
-    + `<button class="btn btn-red rel-guide" data-r="guide">📖 Open the story guide</button>`
+  box.innerHTML = head + bar
+    + `<button class="btn btn-red rel-guide" data-r="guide" ${job && !data.guide ? 'disabled' : ''}>📖 ${job && !data.guide ? 'The story guide is being written…' : 'Open the story guide'}</button>`
     + `<div class="rel-summary"><b>${entries.length}</b> connected · <span class="ok">${here.length} on your ${pcName()}</span>
         ${listed.length ? ` · ${listed.length} in your list, not downloaded` : ''} · <span class="${missing.length ? 'bad' : ''}">${missing.length} not in your list</span></div>`
     + (missing.length > 1 ? `<button class="btn btn-sm btn-white rel-all" data-r="all">+ Add all ${missing.length} missing</button>` : '')
@@ -2530,6 +2919,7 @@ async function showRecap(item) {
 
 async function titleClick(wrap, e) {
   const item = findItem(wrap.dataset.itemId);
+  if (e.target.closest('#review') && await reviewClick(wrap, item, e)) return;
   if (e.target.closest('#related')) { await relatedClick(wrap, e); return; }
   const move = e.target.closest('[data-move]');
   if (move) {
@@ -2596,6 +2986,7 @@ async function titleClick(wrap, e) {
     else if (t === 'recap') showRecap(item);
     else if (t === 'files') openTitleFiles(item, wrap.st.local);
     else if (t === 'party') openStartParty(item);
+    else if (t === 'ep-links') openConnections(item, wrap);
     else if (t === 'use-mal') openUseMal(item);
     else if (t === 'unwatch') toggleWatched(item.id);
     else if (t === 'watched') {
@@ -2726,6 +3117,8 @@ const TORRENT_STATE = {
   paused: 'Paused', stopped: 'Stopped',
 };
 
+const hasTorrentSite = (item) => !!(S.status.torrent_sites || {})[item.type];
+
 function drawTorrentBox(wrap) {
   const box = $('#torrent-box', wrap);
   if (!box) return;
@@ -2752,11 +3145,11 @@ function drawTorrentBox(wrap) {
         <button class="btn btn-ghost btn-sm" data-t="tor-pause">${t.paused ? 'Resume' : 'Pause'}</button>
         <button class="btn btn-ghost btn-sm" data-t="tor-remove">Remove</button></div></div>`;
   }).join('');
-  const finder = item.type === 'anime'
-    ? (S.status.torrent_sites ? `<div class="get-magnet"><button class="btn btn-white btn-sm" data-t="get-magnet">${ICON.search} Get magnet</button>
-        <span class="muted small">Finds the best torrent of it on your site: every episode, best quality, most seeders.</span></div>`
-      : '<p class="muted small">Add your own torrent site in <button class="linkish" data-t="tor-settings">Settings</button> and <b>Get magnet</b> finds it there for you.</p>')
-    : '';
+  const what = item.format === 'movie' ? 'the film' : item.type === 'anime' ? 'every episode' : `every episode of season ${item.progress?.season || 1}`;
+  const finder = hasTorrentSite(item)
+    ? `<div class="get-magnet"><button class="btn btn-white btn-sm" data-t="get-magnet">${ICON.search} Get magnet</button>
+        <span class="muted small">Finds the best torrent of it on your sites: ${what}, best quality, most seeders.</span></div>`
+    : '<p class="muted small">Add your own torrent sites in <button class="linkish" data-t="tor-settings">Settings</button> and <b>Get magnet</b> finds it there for you.</p>';
   box.innerHTML = `${cards}${finder}
     <div class="magnet-row"><input class="input" id="magnet-in" placeholder="Paste a magnet link (magnet:?xt=…)" autocomplete="off" spellcheck="false">
       <button class="btn btn-white btn-sm" data-t="add-magnet">${data.torrents.length ? 'Add another' : 'Add'}</button></div>
@@ -2832,8 +3225,15 @@ function openTorrents(focus = '') {
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>${ICON.download || ''} Torrents</h2>
     <p class="sub">Everything your torrents are doing. Choose which files download (and how urgently), say which episode a file is, delete files, pause or remove a torrent.</p>
+    <div class="tw-tools"><input class="input" id="tw-filter" type="search" placeholder="Filter files - name, episode, folder…" autocomplete="off" spellcheck="false">
+      <label class="check-row small"><input type="checkbox" id="tw-videos"> <span>Videos only</span></label>
+      <button class="btn btn-ghost btn-sm" type="button" data-tw="expand-all">Expand all</button>
+      <button class="btn btn-ghost btn-sm" type="button" data-tw="collapse-all">Collapse all</button></div>
     <div id="tor-list"><div class="spinner"></div></div></div>`, 'torrents-modal');
-  wrap.st = { focus, sig: '' };
+  wrap.st = { focus, sig: '', open: new Set(focus ? [focus] : []), shut: new Set(), filter: '', videos: false, first: true };
+  const redraw = () => { wrap.st.sig = ''; if (wrap.st.data) drawTorrents(wrap, wrap.st.data); };
+  $('#tw-filter', wrap).addEventListener('input', (e) => { wrap.st.filter = e.target.value.trim().toLowerCase(); redraw(); });
+  $('#tw-videos', wrap).addEventListener('change', (e) => { wrap.st.videos = e.target.checked; redraw(); });
   const tick = async () => {
     if (!wrap.isConnected) return;
     try {
@@ -2856,6 +3256,12 @@ function openTorrents(focus = '') {
     const hash = b.closest('[data-hash]')?.dataset.hash;
     const index = b.closest('[data-file]')?.dataset.file;
     const act = b.dataset.tw;
+    if (act === 'toggle') { if (wrap.st.open.has(hash)) wrap.st.open.delete(hash); else wrap.st.open.add(hash); redraw(); return; }
+    if (act === 'dir') { const k = `${hash}/${b.dataset.dir}`; if (wrap.st.shut.has(k)) wrap.st.shut.delete(k); else wrap.st.shut.add(k); redraw(); return; }
+    if (act === 'expand-all' || act === 'collapse-all') {
+      wrap.st.open = new Set(act === 'expand-all' ? (wrap.st.data?.torrents || []).map((t) => t.hash) : []);
+      wrap.st.shut.clear(); redraw(); return;
+    }
     try {
       if (act === 'pause' || act === 'resume') await api('POST', `/api/torrents/${hash}/pause`, { paused: act === 'pause' });
       else if (act === 'folder') await api('POST', `/api/torrents/${hash}/folder`);
@@ -2875,11 +3281,15 @@ function openTorrents(focus = '') {
 function drawTorrents(wrap, data) {
   const list = $('#tor-list', wrap);
   if (!list) return;
+  wrap.st.data = data;
   if (!data.available) { list.innerHTML = `<p class="muted">${esc(data.error)}</p>`; return; }
-  if (!data.torrents.length) { list.innerHTML = '<p class="muted">No torrents yet. Paste a magnet link on a show\'s page, under "Stream from a torrent".</p>'; return; }
-  const sig = JSON.stringify(data.torrents.map((t) => [t.hash, t.paused, t.plan, t.files.map((f) => [f.priority, f.episode, f.item_id, f.override, f.complete, f.done > 0])]));
+  if (!data.torrents.length) { list.innerHTML = '<p class="muted">No torrents yet. Paste a magnet link on a show\'s page, under "Stream from a torrent", or use Get magnet.</p>'; return; }
+  const st = wrap.st;
+  if (st.first) { st.first = false; if (data.torrents.length === 1) st.open.add(data.torrents[0].hash); }
+  const sig = JSON.stringify([data.torrents.map((t) => [t.hash, t.paused, t.plan, t.files.map((f) => [f.priority, f.episode, f.item_id, f.override, f.complete, f.done > 0])]),
+    st.filter, st.videos, [...st.open], [...st.shut]]);
   // Only the numbers change between updates, unless something was changed.
-  if (sig === wrap.st.sig) {
+  if (sig === st.sig) {
     for (const t of data.torrents) {
       const card = list.querySelector(`[data-hash="${t.hash}"]`);
       if (!card) continue;
@@ -2895,29 +3305,69 @@ function drawTorrents(wrap, data) {
     }
     return;
   }
-  wrap.st.sig = sig;
-  const sorted = [...data.torrents].sort((a, b) => (b.hash === wrap.st.focus) - (a.hash === wrap.st.focus) || b.added - a.added);
-  list.innerHTML = sorted.map((t) => `<div class="tw-card ${t.hash === wrap.st.focus ? 'focus' : ''}" data-hash="${esc(t.hash)}">
-    <div class="tw-head"><div><b>${esc(t.name || 'Torrent')}</b>
-      <div class="muted small">${t.title ? `For <button class="linkish" data-tw="open-title" data-item="${esc(t.item_id)}">${esc(t.title)}</button> · ` : ''}<span class="tw-state">${esc(TORRENT_STATE[t.state] || t.state)}</span> · <span class="tw-rates">${esc(torrentRates(t))}</span>${t.keep ? ' · keeps watched episodes' : ''}</div>
+  st.sig = sig;
+  const q = st.filter;
+  const shown = (t, f) => (!st.videos || f.kind === 'video')
+    && (!q || `${f.path} ${f.kind === 'video' ? fileLabel(t, f) : ''}`.toLowerCase().includes(q));
+  const sorted = [...data.torrents].sort((a, b) => (b.hash === st.focus) - (a.hash === st.focus) || b.added - a.added);
+  const fileRow = (t, f, name) => `<div class="tw-file ${f.priority ? '' : 'skipped'}" data-file="${f.index}">
+        <select class="select tw-prio" data-prio="${esc(t.hash)}/${f.index}" title="Download this file?">
+          ${[[0, 'Skip'], [1, 'Normal'], [4, 'High'], [7, 'Now']].map(([v, l]) => `<option value="${v}" ${f.priority === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <span class="tw-kind ${f.kind}">${f.kind === 'video' ? '▶' : f.kind === 'subtitle' ? 'CC' : '•'}</span>
+        <span class="tw-name" title="${esc(f.path)}">${twMark(name, q)}</span>
+        <button class="tw-ep ${f.override ? 'set' : ''}" data-tw="episode" data-current="${esc(f.override || '')}" data-owner="${esc(f.item_id || t.item_id)}" title="Which title and episode is this?">${f.kind === 'video'
+    ? (f.override === 'none' ? 'Not an episode' : fileLabel(t, f)) : ''}</button>
+        <span class="tw-size">${fmtBytes(f.size)}</span>
+        <span class="tw-fbar"><i style="width:${f.size ? (f.done / f.size) * 100 : 0}%"></i></span><span class="tw-pct">${f.size ? Math.floor((f.done / f.size) * 100) : 0}%</span>
+        ${f.done > 0 ? `<button class="tw-del" data-tw="delete-file" title="Delete this file">${ICON.trash}</button>` : '<span></span>'}</div>`;
+  // Files under their folders (the torrent's own top folder left out).
+  const filesHTML = (t, files) => {
+    const top = t.files.length > 1 && t.files.every((f) => f.path.includes('/')) && new Set(t.files.map((f) => f.path.split('/')[0])).size === 1;
+    const groups = new Map();
+    for (const f of files) {
+      const parts = f.path.split('/').slice(top ? 1 : 0);
+      const dir = parts.slice(0, -1).join('/');
+      if (!groups.has(dir)) groups.set(dir, []);
+      groups.get(dir).push([f, parts[parts.length - 1]]);
+    }
+    const dirs = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, undefined, { numeric: true }));
+    return dirs.map((dir) => {
+      const rows = groups.get(dir).sort((a, b) => a[1].localeCompare(b[1], undefined, { numeric: true }));
+      const shut = !q && st.shut.has(`${t.hash}/${dir}`);
+      const size = rows.reduce((n, [f]) => n + f.size, 0);
+      return `${dir && dirs.length > 0 ? `<button class="tw-dir ${shut ? 'shut' : ''}" type="button" data-tw="dir" data-dir="${esc(dir)}">
+          <span class="tw-caret">▾</span>📁 <span class="tw-dir-name">${twMark(dir, q)}</span><span class="muted small">${rows.length} file${rows.length === 1 ? '' : 's'} · ${fmtBytes(size)}</span></button>` : ''}
+        ${shut ? '' : `<div class="tw-group ${dir ? 'in-dir' : ''}">${rows.map(([f, name]) => fileRow(t, f, name)).join('')}</div>`}`;
+    }).join('');
+  };
+  const cards = sorted.map((t) => {
+    const files = t.files.filter((f) => shown(t, f));
+    if ((q || st.videos) && t.files.length && !files.length && !(q && (t.name || '').toLowerCase().includes(q))) return '';
+    const open = st.open.has(t.hash) || (q && files.length > 0);
+    const vids = t.files.filter((f) => f.kind === 'video').length;
+    return `<div class="tw-card ${t.hash === st.focus ? 'focus' : ''} ${open ? 'open' : ''}" data-hash="${esc(t.hash)}">
+    <div class="tw-head"><button class="tw-toggle" type="button" data-tw="toggle" title="${open ? 'Hide' : 'Show'} its files"><span class="tw-caret">▾</span></button>
+      <div class="tw-title"><b class="tw-tname">${twMark(t.name || 'Torrent', q)}</b>
+      <div class="muted small">${t.title ? `For <button class="linkish" data-tw="open-title" data-item="${esc(t.item_id)}">${esc(t.title)}</button> · ` : ''}<span class="tw-state">${esc(TORRENT_STATE[t.state] || t.state)}</span> · <span class="tw-rates">${esc(torrentRates(t))}</span>${t.keep ? ' · keeps watched episodes' : ''}
+        ${t.files.length ? ` · <button class="linkish" data-tw="toggle">${t.files.length} file${t.files.length === 1 ? '' : 's'}${vids && vids !== t.files.length ? ` (${vids} videos)` : ''}${(q || st.videos) && files.length !== t.files.length ? `, ${files.length} shown` : ''}</button>` : ''}</div>
       ${t.error ? `<div class="bad small">${esc(t.error)}</div>` : ''}${planLine(t, 'data-tw')}</div>
       <div class="btns"><button class="btn btn-ghost btn-sm" data-tw="${t.paused ? 'resume' : 'pause'}">${t.paused ? 'Resume' : 'Pause'}</button>
         <button class="btn btn-ghost btn-sm" data-tw="folder">Open folder</button>
         <button class="btn btn-ghost btn-sm" data-tw="remove">Remove</button></div></div>
     <div class="tw-bar"><i style="width:${t.wanted ? (t.wanted_done / t.wanted) * 100 : 0}%"></i></div>
-    ${t.files.length ? `<div class="tw-files">${t.files.map((f) => `<div class="tw-file ${f.priority ? '' : 'skipped'}" data-file="${f.index}">
-        <select class="select tw-prio" data-prio="${esc(t.hash)}/${f.index}" title="Download this file?">
-          ${[[0, 'Skip'], [1, 'Normal'], [4, 'High'], [7, 'Now']].map(([v, l]) => `<option value="${v}" ${f.priority === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
-        <span class="tw-kind ${f.kind}">${f.kind === 'video' ? '▶' : f.kind === 'subtitle' ? 'CC' : '•'}</span>
-        <span class="tw-name" title="${esc(f.path)}">${esc(f.path.split('/').pop())}</span>
-        <button class="tw-ep ${f.override ? 'set' : ''}" data-tw="episode" data-current="${esc(f.override || '')}" data-owner="${esc(f.item_id || t.item_id)}" title="Which title and episode is this?">${f.kind === 'video'
-    ? (f.override === 'none' ? 'Not an episode' : fileLabel(t, f)) : ''}</button>
-        <span class="tw-size">${fmtBytes(f.size)}</span>
-        <span class="tw-fbar"><i style="width:${f.size ? (f.done / f.size) * 100 : 0}%"></i></span><span class="tw-pct">${f.size ? Math.floor((f.done / f.size) * 100) : 0}%</span>
-        ${f.done > 0 ? `<button class="tw-del" data-tw="delete-file" title="Delete this file">${ICON.trash}</button>` : '<span></span>'}</div>`).join('')}</div>`
-    : '<p class="muted small"><span class="spin-dot"></span> Getting the list of files from the people sharing it…</p>'}
-  </div>`).join('');
-  if (wrap.st.focus) { list.querySelector('.tw-card.focus')?.scrollIntoView({ block: 'nearest' }); wrap.st.focus = ''; }
+    ${!t.files.length ? '<p class="muted small"><span class="spin-dot"></span> Getting the list of files from the people sharing it…</p>'
+      : open ? `<div class="tw-files">${filesHTML(t, files)}</div>` : ''}
+  </div>`;
+  }).join('');
+  list.innerHTML = cards || '<p class="muted">No files match.</p>';
+  if (st.focus) { list.querySelector('.tw-card.focus')?.scrollIntoView({ block: 'nearest' }); st.focus = ''; }
+}
+
+// Text with what you filtered for highlighted.
+function twMark(text, q) {
+  if (!q) return esc(text);
+  const i = text.toLowerCase().indexOf(q);
+  return i < 0 ? esc(text) : `${esc(text.slice(0, i))}<mark>${esc(text.slice(i, i + q.length))}</mark>${esc(text.slice(i + q.length))}`;
 }
 
 const torrentRates = (t) => [t.down ? `↓ ${fmtBytes(t.down)}/s` : '', t.up ? `↑ ${fmtBytes(t.up)}/s` : '',
@@ -2966,8 +3416,10 @@ function openFinder(item, onAdded = () => {}) {
     const added = st.added ? choices.find((c) => c.key === st.added.hash) : null;
     const card = (c, i) => {
       const cover = c.checked
-        ? (c.complete ? `<span class="ok">✓ All ${c.wanted > 1 ? `${c.wanted} episodes` : 'of it'}</span>` : `<span class="bad">${c.has || 0} of ${c.wanted} episodes</span>`)
+        ? (c.complete ? `<span class="ok">✓ ${c.wanted > 1 ? `All ${c.wanted} episodes${c.season ? ` of season ${c.season}` : ''}` : item.format === 'movie' ? 'The film' : 'All of it'}</span>`
+          : `<span class="bad">${c.has || 0} of ${c.wanted} episodes${c.season ? ` of season ${c.season}` : ''}</span>`)
           + (c.others ? ` <span class="muted">+ ${c.others} other title${c.others === 1 ? '' : 's'} of the series (only what you play downloads)</span>` : '')
+          + (c.seasons?.length > 1 ? ` <span class="muted">· has seasons ${c.seasons[0]}-${c.seasons[c.seasons.length - 1]}</span>` : '')
         : c.status === 'page' ? '<span class="muted"><span class="spin-dot"></span> Reading its page for the magnet…</span>'
         : c.status === 'files' || c.status === 'queued' ? '<span class="muted"><span class="spin-dot"></span> Checking its files with the people sharing it…</span>'
         : '<span class="muted">Not checked: nobody sharing it answered in time</span>';
@@ -3566,7 +4018,7 @@ function watchChoice(wrap, { reason = '' } = {}) {
     : tor.available ? `<div class="choice choice-form"><div>${ICON.download}<b>Stream from a torrent</b>
         <span>${(wrap.st.torrentCount || 0) ? "This show's torrent doesn't have this episode. Add another magnet link:" : "Paste this show's magnet link - only the episode you play downloads:"}</span></div>
         <div class="magnet-row"><input class="input" id="w-magnet" placeholder="magnet:?xt=…" spellcheck="false"><button class="btn btn-white btn-sm" data-choice="add-magnet">Add & stream</button></div></div>` : ''}
-      ${!stream && tor.available && item.type === 'anime' && S.status.torrent_sites ? `<button class="choice" data-choice="get-magnet">${ICON.search}<b>Get magnet from my site</b><span>Finds the best torrent of it on your site and adds it</span></button>` : ''}
+      ${!stream && tor.available && hasTorrentSite(item) ? `<button class="choice" data-choice="get-magnet">${ICON.search}<b>Get magnet from my sites</b><span>Finds the best torrent of it on your sites and adds it</span></button>` : ''}
       <button class="choice" data-choice="online">${ICON.globe}<b>Watch online</b><span>${esc(servicesLine(item))}</span></button>
       <button class="choice" data-choice="find">${ICON.pc}<b>Find the file on my ${pcName()}</b><span>Pick the file (or a folder for this title)</span></button>
     </div>`);
@@ -3641,6 +4093,15 @@ async function addMagnetAndStream(wrap) {
   if (wrap.isConnected) watchChoice(wrap, { reason: 'The torrent was added, but nobody sharing it could be reached yet. Try again in a minute.' });
 }
 
+// What a service's own availability check says about a title.
+function onlineMark(o, region) {
+  const by = { tmdb: 'TMDB', ai: 'AI' }[o.check_mode] || '';
+  if (o.kind === 'search') return 'Search the site (no check)';
+  if (o.has_it === true) return `✓ Has it in ${esc(region)} (${by})`;
+  if (o.has_it === false) return `✗ Not on it in ${esc(region)} (${by}) - search anyway`;
+  return `? Couldn't check (${by}) - search anyway`;
+}
+
 // Watch online: your services in order, each with whether it has the title.
 async function drawOnline(wrap) {
   const item = findItem(wrap.st.id);
@@ -3654,12 +4115,14 @@ async function drawOnline(wrap) {
     <p class="sub">Opens in ${browserName()}. ${data.streaming.length ? `In ${esc(region)} it streams on ${esc(data.streaming.join(', '))}.` : ''}</p>
     ${data.message ? `<p class="note">${esc(data.message)}</p>` : ''}
     <div class="choices">${data.options.map((o) => `<button class="choice ${o === best ? 'primary' : ''}" data-svc="${esc(o.id)}">${ICON.globe}<b>${esc(o.name)}</b>
-      <span>${o.kind === 'search' ? 'Search the site' : o.has_it ? `✓ Has it in ${esc(region)}` : `Not on it in ${esc(region)} (by TMDB) - search anyway`}${o === best ? ' · best match' : ''}</span></button>`).join('')
+      <span>${onlineMark(o, region)}${o === best ? ' · best match' : ''}</span></button>`).join('')
     || `<p class="muted">No streaming services or sites for ${esc(TYPE_PLURAL[item.type].toLowerCase())} yet - add them in Settings.</p>`}</div>
-    <div class="btns" style="margin-top:14px"><button class="btn btn-ghost btn-sm" data-svc="">${data.options.length ? 'Best match' : 'Open the fallback site'}</button>
+    <div class="btns" style="margin-top:14px">${best ? '<button class="btn btn-ghost btn-sm" data-svc="">Best match</button>' : ''}
+      <button class="btn btn-ghost btn-sm" data-w="settings">Add a site…</button>
       <button class="btn btn-ghost btn-sm" data-w="back">Back</button></div>`);
   body.addEventListener('click', (e) => {
     if (e.target.closest('[data-w="back"]')) { decideWatch(wrap); return; }
+    if (e.target.closest('[data-w="settings"]')) { closeModal(wrap); openSettings('svc'); return; }
     const b = e.target.closest('[data-svc]');
     if (b) watchOnline(wrap, { service: b.dataset.svc });
   });
@@ -3832,13 +4295,26 @@ async function watchOnline(wrap, { reason = '', fix = false, service = '' } = {}
     }
     const res = await api('POST', `/api/items/${item.id}/online`, { service });
     if (!wrap.isConnected) return;
+    if (res.kind === 'none') {
+      const body = watchBody(wrap, `<div class="center"><div class="result-icon">🔎</div><h2>Nothing opened</h2>
+        <p class="sub">${esc(res.message)}</p>
+        <div class="btns" style="justify-content:center;margin-top:16px"><button class="btn btn-white" data-w="other">Choose a site</button>
+        <button class="btn btn-ghost" data-w="settings">Add a site in Settings</button>
+        <button class="btn btn-ghost" data-w="back">Back</button></div></div>`);
+      body.addEventListener('click', (e) => {
+        const w = e.target.closest('[data-w]')?.dataset.w;
+        if (w === 'other') drawOnline(wrap);
+        if (w === 'settings') { closeModal(wrap); openSettings('svc'); }
+        if (w === 'back') decideWatch(wrap);
+      });
+      return;
+    }
     const region = regionName(res.region);
     const body = watchBody(wrap, `<div class="center">
       ${reason ? `<div class="warn" style="margin-bottom:18px;justify-content:center">${esc(reason)}</div>` : ''}
       <div class="result-icon">${res.has_it ? '✅' : '🔎'}</div>
       <h2>Opened ${esc(res.service)}</h2>
       <p class="sub">${res.kind === 'check' ? (res.has_it ? `${esc(item.title)} is on ${esc(res.service)} in ${esc(region)}.` : `Searched ${esc(res.service)} for ${esc(item.title)}.`)
-        : res.kind === 'fallback' ? `None of your services or sites fit, so ${esc(res.service)} opened. Add your own in Settings.`
         : `Searched ${esc(res.service)} for ${esc(item.title)}.`} It's open in ${browserName()}${isSeries(item) ? ` - you're up to ${epLabel(wrap.st.ep)}` : ''}.</p>
       ${res.services.length ? `<div class="muted small">Streaming in ${esc(region)} on:</div><div class="services" style="justify-content:center">${res.services.map((x) => `<span class="chip">${esc(x)}</span>`).join('')}</div>` : ''}
       ${res.message ? `<p class="note">${esc(res.message)}</p>` : ''}
@@ -3873,14 +4349,32 @@ function drawServices(wrap) {
         <div class="svc-line"><input class="input svc-name" value="${esc(x.name)}" placeholder="Name">
           <input class="input svc-url" value="${esc(x.url)}" placeholder="https://site/search?q={title}" spellcheck="false"></div>
         <div class="svc-line small">${kinds.map(([k, l]) => `<label class="svc-chip"><input type="checkbox" class="svc-type" value="${k}" ${x.types.includes(k) ? 'checked' : ''}>${l}</label>`).join('')}
-          <label class="svc-chip check" title="Only use it when TMDB says it has the title in your country"><input type="checkbox" class="svc-check" ${x.check.length ? 'checked' : ''}>Only when it has it</label></div>
+          <label class="svc-chip check" title="When it's used: only when TMDB or your AI says it has the title in your country, or every time">Check
+            <select class="svc-mode">${[['tmdb', 'TMDB'], ['ai', 'AI'], ['off', 'No check']].map(([v, l]) => `<option value="${v}" ${svcMode(x) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></div>
       </div>
       <div class="svc-tools">
         <button type="button" class="svc-btn" data-s="svc-try" title="Try it with a search">Try</button>
         <button type="button" class="svc-btn" data-s="svc-up" title="Move up" ${i ? '' : 'disabled'}>↑</button>
         <button type="button" class="svc-btn" data-s="svc-down" title="Move down" ${i < wrap.svc.length - 1 ? '' : 'disabled'}>↓</button>
         <button type="button" class="svc-btn danger" data-s="svc-del" title="Remove">✕</button></div></div>`).join('')
-    : '<p class="muted small">No services or sites - online, the "If none of them fit" site opens.</p>';
+    : '<p class="muted small">No services or sites yet - press <b>+ Add…</b> and click the ones you use.</p>';
+  drawServicePicker(wrap);
+}
+
+const svcMode = (x) => x.check_mode || (x.check && x.check.length ? 'tmdb' : 'off');
+
+// Click-to-add: the big streaming services, one click each, and your own site.
+function drawServicePicker(wrap) {
+  const box = $('#svc-picker', wrap);
+  if (!box || !wrap.presets) return;
+  const have = new Set(wrap.svc.map((x) => (x.name || '').toLowerCase()));
+  box.innerHTML = `<div class="svc-picker-head small">Click to add - each one is added to the end of your list.</div>
+    <div class="svc-picker-grid">${wrap.presets.map((p, i) => {
+      const added = have.has(p.name.toLowerCase());
+      return `<button type="button" class="svc-pick ${added ? 'added' : ''}" data-s="svc-pick" data-p="${i}" ${added ? 'disabled' : ''}>
+        <span class="svc-pick-mark">${added ? '✓' : '+'}</span>${esc(p.name)}</button>`;
+    }).join('')}
+    <button type="button" class="svc-pick own" data-s="svc-pick" data-p="own"><span class="svc-pick-mark">+</span>Your own site…</button></div>`;
 }
 
 function readServices(wrap) {
@@ -3891,8 +4385,8 @@ function readServices(wrap) {
     x.name = $('.svc-name', row).value.trim();
     x.url = $('.svc-url', row).value.trim();
     x.types = $$('.svc-type', row).filter((c) => c.checked).map((c) => c.value);
-    const check = $('.svc-check', row).checked;
-    x.check = check ? (x.check.length ? x.check : [x.name]) : [];
+    x.check_mode = $('.svc-mode', row).value;
+    if (x.check_mode !== 'off' && !(x.check || []).length) x.check = [x.name];
   });
   return wrap.svc;
 }
@@ -3901,6 +4395,21 @@ async function serviceAction(wrap, a, row) {
   readServices(wrap);
   const i = Number(row?.dataset.i);
   const list = wrap.svc;
+  if (a === 'svc-add') { $('#svc-picker', wrap).classList.toggle('hidden'); drawServicePicker(wrap); return; }
+  if (a === 'svc-pick') {
+    const v = row?.dataset.p ?? '';
+    const own = v === 'own';
+    const p = own ? { name: '', url: '', check: [], types: ['anime', 'tv', 'movie'] } : wrap.presets[Number(v)];
+    if (!p) return;
+    list.push({ id: '', name: p.name, url: p.url, check: [...(p.check || [])], check_mode: own || !(p.check || []).length ? 'off' : 'tmdb',
+      types: [...(p.types || ['anime', 'tv', 'movie'])], on: true });
+    drawServices(wrap);
+    const added = $$('#svc-list .svc-row', wrap).pop();
+    added?.classList.add('fresh');
+    added?.querySelector(own ? '.svc-name' : '.svc-mode')?.focus();
+    if (!own) toast(`${p.name} added`);
+    return;
+  }
   if (a === 'svc-del') list.splice(i, 1);
   else if (a === 'svc-up' && i > 0) [list[i - 1], list[i]] = [list[i], list[i - 1]];
   else if (a === 'svc-down' && i < list.length - 1) [list[i + 1], list[i]] = [list[i], list[i + 1]];
@@ -3924,6 +4433,7 @@ function drawSites(wrap) {
       <div class="svc-main">
         <div class="svc-line"><input class="input site-name" value="${esc(x.name)}" placeholder="Name">
           <input class="input site-url" value="${esc(x.url)}" placeholder="https://yoursite/search?q={title}" spellcheck="false"></div>
+        <div class="svc-line small">${[['anime', 'Anime'], ['tv', 'TV shows'], ['movie', 'Movies']].map(([k, l]) => `<label class="svc-chip"><input type="checkbox" class="site-type" value="${k}" ${(x.types || ['anime']).includes(k) ? 'checked' : ''}>${l}</label>`).join('')}</div>
         <div class="site-test-out small"></div></div>
       <div class="svc-tools">
         <button type="button" class="svc-btn" data-s="site-test" title="Search it and show what's read">Test</button>
@@ -3938,6 +4448,7 @@ function readSites(wrap) {
     x.on = $('.site-on', row).checked;
     x.name = $('.site-name', row).value.trim();
     x.url = $('.site-url', row).value.trim();
+    x.types = $$('.site-type', row).filter((c) => c.checked).map((c) => c.value);
   });
   return wrap.sites;
 }
@@ -3945,7 +4456,7 @@ function readSites(wrap) {
 async function siteAction(wrap, a, row) {
   readSites(wrap);
   if (a === 'site-add') {
-    wrap.sites.push({ id: '', name: '', url: '', on: true });
+    wrap.sites.push({ id: '', name: '', url: '', on: true, types: ['anime', 'tv', 'movie'] });
     drawSites(wrap);
     $$('#site-list .site-row', wrap).pop()?.querySelector('.site-name')?.focus();
     return;
@@ -3967,7 +4478,29 @@ async function siteAction(wrap, a, row) {
 
 const COUNTRIES = 'PK IN AE SA QA KW OM BH BD LK NP AF IR TR EG MA US CA GB IE AU NZ DE FR IT ES NL BE SE NO DK FI PL PT CH AT CZ RO GR HU JP KR CN HK TW SG MY ID TH PH VN BR MX AR CL CO PE ZA NG KE'.split(' ');
 
-async function openSettings() {
+// The browser choice: built-in, recommended (auto), each browser found, yours, or Browse.
+function browserOptions(s, data) {
+  const cur = s.browser_path || '';
+  const found = data.browsers || [];
+  const auto = data.status.browser && data.status.browser !== 'builtin' ? data.status.browser : '';
+  const autoName = auto ? (found.find((b) => b.path === auto)?.name || auto.split(/[\\/]/).pop().replace(/\.(exe|app)$/i, '')) : 'your default browser';
+  const opts = [['', `Recommended - ${autoName}`], ['builtin', 'Built-in browser (a window of this app)'],
+    ...found.filter((b) => b.path !== auto || cur === b.path).map((b) => [b.path, b.name])];
+  if (cur && !opts.some(([v]) => v === cur)) opts.push([cur, `${cur.split(/[\\/]/).pop()} (yours)`]);
+  opts.push(['__browse', 'Another… (Browse)']);
+  return opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+}
+
+function playerOptions(s, data) {
+  const cur = s.custom_player_path || '';
+  const opts = (data.players || []).map((p) => [p.path, p.name]);
+  if (!cur) opts.unshift(['', 'Choose one…']);
+  else if (!opts.some(([v]) => v === cur)) opts.push([cur, `${cur.split(/[\\/]/).pop()} (yours)`]);
+  opts.push(['__browse', 'Another… (Browse)']);
+  return opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+}
+
+async function openSettings(focus = '') {
   let data;
   try { data = await api('GET', '/api/settings'); } catch (e) { fail(e); return; }
   const s = data.settings;
@@ -4002,22 +4535,23 @@ async function openSettings() {
       <select class="select" name="region">${countries.map(({ c, name }) => `<option value="${c}" ${c === s.region ? 'selected' : ''}>${esc(name)} (${c})</option>`).join('')}</select>
       <small>Used to check which of your streaming services have a title where you are.</small></label>
     <label class="field"><span>Browser</span>
-      <div class="input-row"><input class="input" name="browser_path" value="${esc(s.browser_path)}" placeholder="${esc(data.status.browser || (mac ? '/Applications/Opera GX.app' : 'Opera GX: ...\\AppData\\Local\\Programs\\Opera GX\\launcher.exe'))}">
-      <button class="btn btn-ghost btn-sm" type="button" data-s="browser">Browse</button></div>
-      <small>${data.status.browser ? `<span class="ok">✓ Using:</span> ${esc(data.status.browser)}. Leave empty to keep this.`
-        : `<span class="bad">Opera GX wasn't found</span> - links open in your default browser. ${mac ? 'Browse to Opera GX in Applications' : "Browse to Opera GX's launcher.exe"} to use it.`}
-        Your streaming services, sites and trailers open here.</small></label>
-    <div class="field"><span>Your streaming services and sites</span>
+      <div class="input-row"><select class="select" id="browser-pick">${browserOptions(s, data)}</select>
+      <button class="btn btn-ghost btn-sm" type="button" data-s="browser">Browse…</button></div>
+      <input type="hidden" name="browser_path" value="${esc(s.browser_path)}">
+      <small>Your streaming services, sites and trailers open here. <b>Built-in browser</b> opens them in a simple window of this app${data.status.windows ? '' : ' (when the app runs in its own window)'};
+        <b>Recommended</b> uses Opera GX when it's installed, else your default browser.</small></label>
+    <div class="field" id="svc-field"><span>Your streaming services and sites</span>
       <div id="svc-list"></div>
-      <div class="svc-add"><select class="select" id="svc-preset"><option value="">+ Add a service or site…</option></select></div>
-      <small>Watch now (online) goes down this list and opens the first one that fits: a service you subscribe to
-        (ticked "only when it has it") only when TMDB says it has the title in your country, a site every time. You can also pick any of them
-        when you watch. For a site: search for any title on it, copy the address of the results page, and put <b>{title}</b> where the title was.</small></div>
-    <label class="field"><span>If none of them fit, open</span><input class="input" name="fallback_url" value="${esc(s.fallback_url)}"></label>
-    <h4>Your torrent site <span class="tag-optional">anime</span></h4>
+      <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="svc-add">+ Add…</button></div>
+      <div id="svc-picker" class="svc-picker hidden"></div>
+      <small>Watch now (online) goes down this list and opens the first one that fits. Each one's <b>check</b> says when it fits:
+        <b>TMDB</b> or <b>AI</b> - only when that says it has the title in your country (✓ / ✗ shows next to it when you watch);
+        <b>No check</b> - every time (for your own sites). Nothing else is ever opened. You can also pick any of them when you watch.
+        For your own site: search for any title on it, copy the address of the results page, and put <b>{title}</b> where the title was.</small></div>
+    <h4>Your torrent sites</h4>
     <div class="field"><div id="site-list"></div>
-      <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="site-add">+ Add your site</button></div>
-      <small><b>Get magnet</b> on an anime's page searches it, picks the torrent that has every episode (a pack with other seasons, films or OVAs is fine), in the best quality with the most seeders, and adds it.
+      <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="site-add">+ Add a site</button></div>
+      <small><b>Get magnet</b> on a title's page searches the sites ticked for its kind (anime, TV shows, movies), picks the torrent that has every episode (for a TV show, of the season you're on; a pack with other seasons, films or OVAs is fine) or the film, in the best quality with the most seeders, and adds it.
         For the search link: search for any anime on your site, copy the address of the results page, and put <b>{title}</b> where the name was.
         <b>Test</b> shows what the app can read from it.</small></div>
     <h4>Your downloads</h4>
@@ -4031,27 +4565,30 @@ async function openSettings() {
     <h4>AI helpers <span class="tag-optional">optional</span></h4>
     <p class="muted small" style="margin-top:-4px">Everything works without them: the app's own rules and MyAnimeList / TMDB searches sort your downloads.
       With a key, the AI also sorts files those couldn't place (Sort now with AI), writes the story guide in Everything connected, suggests what to watch (I'm in the mood for…) and writes "previously on" recaps.
-      They're asked in this order; when one has run out for the day or is overloaded, the next one answers, and the one that ran out is left alone for a while.
+      They're asked in the order below (↑ ↓ to change it); when one has run out for the day or is overloaded, the next one answers, and the one that ran out is left alone for a while.
+      The first three are free and recommended; you can also add your own (OpenAI, Claude, DeepSeek, Mistral, Grok, one on your computer…).
       Only names are sent (file names and the titles in your list), never your files.</p>
-    ${aiKeyRow(s, data.status, 'gemini', 'Gemini (Google) - free', 'gemini_api_key',
-      'Go to <b>aistudio.google.com</b>, sign in with your Google account, click <b>Get API key</b> → Create API key. Google may use what\'s sent on the free tier to improve its products.')}
-    ${aiKeyRow(s, data.status, 'groq', 'Groq - free', 'groq_api_key',
-      'Go to <b>console.groq.com</b>, sign up (no card needed), open <b>API Keys</b> → Create API Key. Fast open models such as gpt-oss and Llama.')}
-    ${aiKeyRow(s, data.status, 'openrouter', 'OpenRouter - free models', 'openrouter_api_key',
-      'Go to <b>openrouter.ai</b>, sign up, open <b>Keys</b> → Create Key. Only its free models are used (about 50 requests a day, shared between them).')}
+    <div id="ai-list"></div>
+    <div class="svc-add"><select class="select" id="ai-preset"><option value="">+ Add your own AI…</option></select></div>
     <h4>Watching on your ${pcName()}</h4>
     <label class="field"><span>Player</span>
       <select class="select" name="player">
         <option value="mpv" ${s.player === 'mpv' ? 'selected' : ''}>Built-in player (mpv) - remembers where you stopped</option>
-        <option value="vlc" ${s.player === 'vlc' ? 'selected' : ''}>VLC</option></select>
+        <option value="vlc" ${s.player === 'vlc' ? 'selected' : ''}>VLC</option>
+        <option value="custom" ${s.player === 'custom' ? 'selected' : ''}>Another player of your choice…</option></select>
       <small>${data.status.mpv ? '<span class="ok">✓ Built-in player ready.</span>' : '<span class="bad">The built-in player is missing</span> - VLC is used instead.'}
-        You can always pick "Play in VLC" for a single episode.</small></label>
+        You can always pick "Play in VLC" for a single episode. Watch parties, skipping openings and remembering where you stopped need the built-in player.</small></label>
+    <label class="field ${s.player === 'custom' ? '' : 'hidden'}" id="custom-player-field"><span>Your player</span>
+      <div class="input-row"><select class="select" id="player-pick">${playerOptions(s, data)}</select>
+      <button class="btn btn-ghost btn-sm" type="button" data-s="player-browse">Browse…</button></div>
+      <input type="hidden" name="custom_player_path" value="${esc(s.custom_player_path)}">
+      <small>${data.players.length ? `Found on this ${pcName()}: ${esc(data.players.map((x) => x.name).join(', '))}.` : `No other players were found - Browse to one.`}</small></label>
     <label class="field"><span>VLC location</span>
       <div class="input-row"><input class="input" name="vlc_path" value="${esc(s.vlc_path)}" placeholder="${esc(data.status.vlc || (mac ? '/Applications/VLC.app' : 'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe'))}">
       <button class="btn btn-ghost btn-sm" type="button" data-s="vlc">Browse</button></div>
       <small>${data.status.vlc ? `<span class="ok">✓ Found VLC:</span> ${esc(data.status.vlc)}. Leave empty to use this.` : `<span class="bad">VLC not found.</span> Install it from videolan.org or browse to ${mac ? 'VLC in Applications' : 'vlc.exe'}.`}</small></label>
     <label class="check-row"><input type="checkbox" name="queue_next_episodes" ${s.queue_next_episodes ? 'checked' : ''}> Play the following episodes after the one you start</label>
-    <label class="check-row"><input type="checkbox" name="skip_intro" ${s.skip_intro ? 'checked' : ''}> Skip openings and endings in the built-in player (when the file marks them with chapters; press <b>Shift+S</b> while watching to toggle)</label>
+    <label class="check-row"><input type="checkbox" name="skip_intro" ${s.skip_intro ? 'checked' : ''}> <span>Skip openings and endings in the built-in player (when the file marks them with chapters; press <b>Shift+S</b> while watching to toggle)</span></label>
     <h4>Watch together</h4>
     <label class="field"><span>Your name in watch parties</span>
       <input class="input" name="party_name" value="${esc(s.party_name)}" placeholder="e.g. Ali"></label>
@@ -4065,29 +4602,54 @@ async function openSettings() {
   wrap.svc = JSON.parse(JSON.stringify(s.services || []));
   wrap.sites = JSON.parse(JSON.stringify(s.torrent_sites || []));
   drawSites(wrap);
+  {
+    const custom = JSON.parse(JSON.stringify(s.ai_custom || []));
+    const known = ['gemini', 'groq', 'openrouter', ...custom.map((c) => `custom:${c.id}`)];
+    const order = [...(s.ai_order || []).filter((x) => known.includes(x)), ...known.filter((x) => !(s.ai_order || []).includes(x))];
+    wrap.st = wrap.st || {};
+    wrap.st.ai = { order, custom, settings: { ...s }, status: data.status };
+    drawAiList(wrap);
+    api('GET', '/api/settings/ai-presets').then(({ presets }) => {
+      wrap.st.ai.presets = presets;
+      $('#ai-preset', wrap).innerHTML = `<option value="">+ Add your own AI…</option>${presets.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join('')}<option value="other">Another (any OpenAI-style API)…</option>`;
+    }).catch(() => {});
+    $('#ai-preset', wrap).addEventListener('change', (e) => {
+      const v = e.target.value;
+      if (!v) return;
+      readAiList(wrap);
+      const p = v === 'other' ? { name: '', kind: 'openai', url: '', keys: '' } : wrap.st.ai.presets[Number(v)];
+      const id = Math.random().toString(36).slice(2, 10);
+      wrap.st.ai.custom.push({ id, name: p.name, kind: p.kind, url: p.url, key: '', model: '', keys: p.keys });
+      wrap.st.ai.order.push(`custom:${id}`);
+      e.target.value = '';
+      drawAiList(wrap);
+      $(`#ai-list [data-id="custom:${id}"] ${v === 'other' ? '.ai-name' : '.ai-key'}`, wrap)?.focus();
+    });
+  }
   drawServices(wrap);
-  api('GET', '/api/services/presets').then(({ presets }) => {
-    wrap.presets = presets;
-    $('#svc-preset', wrap).innerHTML = `<option value="">+ Add a service or site…</option>${presets.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join('')}<option value="site">Another site (a search link)…</option>`;
-  }).catch(() => {});
-  $('#svc-preset', wrap).addEventListener('change', (e) => {
-    const v = e.target.value;
-    if (!v) return;
-    readServices(wrap);
-    const p = v === 'site' ? { name: '', url: '', check: [] } : wrap.presets[Number(v)];
-    wrap.svc.push({ id: '', name: p.name, url: p.url, check: [...p.check], types: ['anime', 'tv', 'movie'], on: true });
-    e.target.value = '';
-    drawServices(wrap);
-    $$('#svc-list .svc-row', wrap).pop()?.querySelector(v === 'site' ? '.svc-url' : '.svc-name')?.focus();
+  api('GET', '/api/services/presets').then(({ presets }) => { wrap.presets = presets; drawServicePicker(wrap); }).catch(() => {});
+  if (focus === 'svc') {
+    $('#svc-picker', wrap).classList.remove('hidden');
+    setTimeout(() => $('#svc-field', wrap)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  }
+  $('#browser-pick', wrap).addEventListener('change', (e) => {
+    if (e.target.value === '__browse') { e.target.value = form.browser_path.value; $('[data-s="browser"]', wrap).click(); return; }
+    form.browser_path.value = e.target.value;
+  });
+  form.player.addEventListener('change', () => $('#custom-player-field', wrap).classList.toggle('hidden', form.player.value !== 'custom'));
+  $('#player-pick', wrap).addEventListener('change', (e) => {
+    if (e.target.value === '__browse') { e.target.value = form.custom_player_path.value; $('[data-s="player-browse"]', wrap).click(); return; }
+    form.custom_player_path.value = e.target.value;
   });
   const values = () => {
     const f = new FormData(form);
     return {
       tmdb_api_key: f.get('tmdb_api_key'), mal_client_id: f.get('mal_client_id'), region: f.get('region'),
-      fallback_url: f.get('fallback_url'), services: readServices(wrap), torrent_sites: readSites(wrap),
+      services: readServices(wrap), torrent_sites: readSites(wrap), custom_player_path: f.get('custom_player_path'),
       vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), sync_folder: f.get('sync_folder'),
       downloads_folder: f.get('downloads_folder'), player: f.get('player'), queue_next_episodes: form.queue_next_episodes.checked,
       gemini_api_key: f.get('gemini_api_key'), groq_api_key: f.get('groq_api_key'), openrouter_api_key: f.get('openrouter_api_key'),
+      ...(() => { const st = readAiList(wrap); return { ai_custom: st.custom.map(({ keys, ...c }) => c), ai_order: st.order }; })(),
       skip_intro: form.skip_intro.checked,
       party_name: f.get('party_name'), party_server: f.get('party_server'),
     };
@@ -4116,15 +4678,24 @@ async function openSettings() {
           ? { kind: 'file', types: 'app', title: 'Find VLC', initial: '/Applications' }
           : { kind: 'file', types: 'exe', title: 'Find vlc.exe', initial: 'C:\\Program Files\\VideoLAN\\VLC' });
         if (path) form.vlc_path.value = path;
-      } else if (a === 'browser') {
+      } else if (a === 'browser' || a === 'player-browse') {
+        const browser = a === 'browser';
         const { path } = await api('POST', '/api/browse', mac
-          ? { kind: 'file', types: 'app', title: 'Find Opera GX', initial: '/Applications' }
-          : { kind: 'file', types: 'exe', title: "Find Opera GX's launcher.exe" });
-        if (path) form.browser_path.value = path;
+          ? { kind: 'file', types: 'app', title: browser ? 'Choose a browser' : 'Choose a media player', initial: '/Applications' }
+          : { kind: 'file', types: 'exe', title: browser ? 'Choose a browser (its .exe)' : 'Choose a media player (its .exe)' });
+        if (path) {
+          const field = browser ? form.browser_path : form.custom_player_path;
+          const pick = $(browser ? '#browser-pick' : '#player-pick', wrap);
+          field.value = path;
+          if (![...pick.options].some((o) => o.value === path)) pick.add(new Option(path.split(/[\\/]/).pop().replace(/\.(exe|app)$/i, '') + ' (yours)', path), pick.options.length - 1);
+          pick.value = path;
+        }
+      } else if (['ai-up', 'ai-down', 'ai-del', 'ai-test-custom'].includes(a)) {
+        await aiListAction(wrap, a, e.target.closest('[data-s]'));
       } else if (a.startsWith('site-')) {
         await siteAction(wrap, a, e.target.closest('[data-i]'));
       } else if (a.startsWith('svc-')) {
-        serviceAction(wrap, a, e.target.closest('[data-i]'));
+        serviceAction(wrap, a, e.target.closest(a === 'svc-pick' ? '[data-p]' : '[data-i]'));
       } else if (a === 'dl-browse') {
         const { path } = await api('POST', '/api/browse', { kind: 'folder', title: 'Choose your downloads folder', initial: form.downloads_folder.value });
         if (path) form.downloads_folder.value = path;
@@ -4158,4 +4729,10 @@ async function openSettings() {
 
 /* ================================================================ go */
 
-reload().catch(fail);
+// The watch party in a window of its own: only its dock, full size.
+if (location.hash === '#/party-window') {
+  document.body.classList.add('party-window');
+  document.title = 'Watch party - Watch Anything';
+  party.open = true;
+  pollParty();
+} else reload().catch(fail);

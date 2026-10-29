@@ -882,5 +882,5 @@ def verify(settings, picks):
                                and any(n.startswith(want + " ") for n in names(r))), None)
         return dict(found, type=kind, why=p.get("why", "")) if found else None
 
-    with ThreadPoolExecutor(4) as pool:
+    with ThreadPoolExecutor(8) as pool:
         return [r for r in pool.map(one, picks) if r]

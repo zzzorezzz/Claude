@@ -1,4 +1,4 @@
-"""Sharing a collection with someone else who has Watchlist.
+"""Sharing a collection with someone else who has Watch Anything.
 
 A shared collection is its name and, for each title, where its info comes
 from (TMDB or MyAnimeList), with the title, year and poster so it can be
@@ -47,7 +47,7 @@ def read(text):
         try:
             text = json.loads(text).get("watchlist_collection", "")
         except (ValueError, AttributeError) as e:
-            raise ShareError("that file isn't a shared Watchlist collection") from e
+            raise ShareError("that file isn't a shared Watch Anything collection") from e
     m = re.search(re.escape(PREFIX) + r"([A-Za-z0-9_-]+)", text)
     if not m:
         raise ShareError("that isn't a shared collection - it should start with " + PREFIX)
@@ -73,4 +73,4 @@ def read(text):
 
 def file_name(name):
     safe = re.sub(r'[\\/:*?"<>|]+', " ", name).strip() or "collection"
-    return f"Watchlist - {safe[:60]}{EXTENSION}"
+    return f"Watch Anything - {safe[:60]}{EXTENSION}"

@@ -12,7 +12,7 @@ import ssl
 import urllib.error
 import urllib.request
 
-UA = "Watchlist/1.0 (personal desktop app)"
+UA = "WatchAnything/1.0 (personal desktop app)"
 
 
 class NetError(Exception):
@@ -68,7 +68,7 @@ def _describe(e, service):
         return f"couldn't make a secure connection to {service} ({reason})", "secure"
     if isinstance(reason, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError)):
         return (f"the connection to {service} was blocked or cut off - a firewall or "
-                "antivirus may be stopping Watchlist"), "blocked"
+                "antivirus may be stopping Watch Anything"), "blocked"
     if isinstance(e, http.client.HTTPException):
         return f"{service} closed the connection before answering", "dropped"
     return f"couldn't reach {service} ({reason}) - are you online?", "offline"

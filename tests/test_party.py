@@ -4,6 +4,7 @@ through a stand-in Syncplay server. Skipped where mpv isn't installed."""
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -88,6 +89,16 @@ class PartyTest(unittest.TestCase):
     def pos(self, app):
         return app.player.session.position()
 
+    def guest_session(self, ending):
+        """The guest's player, once it's playing the file whose name ends so."""
+        self.assertTrue(wait_for(lambda: self.guest.player.session and self.guest.player.session.current()
+                                 and self.guest.player.session.current()["path"].endswith(ending), 20),
+                        self.guest.party_status())
+        return self.guest.player.session
+
+    def state_of(self, app, name):
+        return next(p for p in app.party_status()["people"] if p["name"] == name)
+
     def test_watching_together(self):
         started = self.host.party_start(self.host.store.get(self.host_item["id"]), 1, 5)
         self.assertTrue(started["ok"], started)
@@ -97,12 +108,12 @@ class PartyTest(unittest.TestCase):
 
         joined = self.guest.party_join(started["code"])
         self.assertTrue(joined["ok"], joined)
-        self.assertEqual(joined["file"], "Test.Show.S01E05.720p.mkv")   # found by episode, not by name
+        guest_session = self.guest_session("Test.Show.S01E05.720p.mkv")     # found by episode, not by name
         guest_party = self.guest.party
-        guest_session = self.guest.player.session
         self.assertTrue(wait_for(lambda: guest_session.connected and not guest_party._init_pending))
         self.assertTrue(guest_session.paused)
         self.assertEqual({p["name"] for p in self.host.party.status()["people"]}, {"Ali", "Sara"})
+        self.assertTrue(wait_for(lambda: self.state_of(self.host, "Sara")["state"] == "watching"))
 
         # The host presses play: both play.
         host_session.send(["set_property", "pause", False])
@@ -127,23 +138,73 @@ class PartyTest(unittest.TestCase):
         self.assertTrue(wait_for(lambda: abs(self.pos(self.host) - self.pos(self.guest)) < 1.5, 8))
         self.assertLess(self.pos(self.guest), 15)
 
-        # The host closes the player: the guest's ends too.
+        # The host closes the player: the party carries on (everyone paused).
         host_session.stop()
-        self.assertTrue(wait_for(lambda: guest_session.ended, 15))
+        self.assertTrue(wait_for(lambda: guest_session.paused, 10))
+        time.sleep(1)
+        self.assertTrue(self.host.party_status()["active"])
+        self.assertTrue(self.guest.party_status()["active"])
+
+        # The host ends the party: it's over for the guest too.
+        self.host.party_leave()
+        self.assertTrue(wait_for(lambda: not self.guest.party_status()["active"], 15))
         self.assertIn("Ali left", self.guest.party_status()["ended"])
-        self.assertFalse(self.host.party_status()["active"])
+
+    def test_a_party_without_anything_playing_yet(self):
+        started = self.host.party_start()
+        self.assertTrue(started["ok"], started)
+        self.assertIsNone(self.host.player.session)
+        joined = self.guest.party_join(started["code"])
+        self.assertTrue(joined["ok"], joined)
+        self.assertEqual(self.guest.party_status()["host_playing"], "")
+        # The guest closes nothing and waits; the host plays something from their list.
+        item = self.host.store.get(self.host_item["id"])
+        target = self.host.local_info(item, 1, 6)["target"]
+        self.host.play(item, {"path": target["path"], "season": 1, "episode": 6})
+        guest_session = self.guest_session("S01E06.720p.mkv")
+        self.assertTrue(wait_for(lambda: self.state_of(self.host, "Sara")["state"] == "watching"))
+        # The guest closes their player and leaves: the host carries on.
+        guest_session.stop()
+        self.guest.party_leave()
+        self.assertTrue(wait_for(lambda: len(self.host.party_status()["people"]) == 1, 10))
+        self.assertTrue(self.host.party_status()["active"])
+        self.assertFalse(self.host.player.session.ended)
 
     def test_guest_without_the_episode(self):
         self.guest, _ = self.make_app("Zoe", {6: "Test.Show.S01E06.mkv"})
         started = self.host.party_start(self.host.store.get(self.host_item["id"]), 1, 5)
         self.assertTrue(wait_for(lambda: self.host.party.people.get("Ali")))
         joined = self.guest.party_join(started["code"])
-        self.assertFalse(joined["ok"])
-        self.assertIn("Test Show - S1 E5", joined["message"])
+        self.assertTrue(joined["ok"], joined)
+        self.assertTrue(wait_for(lambda: self.guest.party_status()["mine"]["status"] == "needs-file"))
+        self.assertIn("Test Show - S1 E5", self.guest.party_status()["missing"])
+        # The host sees it next to the guest's name.
+        self.assertTrue(wait_for(lambda: self.state_of(self.host, "Zoe")["state"] == "needs-file"))
         # Picking the file by hand works.
         path = str(Path(self.guest.settings.get()["downloads_folder"]) / "Test.Show.S01E06.mkv")
-        joined = self.guest.party_join(started["code"], path)
-        self.assertTrue(joined["ok"], joined)
+        self.assertTrue(self.guest.party_use_file(path)["ok"])
+        self.guest_session("Test.Show.S01E06.mkv")
+        self.assertTrue(wait_for(lambda: self.state_of(self.host, "Zoe")["state"] == "watching"))
+
+    def test_the_host_sees_a_guest_getting_ready(self):
+        started = self.host.party_start(self.host.store.get(self.host_item["id"]), 1, 5)
+        self.assertTrue(wait_for(lambda: self.host.party.people.get("Ali")))
+        go = threading.Event()
+        real = self.guest.party_resolve
+
+        def slow(file_, report=None, at=0.0):
+            report("preparing", 0.4, 12, "Test Show - S1 E5")   # a torrent getting ready
+            go.wait(15)
+            return real(file_)
+        with mock.patch.object(self.guest, "party_resolve", side_effect=slow):
+            self.guest.party_join(started["code"])
+            self.assertTrue(wait_for(lambda: self.state_of(self.host, "Sara")["state"] == "preparing"))
+            sara = self.state_of(self.host, "Sara")
+            self.assertEqual((sara["progress"], sara["eta"], sara["label"]), (0.4, 12, "Test Show - S1 E5"))
+            self.assertEqual(self.guest.party_status()["mine"]["progress"], 0.4)
+            go.set()
+            self.guest_session("S01E05.720p.mkv")
+            self.assertTrue(wait_for(lambda: self.state_of(self.host, "Sara")["state"] == "watching"))
 
     def test_finds_a_download_that_isnt_sorted_yet(self):
         self.guest, _ = self.make_app("Zoe", {5: "Test - 05.mkv"})
@@ -152,7 +213,7 @@ class PartyTest(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.host.party.people.get("Ali")))
         joined = self.guest.party_join(started["code"])
         self.assertTrue(joined["ok"], joined)
-        self.assertEqual(joined["file"], "Test - 05.mkv")
+        self.guest_session("Test - 05.mkv")
 
     def test_old_invite(self):
         started = self.host.party_start(self.host.store.get(self.host_item["id"]), 1, 5)

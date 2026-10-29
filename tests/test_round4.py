@@ -124,7 +124,7 @@ class ShareTest(test_server.ServerBase):
         with mock.patch.object(Path, "home", return_value=home), mock.patch.object(launcher, "reveal") as reveal:
             status, r = self.call("POST", f"/api/collections/{col['id']}/save")
         self.assertEqual(status, 200, r)
-        self.assertTrue(r["path"].endswith("Watchlist - Weekend.wlcollection"))
+        self.assertTrue(r["path"].endswith("Watch Anything - Weekend.wlcollection"))
         reveal.assert_called_once()
         status, peek = self.call("POST", "/api/shared/peek", {"file": r["path"]})
         self.assertEqual((status, peek["name"], len(peek["items"])), (200, "Weekend", 2))

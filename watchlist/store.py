@@ -67,6 +67,9 @@ def _blank_item() -> dict:
         "last_played": None,
         "in_watched": None,  # in your Watched list since then
         "watched_at": None,  # a film: when it was last played to the end
+        # Your own review, only in this app: {"stars": 1-5, "text", "at"}.
+        "review": None,
+        "opened_at": None,   # when its page was last opened (for "Recently opened")
         "updated": now,      # when the online info was last fetched
         "modified": now,     # when anything about it last changed (for sync)
     }

@@ -1,4 +1,4 @@
-"""Start Watchlist: python -m watchlist (or open Watchlist.exe / Watchlist.app)."""
+"""Start Watch Anything: python -m watchlist (or open Watch Anything.exe / Watch Anything.app)."""
 
 import argparse
 import json
@@ -21,17 +21,17 @@ def _already_running(port):
 
 
 def _tell(message):
-    """Print, and also show a message box when running as Watchlist.exe (no console)."""
+    """Print, and also show a message box when running as Watch Anything.exe (no console)."""
     print(message)
     if not getattr(sys, "frozen", False):
         return
     if sys.platform == "win32":
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, message, "Watchlist", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, message, "Watch Anything", 0x10)
     elif sys.platform == "darwin":
         import subprocess
         subprocess.run(["osascript", "-e", "on run argv", "-e",
-                        'display alert "Watchlist" message (item 1 of argv) as critical',
+                        'display alert "Watch Anything" message (item 1 of argv) as critical',
                         "-e", "end run", message], check=False)
 
 
@@ -40,6 +40,10 @@ def _self_test(path):
     from .server import WEB_DIR
     report = {"frozen": bool(getattr(sys, "frozen", False)),
               "web_files": all((WEB_DIR / f).is_file() for f in ("index.html", "app.js", "style.css"))}
+    # The built-in player's modern controls (uosc), fetched by the build.
+    from .player import UI_DIR
+    report["player_ui"] = all((UI_DIR / f).is_file() for f in
+                              ("scripts/uosc/main.lua", "fonts/uosc_icons.otf", "script-opts/uosc.conf"))
     # The modules the app window needs: pythonnet on Windows, PyObjC + WebKit on a Mac.
     needed = {"win32": ("webview", "clr"), "darwin": ("webview", "webview.platforms.cocoa")}
     for module in needed.get(sys.platform, ("webview",)):
@@ -143,9 +147,10 @@ def main(argv=None):
     url = f"http://127.0.0.1:{args.port}/"
     data_dir = Path(args.data) if args.data else default_data_dir()
     if _already_running(args.port):
-        print(f"Watchlist is already running - opening {url}")
+        print(f"Watch Anything is already running - opening {url}")
         if not args.no_open:
             browser = launcher.find_browser(Settings(data_dir / "settings.json").get()["browser_path"])
+            browser = "" if browser == launcher.BUILTIN_BROWSER else browser
             launcher.open_app_window(url, browser)
         return 0
 
@@ -153,14 +158,15 @@ def main(argv=None):
     try:
         server = make_server(app, args.port)
     except OSError as e:
-        _tell(f"Watchlist couldn't start: port {args.port} is in use by another program ({e}).\n\n"
-              f"Start it with a different port, e.g.: Watchlist.exe --port 8800")
+        _tell(f"Watch Anything couldn't start: port {args.port} is in use by another program ({e}).\n\n"
+              'Start it with a different port, e.g.: "Watch Anything.exe" --port 8800')
         return 1
     start_background_refresh(app)
-    print(f"Watchlist is running at {url}")
+    print(f"Watch Anything is running at {url}")
     print("Keep this window open while you use the app. Close it (or press Ctrl+C) to quit.")
 
     browser = launcher.find_browser(app.settings.get()["browser_path"])
+    browser = "" if browser == launcher.BUILTIN_BROWSER else browser     # (that's for your sites)
     if not args.no_open:
         if args.browser:
             launcher.open_url(url, browser)

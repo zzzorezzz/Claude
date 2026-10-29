@@ -29,23 +29,25 @@ DEFAULT_SETTINGS = {
     # Links opened for online viewing. {title} is replaced with the title.
     "netflix_url": "https://www.netflix.com/search?q={title}",
     "hbomax_url": "https://play.hbomax.com/search?q={title}",
-    "fallback_url": "https://everythingmoe.com",
     # Where to watch online, in order: [{"id", "name", "url" with {title},
-    # "check": TMDB's names for it (only used when it has the title) or [] (a
-    # site that's always searched), "types": ["anime", "tv", "movie"], "on"}].
+    # "check": TMDB's names for it, "check_mode": "tmdb" / "ai" (only used when
+    # it has the title in your country) or "off" (always searched),
+    # "types": ["anime", "tv", "movie"], "on"}]. Nothing else is ever opened.
     # None until first used: then made from the older settings above and below.
     "services": None,
     # Your own torrent sites, searched by "Get magnet" on an anime's page:
     # [{"id", "name", "url" (its search link, with {title}), "on"}]. Empty: none.
     "torrent_sites": [],
     # Your own sites, searched when Netflix and HBO Max don't have a title.
-    # {title} is replaced with the title. Empty means use fallback_url.
+    # {title} is replaced with the title (older versions; now part of "services").
     "anime_site_url": "",
     "movie_tv_site_url": "",
     # One folder holding all your downloads, sorted into titles automatically.
     "downloads_folder": "",
-    # "mpv" (the built-in player) or "vlc".
+    # "mpv" (the built-in player), "vlc", or "custom" (custom_player_path).
     "player": "mpv",
+    # Another media player of your choice (its program, or its .app on a Mac).
+    "custom_player_path": "",
     # A folder both computers sync (Google Drive, OneDrive, Dropbox, iCloud
     # Drive...). When set, the list lives there instead of the data folder.
     "sync_folder": "",
@@ -58,6 +60,11 @@ DEFAULT_SETTINGS = {
     # run out or can't be reached, the next one is used.
     "groq_api_key": "",
     "openrouter_api_key": "",
+    # Your own AI helpers: [{"id", "name", "kind" ("openai" or "anthropic"), "url",
+    # "key", "model" (empty: the app picks)}], and the order every helper is
+    # asked in: ["gemini", "groq", "openrouter", "custom:<id>", ...].
+    "ai_custom": [],
+    "ai_order": [],
     # Skip openings and endings in the built-in player (when the file marks them).
     "skip_intro": True,
     # Watch together (Syncplay): your name, the server and Syncplay's location.
@@ -65,12 +72,39 @@ DEFAULT_SETTINGS = {
     "party_server": "syncplay.pl:8999",
 }
 
-URL_KEYS = ("netflix_url", "hbomax_url", "fallback_url")
+URL_KEYS = ("netflix_url", "hbomax_url")
+# What older versions opened when nothing else fitted. Now you add it yourself.
+OLD_FALLBACK = "https://everythingmoe.com"
 OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
-TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "sync_folder",
+TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "custom_player_path", "sync_folder",
              "downloads_folder", "last_folder", "gemini_api_key", "groq_api_key", "openrouter_api_key",
              "party_name", "party_server")
 BOOL_KEYS = ("queue_next_episodes", "skip_intro")
+
+
+def clean_ai_custom(helpers):
+    """Your own AI helpers from Settings, checked. Raises ValueError."""
+    import uuid
+    if not isinstance(helpers, list):
+        raise ValueError("your AI helpers must be a list")
+    out, seen = [], set()
+    for x in helpers[:12]:
+        if not isinstance(x, dict):
+            continue
+        name = str(x.get("name") or "").strip()[:40]
+        url = str(x.get("url") or "").strip().rstrip("/")
+        if not name and not url:
+            continue
+        if not url.lower().startswith(("http://", "https://")):
+            raise ValueError(f'{name or "your AI helper"}: its address must start with https:// (or http:// on your computer)')
+        kind = x.get("kind") if x.get("kind") in ("openai", "anthropic") else "openai"
+        hid = re.sub(r"[^\w-]", "", str(x.get("id") or ""))[:16] or uuid.uuid4().hex[:8]
+        if hid in seen:
+            hid = uuid.uuid4().hex[:8]
+        seen.add(hid)
+        out.append({"id": hid, "name": name or url, "kind": kind, "url": url,
+                    "key": str(x.get("key") or "").strip(), "model": str(x.get("model") or "").strip()[:80]})
+    return out
 
 
 def default_data_dir() -> Path:
@@ -128,6 +162,13 @@ class Settings:
         if not isinstance(data.get("services"), list):
             from .services import from_old_settings
             data["services"] = from_old_settings(data)
+        # A fallback site you set yourself in an older version stays, as the last of your sites.
+        old = stored.get("fallback_url") if isinstance(stored, dict) else None
+        if isinstance(old, str) and old.lower().startswith(("http://", "https://")) \
+                and old.rstrip("/") != OLD_FALLBACK and all(x.get("url") != old for x in data["services"]):
+            from .services import host_name, new_id
+            data["services"].append({"id": new_id(), "name": host_name(old), "url": old, "check": [],
+                                     "check_mode": "off", "types": ["anime", "tv", "movie"], "on": True})
         self._data = data
 
     def get(self) -> dict:
@@ -159,12 +200,18 @@ class Settings:
             if "services" in patch:
                 from .services import clean
                 data["services"] = clean(patch["services"])
+            if "ai_custom" in patch:
+                data["ai_custom"] = clean_ai_custom(patch["ai_custom"])
+            if "ai_order" in patch:
+                if not isinstance(patch["ai_order"], list):
+                    raise ValueError("ai_order must be a list")
+                data["ai_order"] = [str(x)[:40] for x in patch["ai_order"]][:30]
             if "torrent_sites" in patch:
                 from .sites import clean as clean_sites
                 data["torrent_sites"] = clean_sites(patch["torrent_sites"])
             if "player" in patch:
-                if patch["player"] not in ("mpv", "vlc"):
-                    raise ValueError("player must be mpv or vlc")
+                if patch["player"] not in ("mpv", "vlc", "custom"):
+                    raise ValueError("player must be the built-in one, VLC or your own")
                 data["player"] = patch["player"]
             if "region" in patch:
                 region = str(patch["region"]).strip().upper()

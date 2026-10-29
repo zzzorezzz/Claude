@@ -389,6 +389,8 @@ class Library:
             m = _SP_NUMBER.search(norm(scanner._clean(Path(v["rel"]).stem)))
             if m:
                 v["episodes"] = [int(m.group(1))]
+        # What its name says, kept so an episode you set by hand can be undone.
+        v["named"] = {"season": v["season"], "episodes": list(v["episodes"]), "kind": v["kind"]}
         return v
 
     def _match_if_needed(self):
@@ -490,6 +492,8 @@ class Library:
 
         for v in self.videos:
             v["item"], v["how"] = None, ""
+            if v.get("named"):
+                v["season"], v["episodes"], v["kind"] = v["named"]["season"], list(v["named"]["episodes"]), v["named"]["kind"]
             answer = files.get(v["rel"])
             target = answer.get("item") if isinstance(answer, dict) else None
             if target == "ignore":
@@ -818,6 +822,29 @@ class Library:
             self.save_answers()
             self._matched_for = None
             self._match_if_needed()
+
+    def sort_again(self, item_id):
+        """Forget how a title's downloads were matched (by the app, and episodes
+        you set for them), so Sort now works them out from scratch."""
+        with self._lock:
+            rels = {v["rel"] for v in self.by_item.get(item_id, [])}
+            tops = set()
+            for rel in rels:
+                self.answers["files"].pop(rel, None)
+                parts = Path(rel).parts
+                if len(parts) > 1:
+                    tops.add(parts[0])
+            for top in tops:
+                self.answers.get("packs", {}).pop(top, None)     # packs are worked out again too
+            keys = {self.title_key(v) for v in self.by_item.get(item_id, [])}
+            for key in keys:
+                self.answers["titles"].pop(key, None)
+                if key in self.answers["rejected"]:
+                    self.answers["rejected"].remove(key)
+            self.save_answers()
+            self._matched_for = None
+            self._match_if_needed()
+            return len(rels)
 
     def forget_item(self, item_id):
         """A title was removed from your list: its files wait for you (Sort now

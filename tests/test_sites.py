@@ -53,6 +53,7 @@ class FakeSite(http.server.BaseHTTPRequestHandler):
             (SHORT, "6.2 GiB", 400), (DEAD, "3.0 GiB", 0), (OTHER, "300 GiB", 80), (TOP, "9 GiB", 500)]
     torrent_file = None       # (name, bytes) of a result offered only as a .torrent file
     searches = []
+    match = "haikyu"          # what a search has to have in it to find anything
 
     def log_message(self, *a):
         pass
@@ -70,8 +71,8 @@ class FakeSite(http.server.BaseHTTPRequestHandler):
         if url.path == "/search":
             q = urllib.parse.parse_qs(url.query).get("q", [""])[0]
             self.searches.append(q)
-            rows = [r for r in self.rows if "haikyu" in q.lower()] or []
-            if self.torrent_file and "haikyu" in q.lower():
+            rows = [r for r in self.rows if self.match in q.lower()] or []
+            if self.torrent_file and self.match in q.lower():
                 rows = rows + [(self.torrent_file[0], "9 GiB", 70)]
             body = "".join(
                 f'<tr><td><a href="/c/1_2" title="Anime - English-translated"><img alt="Anime"></a></td>'
@@ -255,7 +256,7 @@ class FindingTest(SiteBase):
     def test_no_site(self):
         self.app.settings.update({"torrent_sites": []})
         state = self.find()
-        self.assertIn("add your torrent site in Settings", state["error"])
+        self.assertIn("add a torrent site for anime in Settings", state["error"])
 
 
 @unittest.skipUnless(torrents.lt, "libtorrent isn't installed")
@@ -291,3 +292,67 @@ class TorrentFileTest(SiteBase):
         self.assertEqual(self.peeked, [])               # its files came with it
         self.assertEqual(state["added"]["hash"], info["hash"])
 
+
+
+SHOW = "Breaking.Bad.S01.1080p.BluRay.x264-GRP"
+SHOW2 = "Breaking.Bad.S02.720p.WEB-DL"
+SHOW_ALL = "Breaking Bad (2008) Complete Series S01-S05 1080p BluRay"
+SHOW_ONE = "Breaking.Bad.S01E03.1080p.WEB"
+FILM = "Inception.2010.1080p.BluRay.x264-GRP"
+FILM_SMALL = "Inception.2010.Trailer.1080p"
+
+
+def tv_eps(prefix, season, numbers):
+    return [{"index": i, "path": f"{prefix}/{prefix}.S{season:02d}E{n:02d}.mkv", "size": 900_000_000}
+            for i, n in enumerate(numbers)]
+
+
+FILES.update({
+    h(SHOW): tv_eps("Breaking.Bad.S01", 1, range(1, 8)),
+    h(SHOW2): tv_eps("Breaking.Bad.S02", 2, range(1, 14)),
+    h(SHOW_ALL): tv_eps("BB", 1, range(1, 8)) + tv_eps("BB", 2, range(1, 14)),
+    h(FILM): [{"index": 0, "path": f"{FILM}/{FILM}.mkv", "size": 9_000_000_000},
+              {"index": 1, "path": f"{FILM}/Sample/sample.mkv", "size": 40_000_000}],
+    h(FILM_SMALL): [{"index": 0, "path": f"{FILM_SMALL}.mp4", "size": 30_000_000}],
+})
+
+
+class TvAndFilmTest(SiteBase):
+    """Your site for TV shows and films too: the season you're on, or the film."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.settings.update({"torrent_sites": [{"name": "Mine", "url": self.base + "/search?q={title}",
+                                                     "types": ["tv", "movie"]}]})
+        self.addCleanup(setattr, FakeSite, "rows", FakeSite.rows)
+        self.addCleanup(setattr, FakeSite, "match", FakeSite.match)
+
+    def test_a_tv_show_wants_the_season_youre_on(self):
+        FakeSite.rows = [(SHOW2, "8 GiB", 300), (SHOW, "12 GiB", 80), (SHOW_ONE, "1 GiB", 900), (SHOW_ALL, "60 GiB", 40)]
+        FakeSite.match = "breaking"
+        self.item = self.app.store.add(new_item("tv", {
+            "source": "tmdb", "source_id": "tv/1396", "title": "Breaking Bad", "format": "series", "year": 2008,
+            "seasons": [{"number": 1, "episodes": 7}, {"number": 2, "episodes": 13}]}))
+        state = self.find()
+        self.assertEqual(state["error"], "", state["log"])
+        by = {c["name"]: c for c in state["choices"]}
+        self.assertNotIn(SHOW_ONE, by)                          # one episode
+        self.assertEqual((by[SHOW]["has"], by[SHOW]["wanted"], by[SHOW]["complete"]), (7, 7, True))
+        self.assertEqual((by[SHOW_ALL]["has"], by[SHOW_ALL]["seasons"]), (7, [1, 2]))
+        self.assertEqual(by[SHOW2]["has"], 0)                   # season 2 isn't the one you're on
+        self.assertIn("Breaking Bad S01", FakeSite.searches)
+
+    def test_a_film(self):
+        FakeSite.rows = [(FILM_SMALL, "30 MiB", 500), (FILM, "9 GiB", 120)]
+        FakeSite.match = "inception"
+        self.item = self.app.store.add(new_item("movie", {
+            "source": "tmdb", "source_id": "movie/27205", "title": "Inception", "format": "movie", "year": 2010}))
+        state = self.find()
+        self.assertEqual(state["error"], "", state["log"])
+        self.assertEqual(state["added"]["hash"], h(FILM), state["choices"])
+        self.assertEqual(FakeSite.searches[0], "Inception 2010")
+
+    def test_sites_only_for_their_kinds(self):
+        self.item = self.app.store.get(self.item["id"])          # an anime: this site is for TV and films
+        state = self.find()
+        self.assertIn("add a torrent site for anime", state["error"])

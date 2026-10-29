@@ -1,4 +1,4 @@
-name: Build Watchlist (Windows + Mac)
+name: Build Watch Anything (Windows; Mac on request)
 
 on:
   push:
@@ -46,21 +46,36 @@ jobs:
           Copy-Item mpv-dl/x/mpv.exe packaging/mpv/
           Get-ChildItem packaging/mpv | Format-Table Name, Length
 
-      - name: Build Watchlist.exe
+      - name: Get the player's controls (uosc)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo tomasklaen/uosc --pattern uosc.zip --dir uosc-dl
+          7z x uosc-dl/uosc.zip -ouosc-dl/x -y | Out-Null
+          New-Item -ItemType Directory -Force watchlist/mpv_config/scripts | Out-Null
+          Copy-Item -Recurse uosc-dl/x/fonts watchlist/mpv_config/
+          Copy-Item -Recurse uosc-dl/x/scripts/uosc watchlist/mpv_config/scripts/
+          # Its helper programs (for downloading subtitles) aren't used: keeps the app small.
+          Remove-Item -Recurse -Force watchlist/mpv_config/scripts/uosc/bin -ErrorAction SilentlyContinue
+          Get-ChildItem -Recurse watchlist/mpv_config | Measure-Object -Property Length -Sum | Format-List Count, Sum
+
+      - name: Build Watch Anything.exe
         run: >
           pyinstaller main.py --noconfirm --onefile --windowed
-          --name Watchlist
+          --name "Watch Anything"
           --hidden-import libtorrent --collect-binaries libtorrent
           --icon packaging/watchlist.ico
           --add-data "watchlist/web;watchlist/web"
           --add-data "watchlist/mpv_scripts;watchlist/mpv_scripts"
+          --add-data "watchlist/mpv_config;watchlist/mpv_config"
           --add-binary "packaging/mpv/mpv.exe;mpv"
 
       - name: Check the exe has everything it needs
         shell: pwsh
         run: |
           $report = Join-Path $env:RUNNER_TEMP "self-test.json"
-          Start-Process -FilePath "dist\Watchlist.exe" -ArgumentList "--self-test", $report -Wait
+          Start-Process -FilePath "dist\Watch Anything.exe" -ArgumentList "--self-test", $report -Wait
           $r = Get-Content $report | ConvertFrom-Json
           $r | Format-List
           if (-not $r.frozen) { throw "not running as a packaged exe" }
@@ -69,15 +84,16 @@ jobs:
           if ($r.libtorrent -ne $true) { throw "libtorrent (torrent streaming) is missing: $($r.libtorrent)" }
           if ($r.clr -ne $true) { throw "pythonnet (needed for the app window) is missing: $($r.clr)" }
           if ($r.https -ne $true) { throw "secure (HTTPS) connections don't work: $($r.https)" }
+          if ($r.player_ui -ne $true) { throw "the built-in player's controls (uosc) are missing from the exe" }
 
       - name: Check the built-in player plays and is followed
         shell: pwsh
         run: |
           $report = Join-Path $env:RUNNER_TEMP "player-test.json"
-          Start-Process -FilePath "dist\Watchlist.exe" -ArgumentList "--player-test", $report -Wait
+          Start-Process -FilePath "dist\Watch Anything.exe" -ArgumentList "--player-test", $report -Wait
           $r = Get-Content $report | ConvertFrom-Json
           $r | Format-List
-          if (-not $r.mpv) { throw "mpv isn't inside Watchlist.exe" }
+          if (-not $r.mpv) { throw "mpv isn't inside Watch Anything.exe" }
           if ($r.connected -ne $true) { throw "couldn't talk to mpv: $($r.error)" }
           if ($r.finished -ne $true) { throw "playing to the end wasn't noticed (last position $($r.last_position))" }
           if (-not ($r.skip_log -like "opening*")) { throw "the opening skipper didn't work: '$($r.skip_log)'" }
@@ -87,14 +103,14 @@ jobs:
         shell: pwsh
         run: |
           $data = Join-Path $env:RUNNER_TEMP "watchlist-data"
-          $p = Start-Process -FilePath "dist\Watchlist.exe" -ArgumentList "--no-open", "--port", "8791", "--data", $data -PassThru
+          $p = Start-Process -FilePath "dist\Watch Anything.exe" -ArgumentList "--no-open", "--port", "8791", "--data", $data -PassThru
           $ok = $false
           for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
             Start-Sleep -Seconds 1
             try { $ok = (Invoke-RestMethod "http://127.0.0.1:8791/api/ping").app -eq "watchlist" } catch {}
           }
           try {
-            if (-not $ok) { throw "Watchlist.exe didn't start its server" }
+            if (-not $ok) { throw "Watch Anything.exe didn't start its server" }
             foreach ($page in "/", "/app.js", "/style.css", "/icon.svg") {
               $res = Invoke-WebRequest "http://127.0.0.1:8791$page" -UseBasicParsing
               Write-Host "$page -> $($res.StatusCode), $($res.RawContentLength) bytes"
@@ -102,18 +118,22 @@ jobs:
             $state = Invoke-RestMethod "http://127.0.0.1:8791/api/state"
             Write-Host "VLC on this machine: '$($state.status.vlc)'"
           } finally {
-            Get-Process Watchlist -ErrorAction SilentlyContinue | Stop-Process -Force
+            $p | Stop-Process -Force -ErrorAction SilentlyContinue
+            Get-Process "Watch Anything" -ErrorAction SilentlyContinue | Stop-Process -Force
           }
           if (-not (Test-Path $data)) { throw "the data folder wasn't created" }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Watchlist-exe
-          path: dist/Watchlist.exe
+          name: WatchAnything-windows
+          path: dist/Watch Anything.exe
           retention-days: 90
 
   mac:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[mac]')
     runs-on: macos-latest
+    env:
+      APP: dist/Watch Anything.app
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -157,31 +177,44 @@ jobs:
           ditto "$app" ../packaging/mpv.app
           ls -la ../packaging/mpv.app/Contents/MacOS
 
-      - name: Build Watchlist.app
+      - name: Get the player's controls (uosc)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo tomasklaen/uosc --pattern uosc.zip --dir uosc-dl
+          ditto -x -k uosc-dl/uosc.zip uosc-dl/x
+          mkdir -p watchlist/mpv_config/scripts
+          cp -R uosc-dl/x/fonts watchlist/mpv_config/
+          cp -R uosc-dl/x/scripts/uosc watchlist/mpv_config/scripts/
+          rm -rf watchlist/mpv_config/scripts/uosc/bin
+          du -sh watchlist/mpv_config
+
+      - name: Build Watch Anything.app
         run: |
           pyinstaller main.py --noconfirm --windowed \
-            --name Watchlist \
+            --name "Watch Anything" \
             --hidden-import libtorrent --collect-binaries libtorrent \
             --icon packaging/watchlist.icns \
-            --osx-bundle-identifier app.watchlist.desktop \
+            --osx-bundle-identifier app.watchanything.desktop \
             --add-data "watchlist/web:watchlist/web" \
-            --add-data "watchlist/mpv_scripts:watchlist/mpv_scripts"
+            --add-data "watchlist/mpv_scripts:watchlist/mpv_scripts" \
+            --add-data "watchlist/mpv_config:watchlist/mpv_config"
           # The built-in player goes inside the app, then the whole app is signed again.
-          ditto packaging/mpv.app dist/Watchlist.app/Contents/Resources/mpv.app
+          ditto packaging/mpv.app "$APP/Contents/Resources/mpv.app"
           # mpv's own app says it opens every kind of video, which lets macOS make it
-          # the default player for videos. Inside Watchlist it only plays what the app
+          # the default player for videos. Inside Watch Anything it only plays what the app
           # asks it to, so those claims are removed before signing.
-          plist=dist/Watchlist.app/Contents/Resources/mpv.app/Contents/Info.plist
+          plist="$APP/Contents/Resources/mpv.app/Contents/Info.plist"
           for key in CFBundleDocumentTypes CFBundleURLTypes UTExportedTypeDeclarations UTImportedTypeDeclarations NSServices; do
             /usr/libexec/PlistBuddy -c "Delete :$key" "$plist" 2>/dev/null || true
           done
-          codesign --force --deep --sign - dist/Watchlist.app
-          codesign --verify --deep --strict dist/Watchlist.app && echo "signature ok"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP" && echo "signature ok"
 
       - name: Check the app doesn't claim any kind of file
         run: |
-          # Watchlist must never become the default app for videos (or anything else).
-          for p in dist/Watchlist.app/Contents/Info.plist dist/Watchlist.app/Contents/Resources/mpv.app/Contents/Info.plist; do
+          # Watch Anything must never become the default app for videos (or anything else).
+          for p in "$APP/Contents/Info.plist" "$APP/Contents/Resources/mpv.app/Contents/Info.plist"; do
             for key in CFBundleDocumentTypes CFBundleURLTypes UTExportedTypeDeclarations; do
               if /usr/libexec/PlistBuddy -c "Print :$key" "$p" >/dev/null 2>&1; then
                 echo "$p still has $key"; exit 1
@@ -193,26 +226,26 @@ jobs:
       - name: Check the app has everything it needs
         run: |
           report="$RUNNER_TEMP/self-test.json"
-          dist/Watchlist.app/Contents/MacOS/Watchlist --self-test "$report"
+          "$APP/Contents/MacOS/Watch Anything" --self-test "$report"
           cat "$report"; echo
           python3 - "$report" <<'PY'
           import json, sys
           report = json.load(open(sys.argv[1]))
           missing = {k: v for k, v in report.items() if v is not True}
           if missing:
-              sys.exit(f"missing from Watchlist.app: {missing}")
+              sys.exit(f"missing from Watch Anything.app: {missing}")
           PY
 
       - name: Check the built-in player plays and is followed
         run: |
           report="$RUNNER_TEMP/player-test.json"
-          dist/Watchlist.app/Contents/MacOS/Watchlist --player-test "$report"
+          "$APP/Contents/MacOS/Watch Anything" --player-test "$report"
           cat "$report"; echo
           python3 - "$report" <<'PY'
           import json, sys
           r = json.load(open(sys.argv[1]))
           if not r.get("mpv"):
-              sys.exit("mpv isn't inside Watchlist.app")
+              sys.exit("mpv isn't inside Watch Anything.app")
           if r.get("connected") is not True:
               sys.exit(f"couldn't talk to mpv: {r.get('error')}")
           if r.get("finished") is not True:
@@ -225,7 +258,7 @@ jobs:
 
       - name: Start the app and load it
         run: |
-          dist/Watchlist.app/Contents/MacOS/Watchlist --no-open --port 8791 --data "$RUNNER_TEMP/watchlist-data" &
+          "$APP/Contents/MacOS/Watch Anything" --no-open --port 8791 --data "$RUNNER_TEMP/watchlist-data" &
           pid=$!
           for i in $(seq 60); do curl -sf http://127.0.0.1:8791/api/ping && break; sleep 1; done
           echo
@@ -236,20 +269,20 @@ jobs:
           kill $pid
           test -d "$RUNNER_TEMP/watchlist-data"
 
-      - name: Make Watchlist.dmg
+      - name: Make Watch Anything.dmg
         run: |
           mkdir dmg
-          cp -R dist/Watchlist.app dmg/
+          cp -R "$APP" dmg/
           ln -s /Applications dmg/Applications
           for attempt in 1 2 3; do
-            hdiutil create -volname Watchlist -srcfolder dmg -ov -format UDZO Watchlist.dmg && break
+            hdiutil create -volname "Watch Anything" -srcfolder dmg -ov -format UDZO WatchAnything.dmg && break
             sleep 5
           done
-          test -f Watchlist.dmg
-          ls -lh Watchlist.dmg
+          test -f WatchAnything.dmg
+          ls -lh WatchAnything.dmg
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Watchlist-mac
-          path: Watchlist.dmg
+          name: WatchAnything-mac
+          path: WatchAnything.dmg
           retention-days: 90

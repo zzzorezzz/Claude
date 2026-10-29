@@ -49,11 +49,27 @@ def find_mpv():
 SKIP_SCRIPT = Path(__file__).resolve().parent / "mpv_scripts" / "watchlist_skip.lua"
 
 
+# The player's look: modern controls (uosc) with the app's colours, kept in a
+# config folder of the app's own (scripts/, fonts/ and script-opts/ inside it).
+UI_DIR = Path(__file__).resolve().parent / "mpv_config"
+
+
+def ui_args():
+    """Modern controls when they're bundled; otherwise mpv's own, tidied up."""
+    if (UI_DIR / "scripts" / "uosc" / "main.lua").is_file():
+        return [f"--config-dir={UI_DIR}", "--osc=no", "--osd-bar=no", "--border=yes",
+                "--osd-font-size=30", "--osd-border-size=1.5", "--osd-color=#FFE6E9F2", "--osd-shadow-offset=1"]
+    return ["--script-opts-append=osc-layout=bottombar", "--script-opts-append=osc-seekbarstyle=bar",
+            "--script-opts-append=osc-hidetimeout=900", "--script-opts-append=osc-fadeduration=150",
+            "--osd-font-size=30", "--osd-border-size=1.5"]
+
+
 def script_args(skip_intro):
-    """Loads the opening/ending skipper (Shift+S toggles it while watching)."""
-    if not SKIP_SCRIPT.is_file():
-        return []
-    return [f"--script={SKIP_SCRIPT}", f"--script-opts=watchlist-skip={'yes' if skip_intro else 'no'}"]
+    """Loads the opening/ending skipper (Shift+S toggles it while watching) and the player's look."""
+    args = ui_args()
+    if SKIP_SCRIPT.is_file():
+        args += [f"--script={SKIP_SCRIPT}", f"--script-opts-append=watchlist-skip={'yes' if skip_intro else 'no'}"]
+    return args
 
 
 def finished(pos, dur):
@@ -158,7 +174,7 @@ class Session:
         cmd = base + [f"--input-ipc-server={self.address}", "--force-window=immediate",
                "--keep-open=no", "--idle=no", "--save-position-on-quit=no", "--terminal=no",
                "--sub-auto=fuzzy", "--slang=en,eng,english", "--autofit-larger=90%x90%",
-               "--title=${media-title} - Watchlist"]
+               "--title=${media-title} - Watch Anything"]
         if self.audio_langs:
             cmd.append(f"--alang={self.audio_langs}")
         cmd += self.extra_args

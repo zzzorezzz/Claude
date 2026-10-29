@@ -38,7 +38,7 @@ class _Base(unittest.TestCase):
             mock.patch.object(metadata, "search", side_effect=self.fake_search),
             mock.patch.object(metadata, "details", side_effect=self.fake_details),
             mock.patch.object(metadata, "related", side_effect=lambda s, item: self.related.get(item["source_id"], [])),
-            mock.patch.object(metadata.MAL, "franchise", side_effect=lambda mal_id, limit=45: self.related.get(mal_id, [])),
+            mock.patch.object(metadata.MAL, "franchise", side_effect=lambda mal_id, limit=45, on_progress=None: self.related.get(mal_id, [])),
         ]
         for p in patches:
             p.start()
@@ -490,7 +490,7 @@ class ConnectedTest(_Base):
         self.app.add_title("anime", "mal", "56885")
         item = self.app.store.get(self.frieren["id"])
         self.assertIsNone(self.app.connected(item)["entries"])        # only looked for when you ask
-        out = self.app.connected(item, run=True)
+        out = self.app.connected(item, run=True, wait=True)
         by_id = {e["source_id"]: e for e in out["entries"]}
         self.assertEqual(by_id["59978"]["relation"], "Sequel")
         self.assertIsNone(by_id["59978"]["in_list"])
@@ -508,7 +508,7 @@ class ConnectedTest(_Base):
                  {"title": "Made Up Film", "year": 2030, "kind": "movie", "relation": "Film"}]
         with mock.patch.object(ai, "connected_titles", return_value=named), \
                 mock.patch.object(ai, "story_guide", side_effect=ai.AIError("offline")):
-            out = self.app.connected(self.app.store.get(self.frieren["id"]), run=True)
+            out = self.app.connected(self.app.store.get(self.frieren["id"]), run=True, wait=True)
         self.assertEqual(sorted(e["source_id"] for e in out["entries"]), ["59978", "60001"])
 
     def test_story_guide_explains_how_each_one_connects(self):
@@ -529,7 +529,7 @@ class ConnectedTest(_Base):
         prompts = []
         with mock.patch.object(ai, "connected_titles", return_value=[]), \
                 mock.patch.object(ai, "ask", side_effect=lambda s, p, **kw: prompts.append(p) or (guide, "gemini")):
-            out = self.app.connected(self.app.store.get(self.frieren["id"]), run=True)
+            out = self.app.connected(self.app.store.get(self.frieren["id"]), run=True, wait=True)
         self.assertTrue(out["self"]["self"])
         self.assertEqual(out["self"]["in_list"], self.frieren["id"])
         g = out["guide"]
@@ -546,7 +546,7 @@ class ConnectedTest(_Base):
         self.searches[("tv", "Breaking Bad")] = [result("tv", "Breaking Bad", "tv/1396", year=2008)]
         self.searches[("movie", "Breaking Bad")] = [
             result("movie", "El Camino: A Breaking Bad Movie", "movie/559969", year=2019, media_kind="movie")]
-        out = self.app.connected(self.app.store.get(bb["id"]), run=True)
+        out = self.app.connected(self.app.store.get(bb["id"]), run=True, wait=True)
         self.assertEqual([e["title"] for e in out["entries"]], ["El Camino: A Breaking Bad Movie"])
 
     def test_tv_spinoffs_with_ai_are_checked_on_tmdb(self):
@@ -557,7 +557,7 @@ class ConnectedTest(_Base):
                  {"title": "Breaking Good", "year": 2030, "kind": "tv", "relation": "Sequel"}]
         with mock.patch.object(ai, "connected_titles", return_value=named), \
                 mock.patch.object(ai, "story_guide", side_effect=ai.AIError("offline")):
-            out = self.app.connected(self.app.store.get(bb["id"]), run=True)
+            out = self.app.connected(self.app.store.get(bb["id"]), run=True, wait=True)
         self.assertEqual([(e["title"], e["relation"]) for e in out["entries"]], [("Better Call Saul", "Spin-off")])
 
 

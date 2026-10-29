@@ -54,6 +54,9 @@ def _entry(result, item_type):
                 episodes_total=result.get("episodes_total"), overview=(result.get("overview") or "")[:400])
 
 
+KIND_WORDS = {"anime": "anime", "tv": "TV shows", "movie": "movies"}
+
+
 class App:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
@@ -71,9 +74,12 @@ class App:
         self.anime_index = discover.AnimeIndex(self.data_dir / "anime_index.json")
         self.torrents = torrents_mod.Torrents(self, self.data_dir)
         self.site_jobs = sites.Jobs(self)
+        self._connected_jobs = {}           # Everything connected being looked for: how far along
         self.party = None
         self.party_last = None
         self._party_lock = threading.Lock()
+        self._lock = threading.Lock()
+        self._ai_streams = {}               # (item, country, services) -> (when, {name: has it})
 
     # ---- syncing between computers
 
@@ -124,7 +130,8 @@ class App:
                 "services": [{"name": x["name"], "types": x["types"], "on": x["on"]} for x in s["services"]],
                 "torrents": {"available": torrents_mod.available(), "count": len(self.torrents.records),
                              "delete_after": torrents_mod.DELETE_AFTER},
-                "torrent_sites": sum(1 for x in s["torrent_sites"] if x["on"])}
+                "torrent_sites": {t: len(sites.sites_for(s, t)) for t in TYPES},
+                "windows": launcher.can_open_windows()}
 
     def open_link(self, url):
         browser = launcher.find_browser(self.settings.get()["browser_path"])
@@ -286,63 +293,63 @@ class App:
         if old and old.active:
             old.leave("you started another watch party")
 
-    def party_start(self, item, season, episode, path=""):
-        """Host: open a private room, start the episode paused, and hand back an invite."""
-        mpv = self._need_mpv()
-        if path and not self.playable(item, path):
-            raise ApiError("that file isn't in this title's folder or your downloads")
-        info = self.local_info(item, season, episode, path)
-        target = info["target"]
-        if not target:
-            what = f"{item['title']} S{season} E{episode}" if item["format"] == "series" else item["title"]
-            return {"ok": False, "need_file": True, "item_id": item["id"],
-                    "message": f"You don't have {what} in your downloads, or in a torrent for it."}
-        subs = info["subtitles"]
-        if target.get("stream"):
-            subs = self._ready_stream(target) or subs
-        entries, patch = self._entries(item, target["path"], subs[0]["path"] if subs else None,
-                                       season if item["format"] == "series" else None, episode,
-                                       self.settings.get()["queue_next_episodes"])
-        room = syncplay.new_room()
-        party = party_mod.Party(self._party_server(), room, self._party_name(), "host",
-                                context=metadata.ssl_context(), on_end=self._party_ended)
-        try:
-            party.connect()
-        except party_mod.PartyError as e:
-            raise ApiError(str(e)) from e
-        self._start_party(party)
-        start = player.resume_point(item["positions"].get(entries[0]["key"]))
-        session = self.player.play(self._session(mpv, item, entries, start, ["--pause"]))
-        party.attach(session)
-        self.store.update(item["id"], patch)
-        threading.Thread(target=self._party_hello, args=(party,), daemon=True).start()
-        series = item["format"] == "series" and not item_kind_is_single(item)
-        code = syncplay.make_invite(party.server, room, item, *((season, episode) if series else (None, None)),
-                                    host=party.me)
-        return {"ok": True, "code": code, "file": target["name"], "room": room, "server": party.server}
+    def party_start(self, item=None, season=None, episode=None, path=""):
+        """Host: open a private room and hand back an invite. The party isn't tied
+        to anything playing: whatever you play while it's on, everyone follows.
+        With a title, its episode starts playing for the party too."""
+        self._need_mpv()
+        with self._party_lock:
+            current = self.party
+        if current and current.active and current.role == "host":
+            party = current                  # already hosting: just play this in it
+        else:
+            room = syncplay.new_room()
+            party = party_mod.Party(self._party_server(), room, self._party_name(), "host",
+                                    context=metadata.ssl_context(), on_end=self._party_ended)
+            try:
+                party.connect()
+            except party_mod.PartyError as e:
+                raise ApiError(str(e)) from e
+            party.invite = syncplay.make_invite(party.server, room, host=party.me)
+            self._start_party(party)
+        out = {"ok": True, "code": party.invite, "room": party.room, "server": party.server, "file": ""}
+        if item is not None:
+            if path and not self.playable(item, path):
+                raise ApiError("that file isn't in this title's folder or your downloads")
+            info = self.local_info(item, season or 1, episode or 1, path)
+            target = info["target"]
+            if not target:
+                what = f"{item['title']} S{season} E{episode}" if item["format"] == "series" else item["title"]
+                out.update(need_file=True, item_id=item["id"],
+                           message=f"The party is on, but you don't have {what} in your downloads or a torrent for it.")
+                return out
+            subs = info["subtitles"]
+            if target.get("stream"):
+                subs = self._ready_stream(target) or subs
+            self.play(item, {"path": target["path"], "subtitle": subs[0]["path"] if subs else None,
+                             "season": season, "episode": episode, "paused": True})
+            out["file"] = target["name"]
+            threading.Thread(target=self._party_hello, args=(party,), daemon=True).start()
+        return out
 
     @staticmethod
     def _party_hello(party):
         for _ in range(40):
             if party.session and party.session.connected:
                 time.sleep(1.0)
-                party.osd("Watch party ready - send the invite. Press Space when you're both ready.", 8)
+                party.osd("Watch party on - send the invite. Press Space when you're all here.", 8)
                 return
             time.sleep(0.25)
 
-    def party_join(self, code, path=""):
-        """Guest: join the room, find what the host is playing in this computer's
-        downloads, and play it in step."""
+    def party_join(self, code):
+        """Guest: join the room. What the host plays is followed from then on (in
+        the background): your own copy, or the host's torrent made ready first."""
         self._need_mpv()
         invite = syncplay.read_invite(code)
-        item = self._party_item(invite["source"], invite["source_id"], invite["title"], invite["type"])
-        if not item:
-            raise ApiError(f'add {invite["title"]} to your list first, then join again')
-        if path and not self.playable(item, path):
-            raise ApiError("that file isn't in this title's folder or your downloads")
         party = party_mod.Party(invite["server"], invite["room"], self._party_name(), "guest",
                                 resolve=self.party_resolve, leader=invite.get("host"),
-                                context=metadata.ssl_context(), on_end=self._party_ended)
+                                context=metadata.ssl_context(), on_end=self._party_ended,
+                                open_player=self._party_open, invite=code)
         try:
             party.connect()
         except party_mod.PartyError as e:
@@ -350,30 +357,35 @@ class App:
         if invite.get("host") and invite["host"] not in party.people:
             party.leave("the host isn't there")
             raise ApiError(f'{invite["host"]} isn\'t in that watch party any more - ask for a new invite')
-        entry = None
-        if path:
-            entries, _ = self._entries(item, path, None, invite.get("season"), invite.get("episode"), False)
-            entry = dict(entries[0], item_id=item["id"])
-        else:
-            leading = party.leader_file()
-            entry = self.party_resolve(leading) if leading else None
-            if not entry and not leading:
-                entry = self._party_entry(item, invite.get("season") or 1, invite.get("episode") or 1)
-        if not entry:
-            want = ((party.leader_file() or {}).get("watchlist") or {}).get("label") or invite["title"]
-            party.leave("you don't have the episode")
-            return {"ok": False, "need_file": True, "item_id": item["id"],
-                    "message": f"You don't have {want} in your downloads."}
         self._start_party(party)
-        self._party_follow(party, entry)
-        return {"ok": True, "file": Path(entry["path"]).name, "invite": invite, "leader": party.leader_name()}
+        party._follow_leader()
+        return {"ok": True, "leader": party.leader_name(), "invite": invite}
 
-    def _party_follow(self, party, entry):
-        """Open the guest's player on `entry` (paused until it's in step)."""
+    def _party_open(self, party, entry):
+        """A guest's player, opened for what the host plays (paused until it's in step)."""
         item = self.store.get(entry["item_id"])
         session = self.player.play(self._session(self._need_mpv(), item, [entry], 0,
                                                  ["--pause", "--keep-open=yes"]))
         party.attach(session)
+
+    def party_use_file(self, path):
+        """A guest choosing their own file for what the host is playing."""
+        with self._party_lock:
+            party = self.party
+        if not party or not party.active or party.role != "guest":
+            raise ApiError("you aren't in someone's watch party")
+        if not os.path.isfile(path) or Path(path).suffix.lower() not in scanner.VIDEO_EXTS:
+            raise ApiError("choose a video file")
+        meta = (party.leader_file() or {}).get("watchlist") or {}
+        item = self._party_item(meta.get("src"), meta.get("id"), meta.get("title"), meta.get("type"))
+        if not item:
+            raise ApiError("the host isn't playing anything right now")
+        series = item["format"] == "series"
+        entries, _ = self._entries(item, path, None, meta.get("season") if series else None,
+                                   meta.get("episode") if series else None, False)
+        entry = dict(entries[0], item_id=item["id"])
+        threading.Thread(target=party.use, args=(entry,), daemon=True).start()
+        return {"ok": True, "file": Path(path).name}
 
     def _party_item(self, source, source_id, title, item_type):
         item = self.store.find_source(source, source_id) if source else None
@@ -431,29 +443,143 @@ class App:
         entry["item_id"] = item["id"]
         return entry
 
-    def party_resolve(self, file_):
-        """This computer's copy of what someone in the party is playing, or None.
-        Watchlist players say which title and episode it is; for others (the
-        Syncplay app) it's worked out from the file's name."""
+    def party_resolve(self, file_, report=None, at=0.0):
+        """This computer's copy of what someone in the party is playing, or None:
+        a file you have, or the same torrent, got ready to stream (from where
+        the room is) before the player opens. Watch Anything players say which
+        title and episode it is; for others (the Syncplay app) it's worked out
+        from the file's name. report(status, progress, eta, label) follows along."""
+        report = report or (lambda *a, **k: None)
         meta = (file_ or {}).get("watchlist") or {}
+        label = meta.get("label") or (file_ or {}).get("name") or ""
+        entry = None
         if meta.get("src") or meta.get("title"):
             item = self._party_item(meta.get("src"), meta.get("id"), meta.get("title"), meta.get("type"))
             if not item:
                 return None
-            return self._party_entry(item, meta.get("season") or 1, meta.get("episode") or 1, meta.get("magnet") or "")
-        name = (file_ or {}).get("name") or ""
-        if not name:
-            return None
-        g = library.guess_full(Path(name).parts)
-        season, episodes = scanner.parse_episode(Path(name).parts)
-        best = None
-        for item in self.store.list():
-            score = library.score_item(dict(item), g["title"], g["title_season"], season, g["year"], bool(episodes))
-            if score >= 85 and (not best or score > best[0]):
-                best = (score, item)
-        if not best:
-            return None
-        return self._party_entry(best[1], season or 1, episodes[0] if episodes else 1)
+            if meta.get("magnet") and not self.local_info(item, meta.get("season") or 1, meta.get("episode") or 1)["target"]:
+                report("preparing", 0, None, label)       # finding the host's torrent's files
+            entry = self._party_entry(item, meta.get("season") or 1, meta.get("episode") or 1, meta.get("magnet") or "")
+        else:
+            name = (file_ or {}).get("name") or ""
+            if not name:
+                return None
+            g = library.guess_full(Path(name).parts)
+            season, episodes = scanner.parse_episode(Path(name).parts)
+            best = None
+            for item in self.store.list():
+                score = library.score_item(dict(item), g["title"], g["title_season"], season, g["year"], bool(episodes))
+                if score >= 85 and (not best or score > best[0]):
+                    best = (score, item)
+            if best:
+                entry = self._party_entry(best[1], season or 1, episodes[0] if episodes else 1)
+        if entry and entry.get("torrent") and not entry["torrent"].get("complete"):
+            self._party_buffer(entry, report, label, at)
+        return entry
+
+    def _party_buffer(self, entry, report, label, at=0.0, wait=600):
+        """A guest's torrent episode: the part the room is at, downloaded first,
+        with its progress told to the room."""
+        found = self.torrents.parse_url(entry["path"])
+        if not found:
+            return
+        deadline = time.time() + wait
+        rates = []
+        while time.time() < deadline:
+            try:
+                st = self.torrents.buffer(*found, at=max(0.0, min(float(at or 0), 0.97)))
+            except torrents_mod.TorrentError:
+                return
+            rates = (rates + [st["rate"]])[-6:]
+            rate = sum(rates) / len(rates)
+            left = max(0, st["need"] - st["have"])
+            eta = round(left / rate) if rate > 1024 else None
+            report("preparing", round(st["have"] / st["need"], 3) if st["need"] else 0, eta, label)
+            if st["ready"]:
+                return
+            time.sleep(0.7)
+
+    # ---- which file each episode plays from
+
+    def connections(self, item):
+        """Every episode of a title and the file it plays from (downloads,
+        the title's own folder, torrents), and the title's other files."""
+        videos, _subs = self._sources(item)
+        series = item["format"] == "series"
+        main = [v for v in videos if v.get("kind") != "extra"]
+        emap = scanner.episode_map(item, main) if series else {}
+        playing = {f"{s}:{e}": v["path"] for (s, e), v in emap.items()}
+        keys_of = {}
+        for key, path in playing.items():
+            keys_of.setdefault(path, []).append(key)
+        files = []
+        for v in videos:
+            source = "torrent" if v.get("torrent") else "download" if v.get("dl") else "folder"
+            files.append({"path": v["path"], "name": v["name"], "source": source, "kind": v.get("kind") or "",
+                          "size": v.get("size") or 0, "keys": keys_of.get(v["path"], []),
+                          "torrent": v.get("torrent"), "rel": v.get("rel") if source == "download" else "",
+                          "how": v.get("how") or ""})
+        episodes = []
+        if series:
+            for season in item["seasons"]:
+                for n in range(1, (season.get("episodes") or 0) + 1):
+                    key = f"{season['number']}:{n}"
+                    episodes.append({"key": key, "season": season["number"], "episode": n, "path": playing.get(key)})
+            listed = {e["key"] for e in episodes}
+            for key in sorted(set(playing) - listed, key=lambda k: tuple(int(x) for x in k.split(":"))):
+                s_, e_ = (int(x) for x in key.split(":"))
+                episodes.append({"key": key, "season": s_, "episode": e_, "path": playing[key]})
+        else:
+            target = self.local_info(item, None, None)["target"]
+            episodes.append({"key": "movie", "path": target["path"] if target else None})
+        return {"series": series, "episodes": episodes, "files": files}
+
+    def connect_file(self, item, path, key):
+        """You say which episode a file is ("s:e"), that it isn't one of this
+        title's ("none"), or that the app should work it out ("auto")."""
+        found = self.torrents.find_file(path)
+        if found and self.torrents.owns(item["id"], path):
+            value = None if key == "auto" else key
+            try:
+                self.torrents.set_episode(found[0], found[1], value, item["id"])
+            except torrents_mod.TorrentError as e:
+                raise ApiError(str(e)) from e
+            return
+        rel = next((v["rel"] for v in self.library.videos_for(item["id"]) if v["path"] == path), None)
+        if rel is None:
+            raise ApiError("files in this title's own folder go by their names - rename the file, "
+                           "or pick it with Choose file")
+        try:
+            if key == "none":
+                self.library.route(rel, "unsorted")
+            elif key == "auto":
+                self.library.route(rel, item["id"])
+            elif key == "movie":
+                self.library.route(rel, item["id"], kind="movie")
+            else:
+                season, episode = (int(x) for x in key.split(":"))
+                self.library.route(rel, item["id"], season, episode)
+        except ValueError as e:
+            raise ApiError(str(e)) from e
+
+    def sort_again(self, item):
+        """Work out a title's files again from scratch: its torrents (with the AI,
+        if there's a key) and its downloads (by Sort now)."""
+        redone = 0
+        for h, rec in list(self.torrents.records.items()):
+            if rec["item_id"] == item["id"] or self.torrents._owns_any(rec, item["id"]):
+                for f in rec.get("files") or []:
+                    owner = self.torrents._owner(rec, f)[0]
+                    if owner in (item["id"], None):
+                        rec["overrides"].pop(str(f["index"]), None)
+                if rec["item_id"] == item["id"]:
+                    self.torrents.make_plan(h)
+                redone += 1
+        files = self.library.sort_again(item["id"])
+        if files:
+            threading.Thread(target=self.sorter.run_now, kwargs={"with_ai": bool(ai.available(self.settings.get()))},
+                             daemon=True).start()
+        return {"torrents": redone, "files": files}
 
     def party_status(self):
         with self._party_lock:
@@ -480,36 +606,27 @@ class App:
 
     # ---- everything connected to a title
 
-    def connected(self, item, run=False):
+    def connected(self, item, run=False, wait=False):
         """Everything connected to a title (seasons, films, OVAs, ONAs, specials,
         sequels, prequels, spin-offs...), each marked as on your computer, in your
         list, waiting in your downloads, or missing. Looked for when you ask
         (`run`); otherwise what was found last time, or {"entries": None}."""
         cache_key = f'connected:{item["source"]}:{item["source_id"]}'
+        if run:
+            job = self._connected_jobs.get(cache_key)
+            if not job or not job["running"]:
+                job = {"running": True, "stage": "Starting…", "progress": 0.02, "found": 0, "guide": False}
+                self._connected_jobs[cache_key] = job
+                thread = threading.Thread(target=self._connected_job, args=(item, cache_key, job), daemon=True)
+                thread.start()
+                if wait:
+                    thread.join(300)
+        job = self._connected_jobs.get(cache_key)
         with self._related_lock:
             cached = self._related.get(cache_key)
-        if run:
-            if not item.get("date") and item["source"] in ("tmdb", "mal"):
-                try:                                    # its first air date, for the release order
-                    item = self.refresh_metadata(item)
-                except (metadata.MetadataError, KeyError):
-                    pass
-            entries, note = self._find_connected(item)
-            guide = None
-            s = self.settings.get()
-            if ai.available(s):
-                try:
-                    guide = self._story_guide(item, entries, s)
-                except ai.AIError as e:
-                    note = (note + " " if note else "") + f"The story guide couldn't be written: {e}"
-            cached = {"at": time.time(), "entries": entries, "note": note, "guide": guide}
-            with self._related_lock:
-                self._related[cache_key] = cached
-                for k in sorted(self._related, key=lambda k: self._related[k]["at"])[:-300]:
-                    del self._related[k]
-                write_json(self._related_path, self._related, compact=True)
+        job_view = {k: v for k, v in job.items()} if job and (job["running"] or time.time() - job.get("ended", 0) < 5) else None
         if not cached:
-            return {"entries": None, "ai": [ai.NAMES[p] for p in ai.available(self.settings.get())]}
+            return {"entries": None, "ai": [ai.NAMES[p] for p in ai.available(self.settings.get())], "job": job_view}
         lib = self.library.state()
         waiting = [q for q in lib["questions"] if q["kind"] == "title"]
         out = []
@@ -532,7 +649,46 @@ class App:
                         e["waiting"] += len(q["files"])
             out.append(e)
         return {"self": out[0], "entries": out[1:], "note": cached.get("note", ""), "at": cached["at"],
-                "guide": cached.get("guide"), "ai": [ai.NAMES[p] for p in ai.available(self.settings.get())]}
+                "guide": cached.get("guide"), "ai": [ai.NAMES[p] for p in ai.available(self.settings.get())],
+                "job": job_view}
+
+    def _save_connected(self, cache_key, cached):
+        with self._related_lock:
+            self._related[cache_key] = cached
+            for k in sorted(self._related, key=lambda k: self._related[k]["at"])[:-300]:
+                del self._related[k]
+            write_json(self._related_path, self._related, compact=True)
+
+    def _connected_job(self, item, cache_key, job):
+        """Finding everything connected, in the background, saying how far along
+        it is: the list is shown as soon as it's found; the story guide follows."""
+        try:
+            if not item.get("date") and item["source"] in ("tmdb", "mal"):
+                job.update(stage=f"Looking up {item['title']}…", progress=0.05)
+                try:                                    # its first air date, for the release order
+                    item = self.refresh_metadata(item)
+                except (metadata.MetadataError, KeyError):
+                    pass
+            entries, note = self._find_connected(item, job)
+            s = self.settings.get()
+            with self._related_lock:
+                old = self._related.get(cache_key) or {}
+            cached = {"at": time.time(), "entries": entries, "note": note,
+                      "guide": old.get("guide") if old.get("entries") == entries else None}
+            self._save_connected(cache_key, cached)
+            if ai.available(s):
+                job.update(stage=f"Found {len(entries)} - {ai.NAMES[ai.available(s)[0]]} is writing the story guide…",
+                           progress=0.85, guide=True)
+                try:
+                    cached = dict(cached, guide=self._story_guide(item, entries, s))
+                except ai.AIError as e:
+                    cached = dict(cached, note=(note + " " if note else "") + f"The story guide couldn't be written: {e}")
+                self._save_connected(cache_key, cached)
+            job.update(stage="Done", progress=1.0)
+        except Exception as e:  # noqa: BLE001 - shown, rather than a job that never ends
+            job.update(stage=f"Something went wrong: {e}", error=str(e))
+        finally:
+            job.update(running=False, ended=time.time())
 
     @staticmethod
     def _story_guide(item, entries, s):
@@ -543,36 +699,54 @@ class App:
                 "story_order": [keys[n] for n in g["story_order"] if n < len(keys)],
                 "entries": {keys[n]: v for n, v in g["entries"].items() if n < len(keys)}}
 
-    def _find_connected(self, item):
+    def _find_connected(self, item, job=None):
         s = self.settings.get()
+        job = job if job is not None else {}
         entries, notes = [], []
 
         def add(rows):
             have = {e["source_id"] for e in entries} | {item["source_id"]}
             entries.extend(r for r in rows if r["source_id"] not in have)
+            job["found"] = len(entries)
 
-        try:
+        def linked():
+            """What MyAnimeList / TMDB link to it directly."""
             if item["source"] == "mal" and s["mal_client_id"]:
-                add([_entry(r, "anime") for r in metadata.MAL(s["mal_client_id"]).franchise(item["source_id"])])
-            elif item["format"] == "movie" and item.get("tmdb_collection") and s["tmdb_api_key"]:
-                add([_entry(r, "movie")
-                     for r in metadata.TMDB(s["tmdb_api_key"]).collection(item["tmdb_collection"])])
-        except metadata.MetadataError as e:
-            notes.append(str(e))
-        if ai.available(s):
+                def seen(n):
+                    job.update(found=max(job.get("found", 0), n), progress=min(0.5, 0.1 + n * 0.02),
+                               stage=f"Following MyAnimeList's links: {n} found…")
+                return [_entry(r, "anime") for r in
+                        metadata.MAL(s["mal_client_id"]).franchise(item["source_id"], on_progress=seen)]
+            if item["format"] == "movie" and item.get("tmdb_collection") and s["tmdb_api_key"]:
+                return [_entry(r, "movie") for r in metadata.TMDB(s["tmdb_api_key"]).collection(item["tmdb_collection"])]
+            return []
+
+        # Both at once: the links, and what the AI names (then checked).
+        job.update(stage="Looking for everything connected…", progress=0.08)
+        with ThreadPoolExecutor(2) as pool:
+            links = pool.submit(linked)
+            by_ai = pool.submit(self._connected_by_ai, item, s, job) if ai.available(s) else None
             try:
-                add(self._connected_by_ai(item, s))
-            except ai.AIError as e:
-                notes.append(f"AI helper: {e}")
-        else:
+                add(links.result())
+            except metadata.MetadataError as e:
+                notes.append(str(e))
+            if by_ai is not None:
+                try:
+                    add(by_ai.result())
+                except ai.AIError as e:
+                    notes.append(f"AI helper: {e}")
+        if not ai.available(s):
             notes.append("With an AI key (Settings) this also finds connected titles that aren't linked directly.")
             if item["type"] != "anime" and s["tmdb_api_key"]:
                 add(self._related_by_name(item, s))
         return entries, " ".join(notes)
 
-    def _connected_by_ai(self, item, s):
+    def _connected_by_ai(self, item, s, job=None):
         """What the AI names, each checked on MyAnimeList (anime) or TMDB first."""
+        job = job if job is not None else {}
         named = ai.connected_titles(s, item)
+        done = [0]
+        job.update(stage=f"Checking the {len(named)} titles the AI named…", progress=max(job.get("progress", 0), 0.5))
 
         def check(row):
             if item["type"] == "anime" or row["kind"] in ("ova", "ona"):
@@ -590,8 +764,16 @@ class App:
                         return _entry(dict(r, relation=row["relation"]), item_type) if r else None
             return None
 
-        with ThreadPoolExecutor(4) as pool:
-            return [r for r in pool.map(check, named) if r]
+        def counted(row):
+            try:
+                return check(row)
+            finally:
+                done[0] += 1
+                job.update(stage=f"Checking the titles the AI named ({done[0]} of {len(named)})…",
+                           progress=max(job.get("progress", 0), 0.5 + 0.3 * done[0] / max(1, len(named))))
+
+        with ThreadPoolExecutor(8) as pool:
+            return [r for r in pool.map(counted, named) if r]
 
     @staticmethod
     def _search_safely(s, item_type, title):
@@ -749,12 +931,26 @@ class App:
         if wanted == "mpv":
             mpv = player.find_mpv()
             if mpv:
-                self.player.play(self._session(mpv, item, entries, start))
+                session = self.player.play(self._session(mpv, item, entries, start,
+                                                         ["--pause"] if body.get("paused") else ()))
+                with self._party_lock:
+                    party = self.party
+                if party and party.active and party.role == "host":
+                    party.attach(session)        # whatever the host plays, the party follows
                 self.store.update(item["id"], patch)
                 return {"ok": True, "player": "mpv", "file": entries[0].get("name") or Path(path).name,
                         "queued": len(entries) - 1, "resumed_at": start, "stream": bool(found),
                         "subtitle": Path(entries[0]["sub"]).name if entries[0].get("sub") else ""}
             note = "The built-in player is missing, so VLC was used."
+        if wanted == "custom" and s["custom_player_path"]:
+            # Your own player: the file (or its stream link) is handed to it; it keeps its own place.
+            try:
+                launcher.play_in_player(s["custom_player_path"], entries[0]["path"])
+            except launcher.LaunchError as e:
+                raise ApiError(str(e)) from e
+            self.store.update(item["id"], patch)
+            return {"ok": True, "player": "custom", "file": Path(path).name, "queued": 0, "resumed_at": 0,
+                    "player_name": Path(s["custom_player_path"]).stem}
         self._play_vlc(entries, start)
         self.store.update(item["id"], patch)
         return {"ok": True, "player": "vlc", "file": Path(path).name, "queued": len(entries) - 1,
@@ -913,51 +1109,78 @@ class App:
         except metadata.MetadataError as e:
             return [], f"Couldn't check which services have it: {e}."
 
-    def online_options(self, item):
-        """Your services for this kind of title, in order, each with whether it has it."""
+    def ai_streams_on(self, item, names):
+        """{service name: has it} from your AI helper, remembered for a day. ({}, message) when it can't say."""
         s = self.settings.get()
-        names, message = self.streaming_on(item)
+        if not names:
+            return {}, ""
+        if not ai.available(s):
+            return {}, "No AI helper is set up, so the AI check was skipped."
+        key = (item["id"], s["region"], tuple(sorted(names)))
+        with self._lock:
+            hit = self._ai_streams.get(key)
+        if hit and time.time() - hit[0] < 86400:
+            return hit[1], ""
+        try:
+            found = ai.streams_on(s, item, s["region"], sorted(names))
+        except ai.AIError as e:
+            return {}, f"The AI check didn't answer: {e}."
+        with self._lock:
+            self._ai_streams[key] = (time.time(), found)
+        return found, ""
+
+    def online_options(self, item):
+        """Your services for this kind of title, in order, each with whether it has
+        it (by its own check: TMDB, AI or none)."""
+        s = self.settings.get()
+        mine = [x for x in s["services"] if x["on"] and item["type"] in x["types"]]
+        modes = {x["id"]: services.mode_of(x) for x in mine}
+        names, message = self.streaming_on(item) if "tmdb" in modes.values() else ([], "")
+        by_ai, ai_message = self.ai_streams_on(item, [x["name"] for x in mine if modes[x["id"]] == "ai"])
         options = []
-        for x in s["services"]:
-            if not x["on"] or item["type"] not in x["types"]:
-                continue
-            options.append({"id": x["id"], "name": x["name"], "kind": "check" if x["check"] else "search",
-                            "has_it": services.has_it(x, names) if x["check"] else None})
-        return {"region": s["region"], "streaming": names, "message": message, "options": options}
+        for x in mine:
+            mode = modes[x["id"]]
+            has = (services.has_it(x, names) if mode == "tmdb" and not message
+                   else by_ai.get(x["name"]) if mode == "ai" and x["name"] in by_ai else None)
+            options.append({"id": x["id"], "name": x["name"], "check_mode": mode,
+                            "kind": "search" if mode == "off" else "check", "has_it": has})
+        return {"region": s["region"], "streaming": names, "message": " ".join(m for m in (message, ai_message) if m),
+                "options": options}
 
     def watch_online(self, item, service_id=None):
-        """Open a service: the one asked for, or the first in your list that fits
-        (a subscription service only when it has the title), else the fallback site."""
+        """Open a service: the one asked for, or the first in your list that fits (one
+        with a check only when the check says it has the title). Nothing fits: nothing is opened."""
         s = self.settings.get()
         title = item["title"]
         info = self.online_options(item)
         result = {"region": s["region"], "services": info["streaming"], "message": info["message"],
                   "service": "", "url": "", "kind": ""}
-        chosen = None
         by_id = {x["id"]: x for x in s["services"]}
+        chosen = None
         if service_id:
             chosen = by_id.get(service_id)
             if not chosen:
                 raise ApiError("that service isn't in your list any more")
         else:
-            for o in info["options"]:
-                if o["kind"] == "search" or o["has_it"]:
-                    chosen = by_id[o["id"]]
-                    break
-        if chosen:
-            result.update(service=chosen["name"], url=services.fill(chosen, title),
-                          kind="check" if chosen["check"] else "search", has_it=bool(chosen["check"]) and
-                          services.has_it(chosen, info["streaming"]))
-        else:
-            url = launcher.fill_link(s["fallback_url"], title)
-            result.update(service=services.host_name(url), url=url, kind="fallback")
+            option = next((o for o in info["options"] if o["kind"] == "search" or o["has_it"]), None)
+            chosen = by_id[option["id"]] if option else None
+        if not chosen:
+            result["kind"] = "none"
+            result["message"] = ((info["message"] + " ") if info["message"] else "") + (
+                "None of your services has it here. Pick one yourself, or add a site in Settings."
+                if info["options"] else f"You haven't added a site for {KIND_WORDS.get(item['type'], 'this')} yet: add one in Settings.")
+            return result
+        option = next((o for o in info["options"] if o["id"] == chosen["id"]), {})
+        result.update(service=chosen["name"], url=services.fill(chosen, title),
+                      kind=option.get("kind") or ("search" if services.mode_of(chosen) == "off" else "check"),
+                      has_it=bool(option.get("has_it")))
         self.open_link(result["url"])
         self.store.update(item["id"], {"last_played": time.time()})
         return result
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "Watchlist"
+    server_version = "WatchAnything"
     app: App = None  # set by make_server
 
     ROUTES = [
@@ -999,6 +1222,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/connected", "find_connected"),
         ("POST", r"/api/items/(\w+)/recap", "recap"),
         ("POST", r"/api/settings/ai", "test_ai"),
+        ("GET", r"/api/settings/ai-presets", "ai_presets"),
         ("GET", r"/api/find/top", "find_top"),
         ("GET", r"/api/find/search", "find_search"),
         ("GET", r"/api/find/genres", "find_genres"),
@@ -1018,6 +1242,9 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/find-torrent", "find_torrent"),
         ("POST", r"/api/items/(\w+)/find-torrent/use", "find_torrent_use"),
         ("POST", r"/api/items/(\w+)/stream-buffer", "stream_buffer"),
+        ("GET", r"/api/items/(\w+)/connections", "connections"),
+        ("POST", r"/api/items/(\w+)/connections", "connect_file"),
+        ("POST", r"/api/items/(\w+)/connections/redo", "sort_again"),
         ("POST", r"/api/sites/test", "test_site"),
         ("POST", r"/api/torrents/(\w+)/plan", "torrent_plan_group"),
         ("POST", r"/api/torrents/(\w+)/plan/redo", "torrent_plan_redo"),
@@ -1025,11 +1252,15 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/items/(\w+)/mal-matches", "mal_matches"),
         ("POST", r"/api/items/(\w+)/use-mal", "use_mal"),
         ("POST", r"/api/find/mood", "find_mood"),
+        ("POST", r"/api/find/quick", "find_quick"),
         ("POST", r"/api/import/mal", "import_mal"),
         ("GET", r"/api/import/status", "import_status"),
         ("POST", r"/api/party/start", "party_start"),
         ("POST", r"/api/party/join", "party_join"),
         ("POST", r"/api/party/peek", "party_peek"),
+        ("POST", r"/api/party/use-file", "party_use_file"),
+        ("POST", r"/api/party/follow", "party_follow"),
+        ("POST", r"/api/window", "open_window"),
         ("GET", r"/api/party", "party_status"),
         ("POST", r"/api/party/leave", "party_leave"),
         ("GET", r"/api/settings", "get_settings"),
@@ -1396,10 +1627,11 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError("tell me what you're in the mood for first")
         asked = sum(1 for m in conversation if m["role"] == "ai")
         items = self.app.store.list()
-        mine = [{"id": i["id"], "title": i["title"], "type": i["type"], "year": i.get("year"),
-                 "genres": (i.get("genres") or [])[:4],
-                 "status": "not started" if not i.get("last_played") else
-                           f'up to S{i["progress"]["season"]} E{i["progress"]["episode"]}'} for i in items[:300]]
+        # Short lines, the most relevant first (what you're watching, then the newest added): a
+        # smaller question is answered faster.
+        ranked = sorted(items, key=lambda i: (-(i.get("last_played") or 0), -(i.get("added") or 0)))[:150]
+        mine = [f'{i["id"]}|{i["title"]}|{i["type"]}|' + ("not started" if not i.get("last_played") else
+                f'up to S{i["progress"]["season"]} E{i["progress"]["episode"]}') for i in ranked]
         try:
             reply = ai.mood(s, conversation, mine, may_ask=asked < 2)
         except ai.AIError as e:
@@ -1410,6 +1642,29 @@ class Handler(BaseHTTPRequestHandler):
         reply["from_list"] = [dict(by_id[r["id"]], why=r.get("why") or "") for r in reply["from_list"] if r.get("id") in by_id]
         reply["new"] = self._mark_listed(discover.verify(s, reply["new"]))
         return reply
+
+    def api_find_quick(self, body):
+        """Straight away, while the AI thinks: titles whose name is what you typed
+        (MyAnimeList and TMDB at once), so "frieren" shows Frieren in a second."""
+        q = str(body.get("q") or "").strip()
+        s = self.app.settings.get()
+        if len(q) < 2 or len(q.split()) > 8:
+            return {"results": []}
+        kinds = [k for k, ok in (("anime", s["mal_client_id"]), ("tv", s["tmdb_api_key"]), ("movie", s["tmdb_api_key"])) if ok]
+
+        def look(kind):
+            try:
+                return [dict(r, type=kind) for r in metadata.search(s, kind, q)[:4]]
+            except metadata.MetadataError:
+                return []
+        with ThreadPoolExecutor(3) as pool:
+            rows = [r for found in pool.map(look, kinds) for r in found]
+        want = library.norm(q)
+        # The ones whose name matches best first.
+        rows.sort(key=lambda r: (want not in library.norm(r.get("title") or "") and
+                                 not any(want in library.norm(a) for a in r.get("aliases") or []),
+                                 -(r.get("popularity") or 0)))
+        return {"results": self._mark_listed(rows[:8])}
 
     def api_import_mal(self, body):
         """Bring in a MyAnimeList list, by user name or from an export file."""
@@ -1443,12 +1698,37 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.importer.state()
 
     def api_party_start(self, body):
-        item = self.app.item(str(body.get("item_id") or ""))
+        item = self.app.item(str(body["item_id"])) if body.get("item_id") else None
         return self.app.party_start(item, int(body.get("season") or 1), int(body.get("episode") or 1),
                                     str(body.get("path") or ""))
 
     def api_party_join(self, body):
-        return self.app.party_join(str(body.get("code") or ""), str(body.get("path") or ""))
+        return self.app.party_join(str(body.get("code") or ""))
+
+    def api_party_use_file(self, body):
+        return self.app.party_use_file(str(body.get("path") or ""))
+
+    def api_party_follow(self, body):
+        """A guest who closed their player, watching along again."""
+        party = self.app.party
+        if not party or not party.active or party.role != "guest":
+            raise ApiError("you aren't in someone's watch party")
+        party._last_leader_key = None
+        party._follow_leader()
+        return {"ok": True}
+
+    def api_open_window(self, body):
+        """One of the app's own pages in a window of its own (the watch party)."""
+        kind = body.get("kind")
+        port = self.server.server_address[1]
+        if kind == "party":
+            ok = launcher.open_window(f"http://127.0.0.1:{port}/#/party-window", "Watch party - Watch Anything",
+                                      380, 640)
+        else:
+            raise ApiError("unknown window")
+        if not ok:
+            raise ApiError("separate windows need the app window (they don't work in a browser tab)")
+        return {"ok": True}
 
     def api_party_status(self, body):
         return self.app.party_status()
@@ -1464,8 +1744,24 @@ class Handler(BaseHTTPRequestHandler):
         return invite
 
     def api_test_ai(self, body):
-        """Save the key, then check it answers (saved even if it doesn't, with the reason shown)."""
+        """Save the key, then check it answers (saved even if it doesn't, with the reason shown).
+        Your own helper is checked as it's filled in, before it's saved."""
         provider = body.get("provider")
+        if provider == "custom":
+            from .config import clean_ai_custom
+            try:
+                [conf] = clean_ai_custom([body.get("conf") or {}]) or [None]
+            except ValueError as e:
+                raise ApiError(str(e)) from e
+            if not conf:
+                raise ApiError("fill in its address first")
+            settings = dict(self.app.settings.get())
+            settings["ai_custom"] = [c for c in settings["ai_custom"] if c["id"] != conf["id"]] + [conf]
+            pid = f"custom:{conf['id']}"
+            key = ai.key_of(settings, pid)
+            if not key:
+                return {"ok": False, "error": "paste its API key first", "tried": []}
+            return dict(ai.test_key(pid, key, settings), id=conf["id"])
         if provider not in ai.PROVIDERS:
             raise ApiError("unknown AI helper")
         key = str(body.get("key") or "").strip()
@@ -1473,6 +1769,9 @@ class Handler(BaseHTTPRequestHandler):
         if not key:
             return {"ok": False, "error": "paste your key first", "tried": []}
         return ai.test_key(provider, key)
+
+    def api_ai_presets(self, body):
+        return {"presets": ai.CUSTOM_PRESETS}
 
     def api_search(self, body):
         item_type = self.query.get("type", "")
@@ -1517,6 +1816,20 @@ class Handler(BaseHTTPRequestHandler):
         if "watched" in body:
             # "Watched": kept as part of your collection, out of the everyday rows.
             patch["in_watched"] = (item.get("in_watched") or time.time()) if body["watched"] else None
+        if "review" in body:
+            r = body["review"]
+            if r is None or (isinstance(r, dict) and not r.get("stars") and not str(r.get("text") or "").strip()):
+                patch["review"] = None
+            elif isinstance(r, dict):
+                stars = int(r.get("stars") or 0)
+                if stars and not 1 <= stars <= 5:
+                    raise ApiError("a review is 1 to 5 stars")
+                patch["review"] = {"stars": stars or None, "text": str(r.get("text") or "").strip()[:5000],
+                                   "at": time.time()}
+            else:
+                raise ApiError("a review is stars and some words")
+        if body.get("opened"):
+            patch["opened_at"] = time.time()
         if "local_broken" in body:
             patch["local_broken"] = bool(body["local_broken"])
         elif "local_folder" in patch or "local_file" in patch:
@@ -1576,8 +1889,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_find_torrent(self, body, item_id):
         item = self.app.item(item_id)
-        if item["type"] != "anime":
-            raise ApiError("Get magnet is for anime")
         if not torrents_mod.available():
             raise ApiError(self.app.torrents.error)
         return self.app.site_jobs.start(item)
@@ -1592,6 +1903,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.app.site_jobs.use(item_id, str(body.get("key") or ""))
         except (sites.SiteError, torrents_mod.TorrentError) as e:
             raise ApiError(str(e)) from e
+
+    def api_connections(self, body, item_id):
+        return self.app.connections(self.app.item(item_id))
+
+    def api_connect_file(self, body, item_id):
+        item = self.app.item(item_id)
+        key = str(body.get("key") or "")
+        if key not in ("none", "auto", "movie") and not re.fullmatch(r"\d+:\d+", key):
+            raise ApiError("say which episode it is, like 1:5")
+        self.app.connect_file(item, str(body.get("path") or ""), key)
+        return self.app.connections(self.app.item(item_id))
+
+    def api_sort_again(self, body, item_id):
+        return self.app.sort_again(self.app.item(item_id))
 
     def api_stream_buffer(self, body, item_id):
         """Getting a torrent's episode ready to play: how far along it is."""
@@ -1766,7 +2091,8 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True}
 
     def api_get_settings(self, body):
-        return {"settings": self.app.settings.get(), "status": self.app.status()}
+        return {"settings": self.app.settings.get(), "status": self.app.status(),
+                "browsers": launcher.list_browsers(), "players": launcher.list_players()}
 
     def api_put_settings(self, body):
         if "downloads_folder" in body:

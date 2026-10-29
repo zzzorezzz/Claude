@@ -105,6 +105,10 @@ def open_url(url, browser=""):
     """Open a web link in `browser` (a path), or the system default browser."""
     if not url.lower().startswith(("http://", "https://")):
         raise LaunchError("only web links can be opened")
+    if browser == BUILTIN_BROWSER:
+        if open_window(url, urllib.parse.urlsplit(url).hostname or "Watch Anything", 1280, 860):
+            return
+        browser = ""                     # no app window (running in a browser): the default browser
     if browser:
         _spawn(_browser_command(browser, url))
     elif not webbrowser.open(url, new=2):
@@ -214,6 +218,8 @@ def _registry_browser(name_part):
 def find_browser(configured=""):
     """The browser to use: the one set in Settings, else Opera GX if it's installed.
     Returns "" when neither is found (the system default browser is used then)."""
+    if configured == BUILTIN_BROWSER:
+        return BUILTIN_BROWSER
     if configured and (Path(configured).is_file()
                        or (_mac_bundle(configured) and Path(configured).exists())):
         return configured
@@ -237,6 +243,118 @@ def find_browser(configured=""):
     return ""
 
 
+# ---- choosing a browser or another media player in Settings
+
+BUILTIN_BROWSER = "builtin"     # browser_path for "a window of this app"
+
+_MAC_BROWSERS = ["Safari", "Google Chrome", "Firefox", "Microsoft Edge", "Brave Browser", "Opera GX", "Opera",
+                 "Arc", "Vivaldi", "Chromium", "Zen Browser", "DuckDuckGo"]
+_WIN_BROWSERS = [("Google Chrome", r"Google\Chrome\Application\chrome.exe"),
+                 ("Microsoft Edge", r"Microsoft\Edge\Application\msedge.exe"),
+                 ("Firefox", r"Mozilla Firefox\firefox.exe"),
+                 ("Brave", r"BraveSoftware\Brave-Browser\Application\brave.exe"),
+                 ("Opera GX", r"Programs\Opera GX\launcher.exe"), ("Opera", r"Programs\Opera\launcher.exe"),
+                 ("Vivaldi", r"Vivaldi\Application\vivaldi.exe")]
+_MAC_PLAYERS = ["IINA", "VLC", "Infuse 7", "Infuse", "Movist Pro", "Movist", "Elmedia Player", "QuickTime Player", "mpv"]
+_WIN_PLAYERS = [("MPC-HC", r"MPC-HC\mpc-hc64.exe"), ("MPC-HC", r"MPC-HC\mpc-hc.exe"),
+                ("MPC-BE", r"MPC-BE x64\mpc-be64.exe"), ("MPC-BE", r"MPC-BE\mpc-be.exe"),
+                ("PotPlayer", r"DAUM\PotPlayer\PotPlayerMini64.exe"), ("PotPlayer", r"DAUM\PotPlayer\PotPlayerMini.exe"),
+                ("KMPlayer", r"KMPlayer\KMPlayer.exe"), ("GOM Player", r"GRETECH\GomPlayer\GOM.EXE"),
+                ("VLC", r"VideoLAN\VLC\vlc.exe"), ("mpv", r"mpv\mpv.exe")]
+
+
+def _win_roots():
+    return [os.environ[e] for e in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA")
+            if os.environ.get(e)]
+
+
+def _mac_apps(names):
+    out = []
+    for name in names:
+        for root in (Path("/Applications"), Path.home() / "Applications"):
+            app = root / f"{name}.app"
+            if app.is_dir():
+                out.append({"name": name, "path": str(app)})
+                break
+    return out
+
+
+def list_browsers():
+    """The browsers installed on this computer: [{"name", "path"}]."""
+    found = []
+    if sys.platform == "win32":
+        try:
+            import winreg
+            for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    root = winreg.OpenKey(hive, r"SOFTWARE\Clients\StartMenuInternet")
+                except OSError:
+                    continue
+                with root:
+                    i = 0
+                    while True:
+                        try:
+                            sub = winreg.EnumKey(root, i)
+                        except OSError:
+                            break
+                        i += 1
+                        try:
+                            with winreg.OpenKey(root, sub) as key:
+                                name = winreg.QueryValueEx(key, "")[0] or sub
+                            with winreg.OpenKey(root, sub + r"\shell\open\command") as key:
+                                command = winreg.QueryValueEx(key, "")[0]
+                        except OSError:
+                            continue
+                        m = re.match(r'\s*"([^"]+)"|\s*(\S+)', command or "")
+                        path = m and (m.group(1) or m.group(2))
+                        if path and Path(path).is_file():
+                            found.append({"name": name, "path": path})
+        except ImportError:
+            pass
+        for name, rel in _WIN_BROWSERS:
+            for root in _win_roots():
+                p = Path(root) / rel
+                if p.is_file():
+                    found.append({"name": name, "path": str(p)})
+                    break
+    elif sys.platform == "darwin":
+        found = _mac_apps(_MAC_BROWSERS)
+    seen, out = set(), []
+    for b in found:
+        key = os.path.normcase(b["path"])
+        if key not in seen and b["name"].lower() not in {x["name"].lower() for x in out}:
+            seen.add(key)
+            out.append(b)
+    return out
+
+
+def list_players():
+    """Other media players installed on this computer: [{"name", "path"}]."""
+    found = []
+    if sys.platform == "win32":
+        for name, rel in _WIN_PLAYERS:
+            if any(x["name"] == name for x in found):
+                continue
+            for root in _win_roots():
+                p = Path(root) / rel
+                if p.is_file():
+                    found.append({"name": name, "path": str(p)})
+                    break
+    elif sys.platform == "darwin":
+        found = _mac_apps(_MAC_PLAYERS)
+    return found
+
+
+def play_in_player(player, path):
+    """A file (or a stream link) in another media player of your choice."""
+    if not player or not (Path(player).exists()):
+        raise LaunchError("that media player wasn't found - choose it again in Settings")
+    if sys.platform == "darwin" and _mac_bundle(player):
+        _spawn(["open", "-a", _mac_bundle(player), path])
+    else:
+        _spawn([player, path])
+
+
 def _browser_command(browser, url, new_window=False):
     if sys.platform == "darwin" and _mac_bundle(browser):
         # On a Mac, ask the running browser to open it rather than starting a second copy.
@@ -244,8 +362,29 @@ def _browser_command(browser, url, new_window=False):
     return [browser] + (["--new-window"] if new_window else []) + [url]
 
 
+_webview = None          # pywebview, once the app window is open
+
+
+def can_open_windows():
+    return _webview is not None
+
+
+def open_window(url, title, width=1100, height=800):
+    """Another window of the app's own (the watch party, the built-in browser).
+    False when there's no app window to do it with (running in a browser)."""
+    if _webview is None:
+        return False
+    try:
+        _webview.create_window(title, url, width=width, height=height, background_color="#0d0f1a",
+                               text_select=True)
+        return True
+    except Exception:  # noqa: BLE001 - the window couldn't be made
+        return False
+
+
 def open_app_window(url, browser=""):
     """Open the UI. Returns True if it blocks until the window is closed."""
+    global _webview
     try:
         import webview  # pywebview, optional
     except ImportError:
@@ -253,13 +392,15 @@ def open_app_window(url, browser=""):
     if webview is not None:
         try:
             dialogs.window = webview.create_window(
-                "Watchlist", url, width=1440, height=900, min_size=(900, 600),
-                background_color="#141414")
+                "Watch Anything", url, width=1440, height=900, min_size=(900, 600),
+                background_color="#0d0f1a")
+            _webview = webview
             webview.start()
             return True
         except Exception:
             # e.g. the WebView2 runtime is missing: use the browser instead.
             dialogs.window = None
+            _webview = None
     if browser:
         _spawn(_browser_command(browser, url, new_window=True))
     else:

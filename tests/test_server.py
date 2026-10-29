@@ -64,7 +64,7 @@ class ServerTest(ServerBase):
     def test_ui_is_served(self):
         status, body = self.call("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn(b"WATCHLIST", body)
+        self.assertIn(b"Watch Anything", body)
         status, _ = self.call("GET", "/../config.py")
         self.assertEqual(status, 404)
 
@@ -128,17 +128,19 @@ class ServerTest(ServerBase):
         _, res = self.call("POST", f"/api/items/{item['id']}/watched")
         self.assertTrue(res["finished"])
 
-    def test_online_netflix_then_fallback(self):
+    def test_online_netflix_and_nothing_else_is_opened(self):
         show = self.add("tv", "tmdb", "tv/1396")
         _, res = self.call("POST", f"/api/items/{show['id']}/online")
         self.assertEqual(res["service"], "Netflix")
         self.assertEqual(self.opened[-1], "https://www.netflix.com/search?q=Breaking+Bad")
 
-        # On Max in the US but only for rent in Pakistan -> everythingmoe.
+        # On Max in the US but only for rent in Pakistan -> nothing opened (no built-in fallback site).
         movie = self.add("movie", "tmdb", "movie/27205")
+        before = len(self.opened)
         _, res = self.call("POST", f"/api/items/{movie['id']}/online")
-        self.assertEqual(res["service"], "everythingmoe.com")
-        self.assertEqual(self.opened[-1], "https://everythingmoe.com")
+        self.assertEqual((res["kind"], res["service"]), ("none", ""))
+        self.assertIn("None of your services has it", res["message"])
+        self.assertEqual(len(self.opened), before)
         self.app.settings.update({"region": "US"})
         _, res = self.call("POST", f"/api/items/{movie['id']}/online")
         self.assertEqual(res["service"], "HBO Max")
@@ -146,7 +148,7 @@ class ServerTest(ServerBase):
         anime = self.add("anime", "mal", "52991")
         self.app.settings.update({"region": "PK"})
         _, res = self.call("POST", f"/api/items/{anime['id']}/online")
-        self.assertEqual(res["service"], "everythingmoe.com")
+        self.assertEqual(res["kind"], "none")
         self.assertEqual(res["services"], ["Amazon Prime Video"])
 
     def test_online_uses_your_own_site_for_each_type(self):
@@ -182,7 +184,8 @@ class ServerTest(ServerBase):
         _, opts = self.call("GET", f"/api/items/{show['id']}/online-options")
         self.assertEqual(opts["options"], [])                                  # Crunchyroll: anime only
         _, res = self.call("POST", f"/api/items/{show['id']}/online")
-        self.assertEqual(res["kind"], "fallback")
+        self.assertEqual(res["kind"], "none")
+        self.assertIn("haven't added a site for TV shows", res["message"])
 
     def test_old_settings_become_the_list(self):
         from watchlist.config import Settings, write_json
@@ -192,12 +195,43 @@ class ServerTest(ServerBase):
         self.assertEqual(names, [("Netflix", ["anime", "tv", "movie"], True), ("HBO Max", ["anime", "tv", "movie"], True),
                                  ("anime.example", ["anime"], False)])
 
-    def test_online_without_token_goes_straight_to_fallback(self):
+    def test_online_without_token_uses_sites_without_a_check(self):
         movie = self.add("movie", "tmdb", "movie/27205")
         self.app.settings.update({"tmdb_api_key": ""})
         _, res = self.call("POST", f"/api/items/{movie['id']}/online")
-        self.assertEqual(res["service"], "everythingmoe.com")
+        self.assertEqual(res["kind"], "none")
         self.assertIn("No TMDB token", res["message"])
+        # Your own site, added yourself (check off), is used when nothing else fits.
+        listed = self.app.settings.get()["services"]
+        self.call("PUT", "/api/settings", {"services": listed + [
+            {"name": "everythingmoe", "url": "https://everythingmoe.com", "check_mode": "off"}]})
+        _, res = self.call("POST", f"/api/items/{movie['id']}/online")
+        self.assertEqual((res["service"], res["kind"], self.opened[-1]),
+                         ("everythingmoe", "search", "https://everythingmoe.com"))
+
+    def test_availability_check_per_site(self):
+        from unittest import mock
+        show = self.add("tv", "tmdb", "tv/1396")
+        listed = self.app.settings.get()["services"]
+        for x in listed:
+            x["check_mode"] = {"Netflix": "ai", "HBO Max": "off"}[x["name"]]
+        self.call("PUT", "/api/settings", {"services": listed, "gemini_api_key": "k"})
+        with mock.patch("watchlist.ai.streams_on", return_value={"Netflix": False}) as asked:
+            _, opts = self.call("GET", f"/api/items/{show['id']}/online-options")
+            self.assertEqual([(o["name"], o["check_mode"], o["has_it"]) for o in opts["options"]],
+                             [("Netflix", "ai", False), ("HBO Max", "off", None)])
+            _, res = self.call("POST", f"/api/items/{show['id']}/online")
+        self.assertEqual(res["service"], "HBO Max")
+        self.assertEqual(asked.call_count, 1, "the AI's answer is remembered")
+
+    def test_old_fallback_site_you_set_is_kept(self):
+        from watchlist.config import Settings, write_json
+        path = Path(self.tmp.name) / "old2.json"
+        write_json(path, {"fallback_url": "https://mine.example/?q={title}"})
+        last = Settings(path).get()["services"][-1]
+        self.assertEqual((last["name"], last["check_mode"]), ("mine.example", "off"))
+        write_json(path, {"fallback_url": "https://everythingmoe.com"})
+        self.assertNotIn("everythingmoe.com", [x["url"] for x in Settings(path).get()["services"]])
 
     def test_links_open_in_the_chosen_browser(self):
         opera = touch(self.media, "Opera GX/launcher.exe")
@@ -265,7 +299,7 @@ class ServerTest(ServerBase):
         self.assertEqual(status, 404)
         status, err = self.call("PUT", "/api/settings", {"region": "Pakistan"})
         self.assertEqual(status, 400)
-        status, err = self.call("PUT", "/api/settings", {"fallback_url": "javascript:alert(1)"})
+        status, err = self.call("PUT", "/api/settings", {"netflix_url": "javascript:alert(1)"})
         self.assertEqual(status, 400)
         status, _ = self.call("POST", "/api/open", {"url": "file:///C:/Windows"})
         self.assertEqual(status, 400)

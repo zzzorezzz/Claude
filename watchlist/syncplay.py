@@ -22,16 +22,19 @@ def default_name():
         name = getpass.getuser()
     except Exception:  # noqa: BLE001 - no user name is fine
         name = ""
-    return re.sub(r"[^\w .-]", "", name)[:20] or "Watchlist"
+    return re.sub(r"[^\w .-]", "", name)[:20] or "Watcher"
 
 
 def new_room():
-    return "watchlist-" + secrets.token_hex(5)
+    return "watchanything-" + secrets.token_hex(5)
 
 
-def make_invite(server, room, item, season=None, episode=None, host=None):
-    data = {"s": server, "r": room, "t": item["title"], "y": item.get("year"), "k": item["type"],
-            "src": item["source"], "id": item["source_id"]}
+def make_invite(server, room, item=None, season=None, episode=None, host=None):
+    """An invite to a room (and, with item, what it was started for)."""
+    data = {"s": server, "r": room}
+    if item:
+        data.update({"t": item["title"], "y": item.get("year"), "k": item["type"],
+                     "src": item["source"], "id": item["source_id"]})
     if host:
         data["h"] = host
     if episode:
@@ -51,7 +54,7 @@ def read_invite(code):
         data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode("utf-8"))
     except (binascii.Error, ValueError, UnicodeDecodeError):
         raise ValueError("that watch-party code is incomplete - copy all of it") from None
-    if not isinstance(data, dict) or not data.get("r") or not data.get("t"):
+    if not isinstance(data, dict) or not data.get("r"):
         raise ValueError("that watch-party code is incomplete - copy all of it")
     server = str(data.get("s") or DEFAULT_SERVER)
     if not re.fullmatch(r"[A-Za-z0-9.-]+(:\d{1,5})?", server):
@@ -59,7 +62,7 @@ def read_invite(code):
     room = str(data["r"])
     if not re.fullmatch(r"[\w.-]{1,64}", room):
         raise ValueError("that watch-party code has a strange room in it")
-    out = {"server": server, "room": room, "title": str(data["t"]), "year": data.get("y"),
+    out = {"server": server, "room": room, "title": str(data.get("t") or ""), "year": data.get("y"),
            "type": data.get("k") if data.get("k") in ("tv", "anime", "movie") else "",
            "source": str(data.get("src") or ""), "source_id": str(data.get("id") or ""),
            "host": str(data.get("h") or "") or None}
