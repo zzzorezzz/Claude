@@ -41,12 +41,9 @@ Round 10 was committed with `[mac only]` (no build): none of the platforms has i
 - The scraper against the user's real site (only tested with a local fake site). Sites that build their player with JavaScript only open in the browser.
 - Round 10 on any built app.
 
-### Setup guide: steps the user's guide doesn't have (asked whether to add them)
+### Setup guide
 
-- Your video sites (the new scraper).
-- Your country (for which services have a title).
-- Your name and picture for watch parties.
-- On Windows: "Windows protected your PC" → More info → Run anyway, and the firewall prompt the first time a torrent runs.
+The user's guide steps, plus one they asked for: "Your country, name and picture" (optional). They didn't want the Windows "Run anyway" / firewall step. Add nothing else unless asked.
 
 ### Possible next steps
 

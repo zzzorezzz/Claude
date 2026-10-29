@@ -5267,7 +5267,7 @@ async function openSettings(focus = '') {
   api('GET', '/api/services/presets').then(({ presets }) => { wrap.presets = presets; drawServicePicker(wrap); }).catch(() => {});
   if (focus === 'svc') $('#svc-picker', wrap).classList.remove('hidden');
   const spot = { svc: '#svc-field', tmdb: '[name=tmdb_api_key]', mal: '[name=mal_client_id]', sync: '[name=sync_folder]',
-    downloads: '[name=downloads_folder]', ai: '#ai-list', sites: '#site-list', video: '#vsite-list', vlc: '[name=vlc_path]' }[focus];
+    downloads: '[name=downloads_folder]', ai: '#ai-list', country: '[name=region]', sites: '#site-list', video: '#vsite-list', vlc: '[name=vlc_path]' }[focus];
   if (spot) {
     setTimeout(() => {
       const el = $(spot, wrap);
@@ -5439,6 +5439,13 @@ const GUIDE_STEPS = [
       <li><b>Gemini:</b> aistudio.google.com → <b>Get API key</b> → <b>Create API key</b>. Copy it.</li>
       <li><b>Groq:</b> console.groq.com → <b>API Keys</b> → <b>Create API Key</b>. Copy it.</li>
       <li>In Settings → <b>AI helpers</b>, paste each key into its field and press <b>Save</b>.</li></ol>` },
+  { id: 'you', title: 'Your country, name and picture', optional: true, focus: 'country',
+    body: `<p>In Settings:</p><ol>
+      <li><b>Your country</b> (under Watching online): where you watch, so the app knows which of your streaming services have a title there.
+        If you use a VPN, pick the country it puts you in.</li>
+      <li><b>Your name in watch parties</b> and <b>Your picture</b> (under Watch together): what the people you watch with see.
+        Choose a picture, move and zoom it in the circle, and press Save.</li>
+      <li>Press <b>Save</b>.</li></ol>` },
   { id: 'sync', title: 'Add a sync folder', optional: true, desktop: true, focus: 'sync', done: () => !!S.status.sync?.folder,
     body: `<p>Keeps your list the same on your Windows PC and your Mac, through a cloud drive (Google Drive, OneDrive, Dropbox or iCloud Drive).</p><ol>
       <li>Install the same cloud drive app on both computers and sign in to the same account.</li>
