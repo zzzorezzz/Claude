@@ -1665,7 +1665,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript",):
             ctype += "; charset=utf-8"
-        csp = ("default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; "
+        csp = ("default-src 'self'; img-src 'self' https: data: blob:; style-src 'self' 'unsafe-inline'; "
                "frame-src https://www.youtube.com https://www.youtube-nocookie.com; "
                "script-src 'self'; connect-src 'self'")
         self._send(HTTPStatus.OK, target.read_bytes(), ctype,

@@ -4599,23 +4599,27 @@ function playerOptions(s, data) {
 }
 
 // A picture made small and square (a profile picture), as a JPEG data link.
+// (Read as a data link: the page's security rules don't allow blob: images.)
 function smallPicture(file, size) {
   return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = c.height = size;
-      const side = Math.min(img.width, img.height);
-      c.getContext('2d').drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, size, size);
-      URL.revokeObjectURL(url);
-      let q = 0.82;
-      let out = c.toDataURL('image/jpeg', q);
-      while (out.length > 11000 && q > 0.3) { q -= 0.12; out = c.toDataURL('image/jpeg', q); }
-      resolve(out);
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('unreadable'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = c.height = size;
+        const side = Math.min(img.naturalWidth, img.naturalHeight);
+        c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+        let q = 0.82;
+        let out = c.toDataURL('image/jpeg', q);
+        while (out.length > 11000 && q > 0.3) { q -= 0.12; out = c.toDataURL('image/jpeg', q); }
+        resolve(out);
+      };
+      img.onerror = () => reject(new Error('unreadable'));
+      img.src = reader.result;
     };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('unreadable')); };
-    img.src = url;
+    reader.readAsDataURL(file);
   });
 }
 
