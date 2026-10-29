@@ -22,6 +22,9 @@ def default_name():
         name = getpass.getuser()
     except Exception:  # noqa: BLE001 - no user name is fine
         name = ""
+    if re.fullmatch(r"u\d+_a\d+", name or ""):
+        # A phone: its user name is an internal one ("u0_a130"); your name is set in Settings.
+        name = "Phone"
     return re.sub(r"[^\w .-]", "", name)[:20] or "Watcher"
 
 

@@ -124,5 +124,14 @@ class PhoneSessionTest(unittest.TestCase):
         b.stop()
 
 
+class PhoneNameTest(unittest.TestCase):
+    def test_a_phone_gets_a_readable_party_name(self):
+        from watchlist import syncplay
+        with mock.patch("getpass.getuser", return_value="u0_a130"):
+            self.assertEqual(syncplay.default_name(), "Phone")
+        with mock.patch("getpass.getuser", return_value="sara"):
+            self.assertEqual(syncplay.default_name(), "sara")
+
+
 if __name__ == "__main__":
     unittest.main()
