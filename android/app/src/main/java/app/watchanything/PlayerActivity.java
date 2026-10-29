@@ -9,7 +9,6 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.Toast;
 
-import androidx.annotation.NonNull;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
@@ -128,7 +127,7 @@ public class PlayerActivity extends Activity {
             }
 
             @Override
-            public void onPlayerError(@NonNull PlaybackException error) {
+            public void onPlayerError(PlaybackException error) {
                 Toast.makeText(PlayerActivity.this, "This video can't play on this phone ("
                         + error.getErrorCodeName() + ")", Toast.LENGTH_LONG).show();
             }
