@@ -90,8 +90,9 @@ const fmtMoney = (n) => (n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$$
 const epLabel = (p) => `S${p.season} E${p.episode}`;
 const isSeries = (item) => item.format === 'series';
 const isMac = () => S.status.platform === 'darwin';
-const pcName = () => (isMac() ? 'Mac' : 'PC');
-const browserName = () => (S.status.browser === 'builtin' ? 'a window of this app'
+const pcName = () => (S.status?.platform === 'android' ? 'phone' : isMac() ? 'Mac' : 'PC');
+const browserName = () => (S.status?.platform === 'android' ? 'its app or your browser'
+  : S.status.browser === 'builtin' ? 'a window of this app'
   : /opera\s*gx/i.test(S.status.browser || '') ? 'Opera GX' : 'your browser');
 const findItem = (id) => S.items.find((i) => i.id === id);
 
@@ -99,6 +100,62 @@ function upsert(item) {
   const i = S.items.findIndex((x) => x.id === item.id);
   if (i >= 0) S.items[i] = item; else S.items.push(item);
 }
+
+/* ---- On a phone (the Android app) */
+
+const onPhone = () => S.status?.platform === 'android';
+const phone = () => window.Android;          // the phone app's side (play, openUrl, share, files)
+
+// Choose a file or folder: the computer's own dialog, or on a phone the app's file browser.
+async function browse(opts) {
+  if (!onPhone()) return api('POST', '/api/browse', opts);
+  if (phone()?.hasFiles && !phone().hasFiles()) {
+    const ok = await confirmModal('Allow access to your files?', 'To play your downloads and pick files, Watch Anything needs "All files access". Android opens the setting - switch it on, then come back.', 'Open the setting');
+    if (ok) phone().askForFiles();
+    return { path: '' };
+  }
+  return new Promise((resolve) => {
+    const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+      <h2>${esc(opts.title || 'Choose')}</h2><div class="fs-places"></div><div class="fs-path muted small"></div>
+      <div class="fs-list"><div class="spinner"></div></div>
+      ${opts.kind === 'folder' ? '<div class="btns" style="margin-top:12px"><button class="btn btn-red" data-fs="pick">Use this folder</button></div>' : ''}</div>`, 'fs-modal');
+    let here = '';
+    let done = false;
+    const finish = (path) => { if (!done) { done = true; resolve({ path }); closeModal(m); } };
+    m.onClose = () => { if (!done) { done = true; resolve({ path: '' }); } };
+    const open = async (path) => {
+      const list = $('.fs-list', m);
+      list.innerHTML = '<div class="spinner"></div>';
+      try {
+        const d = await api('GET', `/api/fs?path=${encodeURIComponent(path || '')}&types=${encodeURIComponent(opts.types || 'video')}`);
+        here = d.path;
+        $('.fs-places', m).innerHTML = d.places.map((p) => `<button class="chip" data-fs-go="${esc(p.path)}">${esc(p.name)}</button>`).join('');
+        $('.fs-path', m).textContent = d.path;
+        list.innerHTML = (d.parent ? `<button class="fs-row up" data-fs-go="${esc(d.parent)}">⬑ Up</button>` : '')
+          + d.dirs.map((n) => `<button class="fs-row dir" data-fs-go="${esc(`${d.path}/${n}`)}">📁 ${esc(n)}</button>`).join('')
+          + (opts.kind === 'folder' ? '' : d.files.map((f) => `<button class="fs-row file" data-fs-file="${esc(`${d.path}/${f.name}`)}">🎬 ${esc(f.name)}<span class="muted small">${fmtBytes(f.size)}</span></button>`).join(''))
+          || '<p class="muted small">Nothing here.</p>';
+      } catch (e) { list.innerHTML = `<div class="warn">${esc(e.message)}</div>`; }
+    };
+    m.addEventListener('click', (e) => {
+      const go = e.target.closest('[data-fs-go]');
+      if (go) { open(go.dataset.fsGo); return; }
+      const f = e.target.closest('[data-fs-file]');
+      if (f) { finish(f.dataset.fsFile); return; }
+      if (e.target.closest('[data-fs="pick"]')) finish(here);
+    });
+    open(opts.initial || '');
+  });
+}
+
+// The phone's back button: closes what's open, then goes back a page.
+window.androidBack = () => {
+  if ($('#menu-root').children.length) { closeMenu(); return true; }
+  const top = $('#modal-root').lastElementChild;
+  if (top) { closeModal(top); return true; }
+  if (location.hash && location.hash !== '#/' && location.hash !== '#') { history.back(); return true; }
+  return false;
+};
 
 // Settings → Look: the app's colour theme.
 const THEMES = [['violet', 'Violet', '#7c5cff', '#22d3ee'], ['crimson', 'Crimson', '#e5303f', '#ff8a5c'], ['ocean', 'Ocean', '#2f7dff', '#2ee6c8'],
@@ -132,6 +189,7 @@ async function reload() {
   S.collections = data.collections;
   S.status = data.status;
   applyTheme(S.status.theme);
+  document.body.classList.toggle('android', onPhone());
   S.library = data.library || {};
   S.version = data.version;
   render();
@@ -297,7 +355,8 @@ const viewTarget = { set innerHTML(html) { setView($('#view'), html); } };
 
 function render() {
   const r = route();
-  $$('.nav-links a').forEach((a) => a.classList.toggle('active', a.dataset.route === r.name && !S.query));
+  $$('.nav-links a, #tabbar a').forEach((a) => a.classList.toggle('active',
+    (a.dataset.route === r.name || (a.dataset.route === 'collections' && r.name === 'watched')) && !S.query));
   renderNavButtons();
   const view = viewTarget;
   if (S.query.trim()) renderSearch(view);
@@ -853,13 +912,14 @@ async function openShareCollection(id) {
     $('#share-out', wrap).innerHTML = `<h4>Share code <span class="muted small">${r.count} title${r.count === 1 ? '' : 's'}</span></h4>
       <p class="muted small">Copy it and paste it into any chat.</p>
       <textarea class="input share-code" rows="4" readonly>${esc(r.code)}</textarea>
-      <div class="btns"><button class="btn btn-white" data-s="copy">Copy the code</button>
-        <button class="btn btn-ghost" data-s="file">Save as a file instead</button></div>
+      <div class="btns">${onPhone() ? '<button class="btn btn-red" data-s="phone-share">Share…</button>' : ''}<button class="btn btn-white" data-s="copy">Copy the code</button>
+        <button class="btn btn-ghost desktop-only" data-s="file">Save as a file instead</button></div>
       <div id="share-file"></div>`;
   } catch (e) { $('#share-out', wrap).innerHTML = `<div class="warn">${esc(e.message)}</div>`; return; }
   wrap.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-s]');
     if (!b) return;
+    if (b.dataset.s === 'phone-share') { phone()?.share($('.share-code', wrap).value); return; }
     if (b.dataset.s === 'copy') {
       const box = $('.share-code', wrap);
       try { await navigator.clipboard.writeText(box.value); } catch { box.select(); document.execCommand('copy'); }
@@ -910,7 +970,7 @@ function openSharedCollection() {
     if (b.dataset.s === 'peek') { source = { code: paste.value }; view(); }
     else if (b.dataset.s === 'choose') {
       try {
-        const r = await api('POST', '/api/browse', { kind: 'file', title: 'Choose the shared collection file', types: 'collection' });
+        const r = await browse({ kind: 'file', title: 'Choose the shared collection file', types: 'collection' });
         if (r.path) { source = { file: r.path }; view(); }
       } catch (err) { fail(err); }
     } else if (b.dataset.s === 'import') {
@@ -1146,7 +1206,7 @@ function watchLabel(item) {
 
 async function chooseDownloadsFolder() {
   try {
-    const { path } = await api('POST', '/api/browse', { kind: 'folder', title: 'Choose your downloads folder', initial: S.status.downloads || '' });
+    const { path } = await browse({ kind: 'folder', title: 'Choose your downloads folder', initial: S.status.downloads || '' });
     if (!path) return;
     await api('PUT', '/api/settings', { downloads_folder: path });
     await reload();
@@ -2061,7 +2121,7 @@ function openImportMal() {
       preview({ user });
     } else if (a === 'file') {
       try {
-        const { path } = await api('POST', '/api/browse', { kind: 'file', types: 'list', title: 'Choose your MyAnimeList export' });
+        const { path } = await browse({ kind: 'file', types: 'list', title: 'Choose your MyAnimeList export' });
         if (path) preview({ file: path });
       } catch (err) { fail(err); }
     } else if (a === 'go') {
@@ -2179,7 +2239,7 @@ async function partyDockClick(e) {
       if (document.body.classList.contains('party-window')) window.close();
       pollParty();
     } else if (a === 'choose') {
-      const { path } = await api('POST', '/api/browse', { kind: 'file', title: 'Choose the episode to watch' });
+      const { path } = await browse({ kind: 'file', title: 'Choose the episode to watch' });
       if (path) { await api('POST', '/api/party/use-file', { path }); toast('Playing your copy'); }
     } else if (a === 'follow') {
       await api('POST', '/api/party/follow');
@@ -2508,8 +2568,8 @@ function drawTitle(wrap) {
         <h1>${esc(item.title)}</h1>
         <div class="btns">
           <button class="btn btn-white" data-t="watch">${ICON.play} ${esc(watchLabel(item))}</button>
-          ${hasFiles(item) ? '<button class="btn btn-grey" data-t="vlc" title="Play the file in VLC instead of the built-in player">Play in VLC</button>' : ''}
-          <button class="btn btn-grey ${hasFiles(item) ? '' : 'hidden'}" data-t="party" title="Watch in sync with someone else, each on your own computer">${ICON.people} Watch together</button>
+          ${hasFiles(item) ? '<button class="btn btn-grey desktop-only" data-t="vlc" title="Play the file in VLC instead of the built-in player">Play in VLC</button>' : ''}
+          <button class="btn btn-grey desktop-only ${hasFiles(item) ? '' : 'hidden'}" data-t="party" title="Watch in sync with someone else, each on your own computer">${ICON.people} Watch together</button>
           <button class="btn btn-grey" data-t="trailer">${ICON.play} ${item.trailer ? 'Trailer' : 'Find trailer'}</button>
           <button class="btn btn-grey" data-t="all-watched" title="${item.in_watched ? 'Put it back in your everyday rows' : `Mark the whole ${isSeries(item) ? 'show' : 'film'} as watched: it moves to the Watched page`}">${item.in_watched ? '↩ Back to my list' : `${ICON.check} Watched it all`}</button>
           <button class="btn-round" data-t="menu" title="Collections & more">${ICON.plus}</button>
@@ -2538,7 +2598,7 @@ function drawTitle(wrap) {
     <section class="tm-section"><h3>On your ${pcName()}<span class="spacer"></span>
       <button class="btn btn-ghost btn-sm" data-t="ep-links" title="Every ${series ? 'episode' : 'file'} and the file or torrent it plays from - change any of them">${series ? 'See how the episodes are connected' : 'See which file plays'}</button></h3>
       <div class="folder-line" id="folder-line"></div></section>
-    <section class="tm-section" id="torrent-section"><h3>Stream from a torrent<span class="spacer"></span>
+    <section class="tm-section desktop-only" id="torrent-section"><h3>Stream from a torrent<span class="spacer"></span>
       <button class="btn btn-ghost btn-sm" data-t="torrents-window">${ICON.download || '⇩'} Torrents window</button></h3>
       <div id="torrent-box"><div class="muted small">…</div></div></section>
     <section class="tm-section hidden" id="extras-section"><h3>Extras <span class="muted small" id="extras-count"></span></h3>
@@ -3885,7 +3945,7 @@ async function drawEpisodes(wrap) {
 async function chooseFolder(item) {
   let path = '';
   try {
-    ({ path } = await api('POST', '/api/browse', {
+    ({ path } = await browse({
       kind: 'folder', initial: item.local_folder,
       title: `Choose the folder with ${item.title}`,
     }));
@@ -3983,6 +4043,7 @@ async function playFile(wrap, video, sub, player = '', fromStart = false) {
     season: wrap.st.ep.season, episode: wrap.st.ep.episode,
     player: player || undefined, from_start: fromStart,
   });
+  if (res.player === 'android') phone()?.play(JSON.stringify(res));
   await reload();
   if (wrap.isConnected) drawPlaying(wrap, res, video, sub);
 }
@@ -4045,7 +4106,7 @@ function drawPlaying(wrap, res, video, sub) {
   const mpv = res.player === 'mpv';
   const body = watchBody(wrap, `<div class="center">
     <div class="result-icon">▶️</div>
-    <h2>Playing ${esc(whatLabel(wrap))}${mpv ? '' : ' in VLC'}</h2>
+    <h2>Playing ${esc(whatLabel(wrap))}${mpv || res.player === 'android' ? '' : res.player === 'custom' ? ` in ${esc(res.player_name || 'your player')}` : ' in VLC'}</h2>
     ${res.note ? `<div class="warn" style="justify-content:center;margin-bottom:12px">${esc(res.note)}</div>` : ''}
     <p class="sub">${esc(video.name)}<br>
       <span class="small">${res.stream ? 'Streaming from the torrent while it downloads · ' : ''}${res.resumed_at ? `Resumed at ${fmtTime(res.resumed_at)} · ` : ''}Subtitles: ${res.subtitle ? esc(res.subtitle) : sub ? esc(sub.name) : 'none found'}${res.queued ? ` · the next ${res.queued} episode${res.queued === 1 ? '' : 's'} play after it, in order` : ''}</span></p>
@@ -4312,7 +4373,7 @@ function drawLocal(wrap, { choose = false } = {}) {
   $('#w-sub', body).addEventListener('change', async (e) => {
     if (e.target.value !== 'pick') return;
     try {
-      const { path } = await api('POST', '/api/browse', { kind: 'file', types: 'subtitle', title: 'Choose a subtitle file', initial: item.local_folder });
+      const { path } = await browse({ kind: 'file', types: 'subtitle', title: 'Choose a subtitle file', initial: item.local_folder });
       if (path) {
         info.subtitles.unshift({ path, name: path.split(/[\\/]/).pop(), rel: path.split(/[\\/]/).pop(), english: false });
         drawLocal(wrap);
@@ -4351,7 +4412,7 @@ async function localAction(wrap, e) {
       const updated = await chooseFolder(item);
       if (updated && wrap.isConnected) autoLocal(wrap);
     } else if (w === 'browse') {
-      const { path } = await api('POST', '/api/browse', { kind: 'file', types: 'video', title: `Choose a file for ${item.title}`, initial: item.local_folder });
+      const { path } = await browse({ kind: 'file', types: 'video', title: `Choose a file for ${item.title}`, initial: item.local_folder });
       if (!path) return;
       upsert(await api('PUT', `/api/items/${item.id}`, { local_file: path }));
       render(); refreshOpenTitle();
@@ -4643,7 +4704,7 @@ async function openSettings(focus = '') {
     <div class="btns" style="margin:-4px 0 14px"><button class="btn btn-ghost btn-sm" type="button" data-s="import-mal">Import my MyAnimeList list…</button></div>
     <div class="btns" style="margin-bottom:6px"><button class="btn btn-ghost btn-sm" type="button" data-s="show">Show keys</button>
       <button class="btn btn-ghost btn-sm" type="button" data-s="test">Save & test keys</button><span id="test-out" class="small"></span></div>
-    <h4>Sync between computers</h4>
+    <div class="desktop-only"><h4>Sync between computers</h4>
     <label class="field"><span>Sync folder</span>
       <div class="input-row"><input class="input" name="sync_folder" value="${esc(s.sync_folder)}" placeholder="Not syncing - choose a folder in Google Drive, OneDrive, Dropbox or iCloud Drive">
       <button class="btn btn-ghost btn-sm" type="button" data-s="sync-browse">Choose…</button>
@@ -4652,12 +4713,12 @@ async function openSettings(focus = '') {
         : s.sync_folder ? `<span class="ok">✓ Syncing.</span> Your list is in ${esc(sync.file)}.`
         : 'Your list is only on this computer right now.'}
         Choose a folder that both computers sync, then choose the same folder on the other computer and the two lists are merged.
-        Titles, progress, folders and collections sync; each computer remembers its own video folders.</small></label>
+        Titles, progress, folders and collections sync; each computer remembers its own video folders.</small></label></div>
     <h4>Watching online</h4>
     <label class="field"><span>Your country</span>
       <select class="select" name="region">${countries.map(({ c, name }) => `<option value="${c}" ${c === s.region ? 'selected' : ''}>${esc(name)} (${c})</option>`).join('')}</select>
       <small>Used to check which of your streaming services have a title where you are.</small></label>
-    <label class="field"><span>Browser</span>
+    <label class="field desktop-only"><span>Browser</span>
       <div class="input-row"><select class="select" id="browser-pick">${browserOptions(s, data)}</select>
       <button class="btn btn-ghost btn-sm" type="button" data-s="browser">Browse…</button></div>
       <input type="hidden" name="browser_path" value="${esc(s.browser_path)}">
@@ -4672,8 +4733,8 @@ async function openSettings(focus = '') {
         <b>TMDB</b> or <b>AI</b> - only when that says it has the title in your country (✓ / ✗ shows next to it when you watch);
         <b>No check</b> - every time (for your own sites). Nothing else is ever opened. You can also pick any of them when you watch.
         For your own site: search for any title on it, copy the address of the results page, and put <b>{title}</b> where the title was.</small></div>
-    <h4>Your torrent sites</h4>
-    <div class="field"><div id="site-list"></div>
+    <h4 class="desktop-only">Your torrent sites</h4>
+    <div class="field desktop-only"><div id="site-list"></div>
       <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="site-add">+ Add a site</button></div>
       <small><b>Get magnet</b> on a title's page searches the sites ticked for its kind (anime, TV shows, movies), picks the torrent that has every episode (for a TV show, of the season you're on; a pack with other seasons, films or OVAs is fine) or the film, in the best quality with the most seeders, and adds it.
         For the search link: search for any anime on your site, copy the address of the results page, and put <b>{title}</b> where the name was.
@@ -4695,7 +4756,7 @@ async function openSettings(focus = '') {
     <div id="ai-list"></div>
     <div class="svc-add"><select class="select" id="ai-preset"><option value="">+ Add your own AI…</option></select></div>
     <h4>Watching on your ${pcName()}</h4>
-    <label class="field"><span>Player</span>
+    <label class="field desktop-only"><span>Player</span>
       <select class="select" name="player">
         <option value="mpv" ${s.player === 'mpv' ? 'selected' : ''}>Built-in player (mpv) - remembers where you stopped</option>
         <option value="vlc" ${s.player === 'vlc' ? 'selected' : ''}>VLC</option>
@@ -4707,19 +4768,19 @@ async function openSettings(focus = '') {
       <button class="btn btn-ghost btn-sm" type="button" data-s="player-browse">Browse…</button></div>
       <input type="hidden" name="custom_player_path" value="${esc(s.custom_player_path)}">
       <small>${data.players.length ? `Found on this ${pcName()}: ${esc(data.players.map((x) => x.name).join(', '))}.` : `No other players were found - Browse to one.`}</small></label>
-    <label class="field"><span>VLC location</span>
+    <label class="field desktop-only"><span>VLC location</span>
       <div class="input-row"><input class="input" name="vlc_path" value="${esc(s.vlc_path)}" placeholder="${esc(data.status.vlc || (mac ? '/Applications/VLC.app' : 'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe'))}">
       <button class="btn btn-ghost btn-sm" type="button" data-s="vlc">Browse</button></div>
       <small>${data.status.vlc ? `<span class="ok">✓ Found VLC:</span> ${esc(data.status.vlc)}. Leave empty to use this.` : `<span class="bad">VLC not found.</span> Install it from videolan.org or browse to ${mac ? 'VLC in Applications' : 'vlc.exe'}.`}</small></label>
     <label class="check-row"><input type="checkbox" name="queue_next_episodes" ${s.queue_next_episodes ? 'checked' : ''}> Play the following episodes after the one you start</label>
-    <label class="check-row"><input type="checkbox" name="skip_intro" ${s.skip_intro ? 'checked' : ''}> <span>Skip openings and endings in the built-in player (when the file marks them with chapters; press <b>Shift+S</b> while watching to toggle)</span></label>
+    <label class="check-row desktop-only"><input type="checkbox" name="skip_intro" ${s.skip_intro ? 'checked' : ''}> <span>Skip openings and endings in the built-in player (when the file marks them with chapters; press <b>Shift+S</b> while watching to toggle)</span></label>
     <h4>Look</h4>
     <div class="field"><span>Colour theme</span>
       <div class="theme-pick">${THEMES.map(([v, l, a, b]) => `<button type="button" class="theme-chip ${(s.theme || 'violet') === v ? 'on' : ''}" data-s="theme" data-theme="${v}">
         <i style="background:linear-gradient(135deg, ${a}, ${b})"></i>${l}</button>`).join('')}</div>
       <input type="hidden" name="theme" value="${esc(s.theme || 'violet')}">
       <small>Changes the whole app, and the built-in player's controls. You see it straight away; Save keeps it.</small></div>
-    <h4>Watch together</h4>
+    <div class="desktop-only"><h4>Watch together</h4>
     <label class="field"><span>Your name in watch parties</span>
       <input class="input" name="party_name" value="${esc(s.party_name)}" placeholder="e.g. Ali"></label>
     <div class="field"><span>Your picture in watch parties</span>
@@ -4731,7 +4792,7 @@ async function openSettings(focus = '') {
       <small>Shown next to your name to everyone in a party you're in (it's sent through the watch-party server, made small).</small></div>
     <label class="field"><span>Watch-party server</span>
       <input class="input" name="party_server" value="${esc(s.party_server)}" placeholder="syncplay.pl:8999">
-      <small>A Syncplay server: the free public one works. Only the host's setting counts - it's in the invite.</small></label>
+      <small>A Syncplay server: the free public one works. Only the host's setting counts - it's in the invite.</small></label></div>
     <div class="btns" style="margin-top:22px"><button class="btn btn-red" type="submit">Save</button>
       <button class="btn btn-ghost" type="button" data-s="cancel">Cancel</button></div>
   </form>`, 'settings-modal');
@@ -4837,13 +4898,13 @@ async function openSettings(focus = '') {
           i.type = i.type === 'password' ? 'text' : 'password';
         });
       } else if (a === 'vlc') {
-        const { path } = await api('POST', '/api/browse', mac
+        const { path } = await browse(mac
           ? { kind: 'file', types: 'app', title: 'Find VLC', initial: '/Applications' }
           : { kind: 'file', types: 'exe', title: 'Find vlc.exe', initial: 'C:\\Program Files\\VideoLAN\\VLC' });
         if (path) form.vlc_path.value = path;
       } else if (a === 'browser' || a === 'player-browse') {
         const browser = a === 'browser';
-        const { path } = await api('POST', '/api/browse', mac
+        const { path } = await browse(mac
           ? { kind: 'file', types: 'app', title: browser ? 'Choose a browser' : 'Choose a media player', initial: '/Applications' }
           : { kind: 'file', types: 'exe', title: browser ? 'Choose a browser (its .exe)' : 'Choose a media player (its .exe)' });
         if (path) {
@@ -4860,10 +4921,10 @@ async function openSettings(focus = '') {
       } else if (a.startsWith('svc-')) {
         serviceAction(wrap, a, e.target.closest(a === 'svc-pick' ? '[data-p]' : '[data-i]'));
       } else if (a === 'dl-browse') {
-        const { path } = await api('POST', '/api/browse', { kind: 'folder', title: 'Choose your downloads folder', initial: form.downloads_folder.value });
+        const { path } = await browse({ kind: 'folder', title: 'Choose your downloads folder', initial: form.downloads_folder.value });
         if (path) form.downloads_folder.value = path;
       } else if (a === 'sync-browse') {
-        const { path } = await api('POST', '/api/browse', { kind: 'folder', title: 'Choose a folder both computers sync', initial: form.sync_folder.value });
+        const { path } = await browse({ kind: 'folder', title: 'Choose a folder both computers sync', initial: form.sync_folder.value });
         if (path) {
           // Applied straight away: no need to remember to press Save.
           form.sync_folder.value = path;

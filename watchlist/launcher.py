@@ -105,6 +105,13 @@ def open_url(url, browser=""):
     """Open a web link in `browser` (a path), or the system default browser."""
     if not url.lower().startswith(("http://", "https://")):
         raise LaunchError("only web links can be opened")
+    if ANDROID:
+        # On a phone: the service's own app when it has one (Netflix...), else the browser.
+        try:
+            android_bridge.openUrl(url)
+        except Exception as e:  # noqa: BLE001 - Java's errors
+            raise LaunchError(f"couldn't open that link ({e})") from e
+        return
     if browser == BUILTIN_BROWSER:
         if open_window(url, urllib.parse.urlsplit(url).hostname or "Watch Anything", 1280, 860):
             return
@@ -365,6 +372,8 @@ def _browser_command(browser, url, new_window=False):
 
 
 _webview = None          # pywebview, once the app window is open
+ANDROID = False          # running in the phone app (android.py)
+android_bridge = None    # the phone app's Java side: openUrl(url)
 _windows = {}            # the app's other windows by kind ("party", "browser")
 CLEAR_MARK = "clear-browser"     # in the browser data folder: sign out of everything at the next start
 

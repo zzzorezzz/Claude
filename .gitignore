@@ -17,3 +17,8 @@ mpv-dl/
 # The player's controls (uosc), fetched by the build
 watchlist/mpv_config/scripts/
 watchlist/mpv_config/fonts/
+# The app's code, copied into the phone app by the build
+android/app/src/main/python/
+android/.gradle/
+android/app/build/
+android/build/

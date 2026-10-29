@@ -1,4 +1,4 @@
-name: Build Watch Anything (Windows; Mac on request)
+name: Build Watch Anything (Windows; Mac and Android on request)
 
 on:
   push:
@@ -10,8 +10,8 @@ permissions:
 
 jobs:
   windows:
-    # "[mac only]" in the commit message builds just the Mac app.
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[mac only]')
+    # "[mac only]" / "[android only]" in the commit message builds just that app.
+    if: github.event_name != 'push' || !(contains(github.event.head_commit.message, '[mac only]') || contains(github.event.head_commit.message, '[android only]'))
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -287,4 +287,70 @@ jobs:
         with:
           name: WatchAnything-mac
           path: WatchAnything.dmg
+          retention-days: 90
+
+  android:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[android]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the tests
+        run: |
+          python -m pip install libtorrent
+          python -m unittest discover -s tests -t .
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.5"
+
+      - name: Put the app's code into the phone app
+        run: |
+          mkdir -p android/app/src/main/python
+          cp -r watchlist android/app/src/main/python/
+          # (the computer player's files aren't used on a phone)
+          rm -rf android/app/src/main/python/watchlist/mpv_config android/app/src/main/python/watchlist/mpv_scripts
+          find android/app/src/main/python -name __pycache__ -prune -exec rm -rf {} +
+
+      - name: Build the APK
+        run: |
+          gradle -p android assembleDebug --stacktrace
+          cp android/app/build/outputs/apk/debug/app-debug.apk WatchAnything.apk
+          ls -lh WatchAnything.apk
+
+      - name: Let the emulator use the CPU's virtualisation
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Start the APK on an Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          disable-animations: true
+          script: bash android/smoke-test.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-screenshots
+          path: android-*.png
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WatchAnything-android
+          path: WatchAnything.apk
           retention-days: 90

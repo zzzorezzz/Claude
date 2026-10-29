@@ -311,3 +311,49 @@ class SettingsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhoneTest(ServerBase):
+    """The phone app's side of the server (android.py)."""
+
+    def test_the_phone_player_reports_where_you_are(self):
+        show = self.add("tv", "tmdb", "tv/1396")
+        status, _ = self.call("POST", "/api/android/progress", {"item_id": show["id"], "key": "1:3", "pos": 600, "dur": 2800})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.app.store.get(show["id"])["positions"]["1:3"]["pos"], 600)
+        self.call("PUT", f"/api/items/{show['id']}", {"progress": {"season": 1, "episode": 3}})
+        self.call("POST", "/api/android/progress", {"item_id": show["id"], "key": "1:3", "finished": True})
+        item = self.app.store.get(show["id"])
+        self.assertEqual(item["progress"], {"season": 1, "episode": 4})
+        self.assertNotIn("1:3", item["positions"])
+        status, _ = self.call("POST", "/api/android/progress", {"item_id": "nope", "key": "1:1"})
+        self.assertEqual(status, 404)
+
+    def test_playing_on_a_phone_goes_to_the_phone_player(self):
+        video = self.media / "show" / "Breaking.Bad.S01E01.mkv"
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"x")
+        show = self.add("tv", "tmdb", "tv/1396")
+        self.call("PUT", f"/api/items/{show['id']}", {"local_folder": str(video.parent)})
+        with mock.patch.object(launcher, "ANDROID", True):
+            status, res = self.call("POST", f"/api/items/{show['id']}/play", {"path": str(video), "season": 1, "episode": 1})
+            _, state = self.call("GET", "/api/state")
+        self.assertEqual(status, 200, res)
+        self.assertEqual((res["player"], res["entries"][0]["key"]), ("android", "1:1"))
+        self.assertEqual(state["status"]["platform"], "android")
+        self.assertEqual(self.spawned, [])                      # nothing started on a computer
+
+    def test_the_apps_own_file_browser(self):
+        (self.media / "Anime" / "Frieren").mkdir(parents=True)
+        (self.media / "Anime" / "ep1.mkv").write_bytes(b"x")
+        (self.media / "Anime" / "notes.txt").write_text("x")
+        status, d = self.call("GET", "/api/fs?path=" + str(self.media / "Anime"))
+        self.assertEqual(status, 200, d)
+        self.assertEqual((d["dirs"], [f["name"] for f in d["files"]]), (["Frieren"], ["ep1.mkv"]))
+
+    def test_links_open_on_the_phone(self):
+        opened = []
+        bridge = mock.Mock(openUrl=opened.append)
+        with mock.patch.object(launcher, "ANDROID", True), mock.patch.object(launcher, "android_bridge", bridge):
+            launcher.open_url("https://www.netflix.com/search?q=Dark")
+        self.assertEqual(opened, ["https://www.netflix.com/search?q=Dark"])

@@ -123,7 +123,7 @@ class App:
         return {"tmdb": bool(s["tmdb_api_key"]), "mal": bool(s["mal_client_id"]),
                 "region": s["region"], "vlc": launcher.find_vlc(s["vlc_path"]),
                 "browser": launcher.find_browser(s["browser_path"]),
-                "platform": sys.platform,
+                "platform": "android" if launcher.ANDROID else sys.platform,
                 "sync": {"folder": s["sync_folder"], "file": str(self.store.path),
                          "problem": self.sync_problem},
                 "downloads": s["downloads_folder"], "player": s["player"],
@@ -1168,6 +1168,14 @@ class App:
         entries, patch = self._entries(item, path, subtitle, body.get("season"), body.get("episode"),
                                        s["queue_next_episodes"])
         start = 0 if body.get("from_start") else player.resume_point(item["positions"].get(entries[0]["key"]))
+        if launcher.ANDROID:
+            # On a phone: the phone app's own player plays the list, and reports back
+            # where you are (/api/android/progress).
+            self.store.update(item["id"], patch)
+            return {"ok": True, "player": "android", "item_id": item["id"], "start": start,
+                    "anime": item["type"] == "anime", "file": entries[0].get("name") or Path(path).name,
+                    "queued": len(entries) - 1, "resumed_at": start, "stream": bool(found),
+                    "entries": [{k: e.get(k) for k in ("path", "sub", "key", "label")} for e in entries]}
         wanted = body.get("player") or s["player"]
         note = ""
         with self._party_lock:
@@ -1311,6 +1319,14 @@ class App:
         positions = dict(item["positions"])
         positions[entry["key"]] = {"pos": round(pos, 1), "dur": round(dur or 0, 1), "at": time.time()}
         self.store.update(item_id, {"positions": positions})
+
+    def phone_progress(self, item_id, key, pos, dur, finished=False):
+        """The phone player: where you are in an episode, or that you watched it to the end."""
+        entry = {"key": str(key)}
+        if finished:
+            self._finished_entry(item_id, entry)
+        elif pos and dur:
+            self._save_position(item_id, entry, float(pos), float(dur))
 
     def _finished_entry(self, item_id, entry):
         """An episode or film played to the end: forget its place, move progress on."""
@@ -1480,6 +1496,8 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/connected/cancel", "cancel_connected"),
         ("POST", r"/api/items/(\w+)/recap", "recap"),
         ("POST", r"/api/settings/ai", "test_ai"),
+        ("POST", r"/api/android/progress", "phone_progress"),
+        ("GET", r"/api/fs", "fs"),
         ("GET", r"/api/settings/ai-presets", "ai_presets"),
         ("GET", r"/api/find/top", "find_top"),
         ("GET", r"/api/find/search", "find_search"),
@@ -2377,6 +2395,50 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_test_settings(self, body):
         return metadata.test_keys(self.app.settings.get())
+
+    def api_phone_progress(self, body):
+        try:
+            self.app.item(str(body.get("item_id") or ""))
+            self.app.phone_progress(body["item_id"], body.get("key") or "movie", body.get("pos") or 0,
+                                    body.get("dur") or 0, bool(body.get("finished")))
+        except (KeyError, TypeError, ValueError) as e:
+            raise ApiError(f"bad progress report ({e})") from e
+        return {"ok": True}
+
+    def api_fs(self, body):
+        """The app's own file browser (on a phone, where there are no file dialogs):
+        a folder's folders, and its files of one kind."""
+        exts = {"video": scanner.VIDEO_EXTS, "subtitle": {".srt", ".ass", ".ssa", ".vtt", ".sub"},
+                "list": {".xml", ".gz"}, "collection": {".wlcollection", ".txt", ".json"}}
+        home = "/storage/emulated/0" if launcher.ANDROID else str(Path.home())
+        path = str(self.query.get("path") or "") or home
+        want = exts.get(str(self.query.get("types") or "video"), scanner.VIDEO_EXTS)
+        if not os.path.isdir(path):
+            path = home
+        dirs, files = [], []
+        try:
+            with os.scandir(path) as it:
+                for e in it:
+                    if e.name.startswith("."):
+                        continue
+                    try:
+                        if e.is_dir():
+                            dirs.append(e.name)
+                        elif Path(e.name).suffix.lower() in want:
+                            files.append({"name": e.name, "size": e.stat().st_size})
+                    except OSError:
+                        continue
+        except PermissionError:
+            raise ApiError("the app isn't allowed to look at your files yet - allow it (All files access) and try again")
+        except OSError as e:
+            raise ApiError(f"couldn't open that folder ({e})") from e
+        parent = os.path.dirname(path.rstrip("/")) or "/"
+        places = [{"name": n, "path": p} for n, p in (
+            [("Phone", home), ("Download", f"{home}/Download"), ("Movies", f"{home}/Movies"), ("DCIM", f"{home}/DCIM")]
+            if launcher.ANDROID else [("Home", home), ("Downloads", str(Path.home() / "Downloads"))]) if os.path.isdir(p)]
+        return {"path": path, "parent": parent if path != home and len(path) > len("/storage") else None,
+                "dirs": sorted(dirs, key=str.lower), "files": sorted(files, key=lambda f: f["name"].lower()),
+                "places": places}
 
     def api_browse(self, body):
         kind = body.get("kind", "folder")
