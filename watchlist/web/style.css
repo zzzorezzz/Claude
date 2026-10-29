@@ -1155,7 +1155,7 @@ body {
 .about-box .about-close { justify-self: end; margin-top: -4px; }
 
 /* The watch party dock: stays put while you use the app. */
-#party-dock { position: fixed; z-index: 90; right: 18px; bottom: 18px; width: min(360px, calc(100vw - 36px));
+#party-dock { position: fixed; z-index: 150; right: 18px; bottom: 18px; width: min(360px, calc(100vw - 36px));
   max-height: calc(100vh - 110px); display: flex; flex-direction: column; border-radius: 20px; overflow: hidden;
   background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid rgba(var(--accent-rgb), .35); box-shadow: 0 20px 60px rgba(0, 0, 0, .55);
   -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); animation: dock-in .35s cubic-bezier(.2, .9, .2, 1) both; }
@@ -1450,3 +1450,98 @@ body.android #party-dock.collapsed { left: auto; }
   body.android .nav-more { display: none !important; }
   body.android #toasts { bottom: 80px; }
 }
+
+/* ---------- "Play this with" on a title's page ---------- */
+.play-with { display: inline-flex; align-items: center; gap: 6px; padding: 0 4px 0 10px; height: 40px; border-radius: 8px;
+  background: rgba(20, 24, 39, .72); border: 1px solid var(--edge); font-size: 12px; color: var(--muted); }
+.play-with .select { height: 30px; padding: 0 26px 0 8px; font-size: 13px; background-color: transparent; border-color: transparent; color: var(--text); }
+.play-with .select:focus { border-color: var(--line-2); }
+
+/* ---------- Select: several titles at once ---------- */
+body.selecting #view .card { cursor: pointer; }
+body.selecting #view .card .card-buttons { display: none; }
+body.selecting #view .card::after { content: ''; position: absolute; z-index: 6; top: 8px; right: 8px; width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .85); background: rgba(0, 0, 0, .45); }
+body.selecting #view .card.picked { outline: 3px solid var(--accent); outline-offset: 2px; }
+body.selecting #view .card.picked::after { background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='white' d='M9 16.2l-3.5-3.5L4 14.2l5 5 11-11-1.4-1.4z'/%3E%3C/svg%3E") center / 16px no-repeat; border-color: var(--accent); }
+#sel-bar { position: fixed; z-index: 140; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(920px, calc(100vw - 32px));
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 16px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent); border: 1px solid rgba(var(--accent-rgb), .4);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .6); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); animation: dock-in .25s ease both; }
+#sel-bar b { margin-right: 6px; }
+#sel-bar .sel-sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+#sel-bar .btn svg { width: 14px; height: 14px; fill: currentColor; }
+.btn.on { background: rgba(var(--accent-rgb), .25); border-color: var(--accent); }
+body.android #sel-bar { bottom: 76px; }
+
+/* ---------- profile picture cropper ---------- */
+.crop-modal { max-width: 360px; }
+.crop-stage { position: relative; margin: 8px auto 14px; overflow: hidden; border-radius: 14px; background: #000; cursor: grab; touch-action: none; user-select: none; }
+.crop-stage:active { cursor: grabbing; }
+.crop-stage img { position: absolute; left: 50%; top: 50%; max-width: none; pointer-events: none; }
+.crop-ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgba(0, 0, 0, .6); outline: 2px solid rgba(255, 255, 255, .9); outline-offset: -2px; pointer-events: none; }
+.crop-zoom { display: flex; align-items: center; gap: 10px; justify-content: center; margin-bottom: 16px; color: var(--muted); }
+.crop-zoom input { width: 200px; accent-color: var(--accent); }
+
+/* ---------- Extra stuff on a title's page ---------- */
+.extra-stuff > summary { list-style: none; cursor: pointer; }
+.extra-stuff > summary::-webkit-details-marker { display: none; }
+.extra-stuff > summary h3 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.extra-stuff .extra-caret { transition: transform .2s; color: var(--muted); }
+.extra-stuff[open] .extra-caret { transform: rotate(180deg); }
+.extra-stuff[open] > summary h3 { margin-bottom: 12px; }
+.xs-group { margin-bottom: 18px; }
+.xs-group h5 { margin: 0 0 8px; font-size: 14px; }
+.xs-torrent { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; background: rgba(255, 255, 255, .02); }
+.xs-tname { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-width: 0; }
+.xs-tname b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xs-tname svg, .xs-dir svg, .xs-kind svg { width: 15px; height: 15px; fill: var(--muted); flex: none; }
+.xs-dir > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 4px 2px; border-radius: 6px; }
+.xs-dir > summary:hover { background: rgba(255, 255, 255, .04); }
+.xs-dir > summary span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xs-in { padding-left: 16px; border-left: 1px solid var(--line); margin-left: 7px; }
+.xs-file { display: flex; align-items: center; gap: 8px; padding: 3px 2px; font-size: 13px; min-width: 0; }
+.xs-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- beside a title's page ---------- */
+.rel-buttons { display: flex; gap: 8px; align-items: center; margin: 6px 0 10px; }
+.rel-buttons .rel-find { margin: 0; flex: 1; }
+.tm-related .rel-head { margin-top: 18px; }
+.scrape-others { margin-top: 16px; text-align: left; }
+.scrape-others summary { cursor: pointer; color: var(--muted); }
+
+/* ---------- Settings: a part opened by the setup guide ---------- */
+.field.flash, .flash { animation: flash 2.4s ease; border-radius: 10px; }
+@keyframes flash { 0%, 60% { box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .7); } 100% { box-shadow: 0 0 0 3px transparent; } }
+
+/* ---------- setup guide ---------- */
+.setup-modal { max-width: 460px; }
+.setup-logo { width: 72px; height: 72px; object-fit: contain; margin-bottom: 6px; }
+#guide { position: fixed; z-index: 160; left: 18px; bottom: 18px; width: min(400px, calc(100vw - 36px)); max-height: calc(100vh - 110px);
+  overflow-y: auto; padding: 16px 18px 14px; border-radius: 18px; background: color-mix(in srgb, var(--panel) 95%, transparent);
+  border: 1px solid rgba(var(--accent-rgb), .45); box-shadow: 0 20px 60px rgba(0, 0, 0, .6); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
+  animation: dock-in .3s cubic-bezier(.2, .9, .2, 1) both; font-size: 14px; }
+#guide h3 { margin: 6px 0 8px; font-size: 18px; }
+#guide .guide-x { position: absolute; top: 8px; right: 10px; background: none; border: 0; color: var(--muted); font-size: 22px; cursor: pointer; }
+#guide .guide-step { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+#guide .guide-dots { display: flex; gap: 4px; margin-top: 8px; }
+#guide .guide-dots i { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+#guide .guide-dots i.past { background: rgba(var(--accent-rgb), .6); }
+#guide .guide-dots i.now { background: var(--accent-grad); }
+#guide .guide-body ol { padding-left: 20px; margin: 6px 0; }
+#guide .guide-body li { margin: 4px 0; line-height: 1.45; }
+#guide .guide-body code { font-size: 11px; word-break: break-all; }
+#guide .guide-links { margin-top: 10px; flex-wrap: wrap; }
+#guide .guide-links svg { width: 14px; height: 14px; fill: currentColor; }
+#guide .guide-state { margin: 10px 0 2px; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+#guide .guide-state.ok { color: var(--green); }
+#guide .guide-state svg { width: 16px; height: 16px; fill: currentColor; }
+#guide .guide-nav { margin-top: 8px; align-items: center; }
+#guide .guide-nav .spacer { flex: 1; }
+body.android #guide { left: 10px; right: 10px; width: auto; bottom: 76px; }
+#guide .guide-min { position: absolute; top: 8px; right: 36px; background: none; border: 0; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; }
+#guide.min { width: auto; max-width: min(400px, calc(100vw - 36px)); padding: 10px 14px; cursor: pointer; }
+#guide.min > :not(.guide-step):not(h3):not(.guide-x):not(.guide-min) { display: none; }
+#guide.min h3 { margin: 2px 60px 0 0; font-size: 15px; }
+/* While the guide is open beside them, windows (Settings…) sit to its right on a wide screen. */
+@media (min-width: 980px) { body.guide-open #modal-root .overlay { padding-left: 440px; } }

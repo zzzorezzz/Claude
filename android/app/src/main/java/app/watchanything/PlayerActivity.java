@@ -40,8 +40,10 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,6 +61,7 @@ public class PlayerActivity extends Activity {
     private static volatile PlayerActivity current;
 
     private ExoPlayer player;
+    private DefaultHttpDataSource.Factory http;
     private PlayerView view;
     private TextView message;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -128,7 +131,7 @@ public class PlayerActivity extends Activity {
         hideBars(view);
 
         // Torrent episodes stream from the app while they download: wait patiently for data.
-        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+        http = new DefaultHttpDataSource.Factory()
                 .setConnectTimeoutMs(30_000).setReadTimeoutMs(180_000).setAllowCrossProtocolRedirects(true);
         player = new ExoPlayer.Builder(this)
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(new DefaultDataSource.Factory(this, http)))
@@ -190,6 +193,17 @@ public class PlayerActivity extends Activity {
         inParty = play.optBoolean("party", false);
         anime = play.optBoolean("anime", anime);
         JSONArray entries = play.getJSONArray("entries");
+        // A video from your own site: asked for as if from its page (some sites check).
+        for (int i = 0; i < entries.length(); i++) {
+            String referer = entries.getJSONObject(i).optString("referer", "");
+            if (!referer.isEmpty() && !"null".equals(referer)) {
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Referer", referer);
+                http.setDefaultRequestProperties(headers);
+                http.setUserAgent("Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Mobile Safari/537.36");
+                break;
+            }
+        }
         List<MediaItem> items = new ArrayList<>();
         keys.clear();
         finished.clear();

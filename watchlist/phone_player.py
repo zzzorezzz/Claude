@@ -44,7 +44,7 @@ class PhoneSession:
         """What the phone app needs to open the player for this."""
         return {"session": self.id, "item_id": self.item_id, "start": self.start_at, "paused": self.start_paused,
                 "keep_open": self.keep_open, "anime": self.anime, "party": self.party,
-                "entries": [{k: e.get(k) for k in ("path", "sub", "key", "label")} for e in self.entries]}
+                "entries": [{k: e.get(k) for k in ("path", "sub", "key", "label", "referer")} for e in self.entries]}
 
     def open(self):
         """Open the player from here (a guest following the host)."""

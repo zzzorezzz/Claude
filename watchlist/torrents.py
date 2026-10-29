@@ -48,6 +48,8 @@ except ImportError:  # pragma: no cover - the app still works without torrents
 
 DIR_NAME = "Watchlist torrents"
 DELETE_AFTER = 5 * 60         # an episode watched to the end is deleted this long after
+OLD_AFTER = 48 * 3600         # any torrent file not played this long after it arrived is deleted (unless kept)
+CLEAN_EVERY = 30 * 60         # how often the torrents folder is looked through for those
 READ_AHEAD = 32 * 1024 * 1024  # bytes asked for urgently ahead of what's being played
 WAIT_FOR_DATA = 90            # seconds a stream waits for a piece before giving up
 METADATA_WAIT = 60            # seconds to wait for a magnet's list of files
@@ -184,6 +186,10 @@ class Torrents:
         state = read_json(self.state_path, {})
         self.records = state.get("torrents", {}) if isinstance(state, dict) else {}
         self.keep = state.get("keep", {}) if isinstance(state, dict) else {}
+        # When each file in the torrents folder was first seen there (its path -> time):
+        # the time it arrived, not the file's own dates.
+        self.seen = state.get("seen", {}) if isinstance(state, dict) else {}
+        self._last_clean = time.time() - CLEAN_EVERY + 120      # the first look, two minutes after starting
         self.lock = threading.RLock()
         self.handles = {}
         self.ses = None
@@ -201,7 +207,10 @@ class Torrents:
             self._start()
         for h, rec in self.records.items():
             if rec.get("files") and not rec.get("plan"):
+                self._quick(rec)
                 self._plan_soon(h)          # added before packs were worked out
+            elif rec.get("files") and (rec.get("plan") or {}).get("status") in ("working", "failed")                     and "quick" not in rec:
+                self._quick(rec)
 
     # ---- the libtorrent session
 
@@ -252,7 +261,7 @@ class Torrents:
 
     def _save(self):
         with self.lock:
-            write_json(self.state_path, {"torrents": self.records, "keep": self.keep})
+            write_json(self.state_path, {"torrents": self.records, "keep": self.keep, "seen": self.seen})
             self._dirty = False
 
     # ---- the background loop: alerts, newly found file lists, cleaning up
@@ -297,6 +306,11 @@ class Torrents:
             self._prefetch_next()
             self._stop_when_done()
             self._delete_watched()
+            self._note_used()
+        if time.time() - self._last_clean >= CLEAN_EVERY:
+            self._last_clean = time.time()
+            threading.Thread(target=self.clean_old, daemon=True).start()
+        with self.lock:
             if self._dirty:
                 self._save()
 
@@ -311,12 +325,34 @@ class Torrents:
         rec["name"] = ti.name()
         rec["files"] = [{"index": i, "path": fs.file_path(i), "size": fs.file_size(i)}
                         for i in range(fs.num_files()) if not _is_pad(fs, i)]
+        self._quick(rec)
         handle.prioritize_files(self._priorities(rec, fs.num_files()))
         handle.unset_flags(lt.torrent_flags.upload_mode)
         handle.set_flags(lt.torrent_flags.sequential_download)
         rec.pop("error", None)
         self._save_soon()
         self._plan_soon(h)
+
+    def _quick(self, rec):
+        """A pack of an anime: until it's worked out with MyAnimeList's facts, its
+        files go by their names (see packs.quick_own), so another season's
+        episode 1 never plays as this one's."""
+        try:
+            item = self.app.store.get(rec["item_id"])
+        except KeyError:
+            return
+        if item.get("source") != "mal":
+            return
+        files = [{"key": f["index"], "rel": f["path"], "size": f["size"]}
+                 for f in rec.get("files") or [] if kind_of(f["path"]) == "video"]
+        try:
+            quick = packs.quick_own(files, item) if len(files) > 1 else None
+        except Exception:  # noqa: BLE001 - a name it can't read: the whole torrent stays the title's
+            quick = None
+        if quick is None:
+            rec.pop("quick", None)
+        else:
+            rec["quick"] = {str(k): v for k, v in quick.items()}
 
     # ---- adding and removing
 
@@ -421,6 +457,14 @@ class Torrents:
                 found = self.app.store.find_source("mal", sid)
                 cache[sid] = found["id"] if found else None
             return cache[sid], (1 if ep else None), ep
+        quick = rec.get("quick")
+        if isinstance(quick, dict) and (rec.get("plan") or {}).get("status") != "single":
+            # The pack isn't worked out yet: only the files whose names say they're
+            # this title's (not another season's, or a film's) count as its own.
+            if idx not in quick:
+                return None, None, None
+            ep = quick[idx]
+            return rec["item_id"], (1 if ep else None), ep
         return rec["item_id"], None, None
 
     def _owns_any(self, rec, item_id):
@@ -528,7 +572,11 @@ class Torrents:
             return False
         rec = self.records[found[0]]
         f = next((f for f in rec.get("files") or [] if f["index"] == found[1]), None)
-        return bool(f) and self._owner(rec, f)[0] == item_id
+        if not f:
+            return False
+        owner = self._owner(rec, f)[0]
+        # (A file of no title yet - an extra, or one the pack hasn't placed - is still its torrent's.)
+        return owner == item_id or (owner is None and rec["item_id"] == item_id)
 
     def find_file(self, path):
         """(hash, index) of a torrent's downloaded file, by its path."""
@@ -857,6 +905,92 @@ class Torrents:
                     continue
                 self.delete_file(h, int(index))
 
+    def _note_used(self):
+        """Remember when each file was last streamed (a file in use isn't old)."""
+        for (h, index), at in list(self.reading.items()):
+            rec = self.records.get(h)
+            if rec is None:
+                continue
+            used = rec.setdefault("used", {})
+            if at - used.get(str(index), 0) > 600:
+                used[str(index)] = round(at)
+                self._save_soon()
+
+    def _folders(self):
+        """The torrents folders (only these are ever cleaned)."""
+        out = {str(Path(r["save_path"])) for r in self.records.values() if r.get("save_path")}
+        folder = self.app.settings.get()["downloads_folder"]
+        if folder and os.path.isdir(folder):
+            out.add(str(Path(folder) / DIR_NAME))
+        out.add(str(self.dir / "files"))
+        return [f for f in out if Path(f).name in (DIR_NAME, "files") and os.path.isdir(f)]
+
+    def clean_old(self, now=None):
+        """Every so often, in the background: files in the torrents folder that
+        arrived at least 48 hours ago and haven't been played since are deleted,
+        unless they're a show's with "Keep downloaded episodes" on. Files of no
+        torrent (left over) go the same way. Returns how many were deleted."""
+        now = now or time.time()
+        deleted = 0
+        playing = self._playing_paths()
+        with self.lock:
+            known = {}                                          # path -> (hash, index)
+            for h, rec in self.records.items():
+                for f in rec.get("files") or []:
+                    known[os.path.normcase(self.path_of(rec, f))] = (h, f["index"])
+            on_disk = set()
+            for folder in self._folders():
+                for root, _dirs, names in os.walk(folder):
+                    for name in names:
+                        on_disk.add(os.path.join(root, name))
+            self.seen = {p: t for p, t in self.seen.items() if p in on_disk}
+            for p in on_disk:
+                self.seen.setdefault(p, now)
+            self._save_soon()
+            todo = []
+            for p in on_disk:
+                if now - self.seen[p] < OLD_AFTER or p in playing:
+                    continue
+                found = known.get(os.path.normcase(p))
+                if not found:
+                    m = Path(p).name
+                    if m.startswith(".") and m.endswith(".parts") and any(m[1:].startswith(h) for h in self.records):
+                        continue                                # an active torrent's own bookkeeping
+                    todo.append((p, None))
+                    continue
+                h, index = found
+                rec = self.records[h]
+                if any(now - at < OLD_AFTER for (rh, ri), at in self.reading.items() if rh == h and ri == index):
+                    continue
+                if now - (rec.get("used") or {}).get(str(index), 0) < OLD_AFTER:
+                    continue
+                f = self._file(rec, index)
+                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]) or self.keep.get(rec["item_id"]):
+                    continue
+                if self.stream_url(h, index, f["path"]) in playing:
+                    continue
+                todo.append((p, found))
+        for p, found in todo:
+            try:
+                if found:
+                    self.delete_file(*found)
+                else:
+                    os.remove(p)
+                deleted += 1
+            except (OSError, TorrentError):
+                continue
+            self.seen.pop(p, None)
+        for folder in self._folders():                          # folders left empty
+            for root, dirs, names in sorted(os.walk(folder), key=lambda x: -len(x[0])):
+                if root != folder and not os.listdir(root):
+                    try:
+                        os.rmdir(root)
+                    except OSError:
+                        pass
+        if deleted:
+            self._save_soon()
+        return deleted
+
     def _playing_paths(self):
         session = self.app.player.session
         if not session or session.ended:
@@ -1002,6 +1136,7 @@ class Torrents:
             if targets <= {item["source_id"]}:
                 rec["plan"] = {"status": "single"}
                 rec.pop("assign", None)
+                rec.pop("quick", None)
             else:
                 rec["plan"] = {
                     "status": "ready", "by": result["by"], "anchor": item["source_id"],

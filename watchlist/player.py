@@ -62,7 +62,9 @@ def ui_args(theme="violet"):
         text = "111111" if theme == "mono" else "ffffff"
         colors = (f"foreground={accent},foreground_text={text},background={bg},background_text=e6e9f2,"
                   f"curtain={bg},success=4ade80,error=ff6b81,match={second},heatmap={second}")
-        return [f"--config-dir={UI_DIR}", "--osc=no", "--osd-bar=no", "--border=yes",
+        # The controls hide after 5 seconds without the mouse moving or a key pressed (even
+        # with the mouse resting over them), and come back when it moves or a key is used.
+        return [f"--config-dir={UI_DIR}", "--osc=no", "--osd-bar=no", "--border=yes", "--cursor-autohide=5000",
                 "--osd-font-size=30", "--osd-border-size=1.5", "--osd-color=#FFE6E9F2", "--osd-shadow-offset=1",
                 f"--script-opts-append=uosc-color={colors}",
                 f"--script-opts-append=uosc-chapter_ranges=openings:{second}55,endings:{second}55,ads:ff6b8166"]

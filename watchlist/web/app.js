@@ -37,6 +37,7 @@ const S = {
   featured: null,
   folderSel: {},       // per section: '' (all), 'none' (not in a folder) or a folder id
   library: {},         // what was found in the downloads folder
+  sel: { on: false, ids: new Set() },   // Select: several titles picked at once
 };
 
 const DL_ORDER = ['anime', 'tv', 'movie'];
@@ -69,6 +70,7 @@ async function api(method, path, body) {
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `request failed (${res.status})`);
+  if (method === 'POST' && path === '/api/items') sfx('add');
   return data;
 }
 
@@ -80,6 +82,36 @@ function toast(message, kind = '') {
   setTimeout(() => el.remove(), kind === 'error' ? 6000 : 3500);
 }
 const fail = (e) => toast(e.message || String(e), 'error');
+
+// Small sounds for small things (Settings → Look → Sounds): made on the spot, no files.
+let audioCtx = null;
+const SOUNDS = {
+  add: [[660, 0, 0.09], [990, 0.07, 0.13]],     // a title added
+  close: [[440, 0, 0.06], [330, 0.04, 0.08]],   // a window closed
+  nav: [[740, 0, 0.05]],                         // another section
+  select: [[880, 0, 0.035]],                     // picked in Select
+  done: [[523, 0, 0.08], [784, 0.08, 0.15]],    // a step of the setup guide done
+};
+function sfx(name) {
+  if (S.status?.sounds === false || !SOUNDS[name] || document.body.classList.contains('party-window')) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t0 = audioCtx.currentTime + 0.01;
+    for (const [freq, at, len] of SOUNDS[name]) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t0 + at);
+      gain.gain.exponentialRampToValueAtTime(0.05, t0 + at + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + len);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0 + at);
+      osc.stop(t0 + at + len + 0.02);
+    }
+  } catch { /* no sound on this computer */ }
+}
 
 const regionName = (code) => {
   try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code; } catch { return code; }
@@ -196,6 +228,8 @@ async function reload() {
   refreshOpenTitle();
   if (S.redrawQuestions) S.redrawQuestions();
   maybeAskQuestions();
+  maybeAskSetup();
+  if (S.guide) drawGuideBox();
 }
 
 // With sync on, the other computer can change the list at any time: check
@@ -367,10 +401,13 @@ function render() {
   else if (r.name === 'watched') renderWatched(view);
   else if (r.id) renderCollection(view, r.id);
   else renderCollections(view);
+  markSelection();
 }
 
 window.addEventListener('hashchange', () => {
   if (S.query) { S.query = ''; clearSearchBox(); }
+  sfx('nav');
+  if (S.sel.on) { S.sel.on = false; S.sel.ids.clear(); }
   const go = () => { render(); window.scrollTo(0, 0); };
   // A smooth cross-fade between pages where the window supports it.
   if (document.startViewTransition && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -549,8 +586,123 @@ function rowHTML({ title, link, items, addType, emptyText, tools = '' }) {
   </section>`;
 }
 
+/* ---- Select: pick several titles, then remove them, mark them watched, or move them together */
+
+const selectButton = () => `<button class="btn btn-ghost btn-sm ${S.sel.on ? 'on' : ''}" data-do="select" title="Pick several titles to change them together">${S.sel.on ? 'Done' : `${ICON.check} Select`}</button>`;
+
+function markSelection() {
+  document.body.classList.toggle('selecting', S.sel.on);
+  const shown = new Set($$('#view .card').map((c) => c.dataset.id));
+  for (const id of [...S.sel.ids]) if (!shown.has(id)) S.sel.ids.delete(id);
+  $$('#view .card').forEach((c) => c.classList.toggle('picked', S.sel.ids.has(c.dataset.id)));
+  drawSelBar();
+}
+
+function drawSelBar() {
+  let bar = $('#sel-bar');
+  if (!S.sel.on) { bar?.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'sel-bar';
+    bar.addEventListener('click', selBarClick);
+    document.body.append(bar);
+  }
+  const n = S.sel.ids.size;
+  const watchedPage = route().name === 'watched';
+  setHTML(bar, `<b>${n ? `${n} selected` : 'Click posters to pick them'}</b>
+    <button class="btn btn-ghost btn-sm" data-sel="all">Select all</button>
+    ${n ? `<button class="btn btn-ghost btn-sm" data-sel="none">Clear</button>
+    <span class="sel-sep"></span>
+    <button class="btn btn-grey btn-sm" data-sel="watched">${watchedPage ? '↩ Back to my list' : `${ICON.check} Mark watched`}</button>
+    <button class="btn btn-grey btn-sm" data-sel="folder">${ICON.folder} Move to folder ▾</button>
+    <button class="btn btn-grey btn-sm" data-sel="col">+ Collection ▾</button>
+    <button class="btn btn-red btn-sm" data-sel="remove">${ICON.trash} Remove</button>` : ''}
+    <span class="spacer"></span><button class="btn btn-white btn-sm" data-sel="done">Done</button>`);
+}
+
+async function selBarClick(e) {
+  const b = e.target.closest('[data-sel]');
+  if (!b) return;
+  const a = b.dataset.sel;
+  const ids = [...S.sel.ids];
+  const items = ids.map(findItem).filter(Boolean);
+  if (a === 'done') { S.sel.on = false; S.sel.ids.clear(); render(); return; }
+  if (a === 'all') { $$('#view .card').forEach((c) => S.sel.ids.add(c.dataset.id)); markSelection(); return; }
+  if (a === 'none') { S.sel.ids.clear(); markSelection(); return; }
+  if (a === 'folder' || a === 'col') {
+    e.stopPropagation();
+    closeMenu();
+    const types = [...new Set(items.map((i) => i.type))];
+    const menu = document.createElement('div');
+    menu.className = 'menu ctx';
+    if (a === 'folder') {
+      const folders = types.length === 1 ? sectionFolders(types[0]) : [];
+      menu.innerHTML = types.length > 1 ? '<div class="menu-label">Folders are per section - pick titles of one kind</div>'
+        : `<div class="menu-label">Move ${items.length} to a folder (${esc(TYPE_PLURAL[types[0]])})</div>
+          ${folders.map((f) => `<button data-to="${esc(f.id)}"><span class="check"></span>${esc(f.name)}</button>`).join('')}
+          <button data-to=""><span class="check"></span>Not in a folder</button>
+          <button data-to="__new"><span class="check">+</span>New folder…</button>`;
+    } else {
+      menu.innerHTML = `<div class="menu-label">Add ${items.length} to a collection</div>
+        ${globalCollections().map((c) => `<button data-to="${esc(c.id)}"><span class="check"></span>${esc(c.name)}</button>`).join('')}
+        <button data-to="__new"><span class="check">+</span>New collection…</button>`;
+    }
+    menu.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const to = ev.target.closest('[data-to]');
+      if (!to) return;
+      closeMenu();
+      try {
+        let id = to.dataset.to;
+        if (id === '__new') {
+          const made = await newCollection(a === 'folder' ? types[0] : null);
+          if (!made) return;
+          id = made.id;
+        }
+        await Promise.all(items.map(async (it) => {
+          if (a === 'folder') upsert(await api('PUT', `/api/items/${it.id}/folder`, { folder: id }));
+          else if (!it.collections.includes(id)) upsert(await api('PUT', `/api/items/${it.id}/collections`, { collections: [...it.collections, id] }));
+        }));
+        const name = S.collections.find((c) => c.id === id)?.name;
+        toast(a === 'folder' ? (name ? `Moved ${items.length} to ${name}` : `Took ${items.length} out of their folders`) : `Added ${items.length} to ${name}`);
+        render();
+      } catch (err) { fail(err); }
+    });
+    placeMenu(menu, b);
+    return;
+  }
+  if (!items.length) return;
+  try {
+    if (a === 'watched') {
+      const back = route().name === 'watched';
+      await Promise.all(items.map(async (it) => upsert(await api('PUT', `/api/items/${it.id}`, { watched: !back }))));
+      toast(back ? `${items.length} back in your list` : `${items.length} moved to Watched`);
+    } else if (a === 'remove') {
+      const ok = await confirmModal(`Remove ${items.length} title${items.length === 1 ? '' : 's'}?`,
+        `${items.slice(0, 6).map((i) => i.title).join(', ')}${items.length > 6 ? '…' : ''} will be taken off your list. Files on your ${pcName()} are not touched.`, 'Remove');
+      if (!ok) return;
+      await Promise.all(items.map((it) => api('DELETE', `/api/items/${it.id}`)));
+      S.items = S.items.filter((i) => !S.sel.ids.has(i.id));
+      toast(`Removed ${items.length} title${items.length === 1 ? '' : 's'}`);
+    }
+    S.sel.ids.clear();
+    render(); refreshOpenTitle();
+  } catch (err) { fail(err); await reload(); }
+}
+
 // One delegated handler for every card, tile and button in the main view.
 $('#view').addEventListener('click', (e) => {
+  if (S.sel.on) {
+    const picked = e.target.closest('.card');
+    if (picked && !e.target.closest('[data-do], [data-add]')) {
+      e.preventDefault();
+      const id = picked.dataset.id;
+      if (S.sel.ids.has(id)) S.sel.ids.delete(id); else S.sel.ids.add(id);
+      sfx('select');
+      markSelection();
+      return;
+    }
+  }
   const sortBtn = e.target.closest('[data-sortnow]');
   if (sortBtn) { sortNow(sortBtn.dataset.sortnow === 'ai'); return; }
   const add = e.target.closest('[data-add]');
@@ -622,6 +774,7 @@ async function moveToFolder(itemId, folderId) {
 }
 
 function viewAction(name, data) {
+  if (name === 'select') { S.sel.on = !S.sel.on; S.sel.ids.clear(); render(); return; }
   if (name === 'settings') openSettings();
   else if (name === 'watch') { const it = findItem(data.id); if (it) openWatch(it); }
   else if (name === 'info') openTitle(data.id);
@@ -802,7 +955,8 @@ function renderWatched(view) {
   const groups = TYPES.map((t) => [t, all.filter((i) => i.type === t)]).filter(([, list]) => list.length);
   view.innerHTML = `<div class="page">
     <div class="page-head"><h1>Watched</h1>
-      <span class="count">${all.length} title${all.length === 1 ? '' : 's'} · ${sortLabel()}</span>${filterNote()}</div>
+      <span class="count">${all.length} title${all.length === 1 ? '' : 's'} · ${sortLabel()}</span>${filterNote()}
+      <span class="spacer"></span>${all.length ? selectButton() : ''}</div>
     <p class="hint">Everything you've watched, kept as your collection. Mark any title as watched from its ⋯ menu;
       the same menu moves it back to your list.</p>
     ${groups.length ? groups.map(([t, list]) => `<h2 class="watched-head">${TYPE_PLURAL[t]} <span class="muted small">${list.length}</span></h2>
@@ -843,6 +997,7 @@ function renderCategory(view, type) {
     <div class="page-head"><h1>${TYPE_PLURAL[type]}</h1>
       <span class="count">${all.length} title${all.length === 1 ? '' : 's'} · ${what}</span>${filterNote()}
       <span class="spacer"></span>
+      ${selectButton()}
       <button class="btn btn-ghost btn-sm" data-do="new-folder" data-type="${type}">${ICON.folder} New folder</button>
       <button class="btn btn-red btn-sm" data-add="${type}" ${current ? `data-col="${esc(current.id)}"` : ''}>+ Add ${TYPE_ONE[type]}</button></div>
     <div class="folder-bar">
@@ -889,6 +1044,7 @@ function renderCollection(view, id) {
   view.innerHTML = `<div class="page">
     <div class="page-head"><h1>${esc(col.name)}</h1><span class="count">${items.length} title${items.length === 1 ? '' : 's'}</span>${filterNote()}
       <span class="spacer"></span>
+      ${items.length ? selectButton() : ''}
       <button class="btn btn-ghost btn-sm" data-do="share-collection" data-id="${esc(id)}">${ICON.people} Share</button>
       <button class="btn btn-ghost btn-sm" data-do="rename-collection" data-id="${esc(id)}">Rename</button>
       <button class="btn btn-ghost btn-sm" data-do="delete-collection" data-id="${esc(id)}">Delete</button></div>
@@ -1156,6 +1312,7 @@ function openModal(html, cls = '') {
 function closeModal(wrap) {
   if (!wrap || !wrap.isConnected) return;
   wrap.remove();
+  sfx('close');
   if (wrap.onClose) wrap.onClose();
   if (!$('#modal-root').children.length) document.body.classList.remove('noscroll');
 }
@@ -2496,6 +2653,7 @@ function openTitle(id) {
   drawTitle(wrap);
   loadLocal(wrap);
   loadRelated(wrap);
+  loadSimilar(wrap);
   // Remembered for "Recently opened" (quietly: the page isn't redrawn for it).
   api('PUT', `/api/items/${id}`, { opened: true }).then((updated) => {
     upsert(updated);
@@ -2570,6 +2728,8 @@ function drawTitle(wrap) {
         <h1>${esc(item.title)}</h1>
         <div class="btns">
           <button class="btn btn-white" data-t="watch">${ICON.play} ${esc(watchLabel(item))}</button>
+          <label class="play-with" title="How Watch now plays this title - remembered, even after the app is closed">
+            <span>Play this with</span><select class="select" data-play-with>${playWithOptions(item)}</select></label>
           ${hasFiles(item) ? '<button class="btn btn-grey desktop-only" data-t="vlc" title="Play the file in VLC instead of the built-in player">Play in VLC</button>' : ''}
           <button class="btn btn-grey ${hasFiles(item) ? '' : 'hidden'}" data-t="party" title="Watch in sync with someone else, each on your own computer">${ICON.people} Watch together</button>
           <button class="btn btn-grey" data-t="trailer">${ICON.play} ${item.trailer ? 'Trailer' : 'Find trailer'}</button>
@@ -2603,17 +2763,41 @@ function drawTitle(wrap) {
     <section class="tm-section" id="torrent-section"><h3>Stream from a torrent<span class="spacer"></span>
       <button class="btn btn-ghost btn-sm" data-t="torrents-window">${ICON.download || '⇩'} Torrents window</button></h3>
       <div id="torrent-box"><div class="muted small">…</div></div></section>
-    <section class="tm-section hidden" id="extras-section"><h3>Extras <span class="muted small" id="extras-count"></span></h3>
-      <div class="extras" id="extras"></div></section>
-    <section class="tm-section hidden" id="family-section"><h3>From the same folder <span class="muted small">films, OVAs, specials and extras next to this title's files</span></h3>
-      <div id="family"></div></section>
+    <section class="tm-section hidden" id="extra-section"><details class="extra-stuff" id="extra-stuff" ${wrap.st.extraOpen ? 'open' : ''}>
+      <summary><h3>Extra stuff <span class="muted small" id="extra-count"></span><span class="spacer"></span><span class="extra-caret">▾</span></h3></summary>
+      <div id="extra-body"></div></details></section>
     ${series ? '<section class="tm-section"><h3>Episodes<span class="spacer"></span><span id="ep-picker"></span></h3><div id="ep-summary"></div><div class="episodes" id="ep-list"></div></section>' : ''}
     </div><aside class="tm-related" id="related"></aside></div>`;
 
   drawFolderLine(wrap);
   drawRelated(wrap);
+  drawExtras(wrap);
   if (series) drawEpisodes(wrap);
   modal.onclick = (e) => titleClick(wrap, e);
+  modal.onchange = (e) => {
+    if (e.target.matches('[data-play-with]')) setPlayWith(findItem(item.id), e.target.value);
+  };
+}
+
+/* ---- "Play this with": how Watch now plays a title, remembered for it */
+
+const PLAY_WITH = [['', 'Use anything (automatic)'], ['file', 'The file on my computer'], ['torrent', 'The torrent'],
+  ['scraped', 'My video sites'], ['online', 'Watch online (my services)']];
+const videoSites = (item) => (S.status.video_sites || {})[item.type] || [];
+const hasServices = (item) => (S.status.services || []).some((x) => x.on && x.types.includes(item.type));
+
+function playWithOptions(item) {
+  return PLAY_WITH.map(([v, l]) => `<option value="${v}" ${(item.play_with || '') === v ? 'selected' : ''}>${esc(v === 'file' ? `The file on my ${pcName()}` : l)}</option>`).join('');
+}
+
+async function setPlayWith(item, value) {
+  try {
+    upsert(await api('PUT', `/api/items/${item.id}`, { play_with: value }));
+    const label = PLAY_WITH.find(([v]) => v === value)?.[1] || '';
+    toast(value ? `Watch now plays ${item.title} with: ${label.replace(/ \(.*\)$/, '')}` : `Watch now picks the best way for ${item.title}`);
+    if (value === 'scraped' && !videoSites(item).length) toast('Add your own video site in Settings → Your video sites first', 'error');
+    if (value === 'online' && !hasServices(item)) toast('Add a streaming service or site in Settings → Watching online first', 'error');
+  } catch (e) { fail(e); }
 }
 
 /* "See how the episodes are connected": every episode, the file or torrent it
@@ -2933,18 +3117,11 @@ function drawGuide(m, wrap) {
     ${data.at ? `<p class="muted small">Looked ${esc(ago(data.at))}.</p>` : ''}`;
 }
 
-const KIND_GROUPS = [['tv', 'TV seasons & series'], ['movie', 'Films'], ['ova', 'OVAs & ONAs'],
-  ['special', 'Specials & extras'], ['other', 'Other']];
 
-function connectedKind(x) {
-  const k = (x.media_kind || x.media_type || '').toLowerCase().replace(/ /g, '_');
-  if (k === 'movie' || x.type === 'movie') return 'movie';
-  if (k === 'ova' || k === 'ona') return 'ova';
-  if (['special', 'tv_special', 'music', 'pv', 'cm'].includes(k)) return 'special';
-  if (k === 'tv' || x.type === 'tv' || x.format === 'series' || !k) return 'tv';
-  return 'other';
-}
-
+// Beside a title's page: the "Find everything connected" button (it finds, through
+// MyAnimeList / TMDB and your AI helper, every title of the franchise even with
+// another name, and opens the story guide), then related entries: the title's
+// name searched on MyAnimeList (anime) or TMDB, up to 5 with a similar name.
 function drawRelated(wrap) {
   const box = $('#related', wrap);
   if (!box) return;
@@ -2952,52 +3129,36 @@ function drawRelated(wrap) {
   const data = wrap.st.related || {};
   const job = data.job?.running ? data.job : null;
   data.running = !!job;
-  const aiNames = data.ai || S.status.ai || [];
-  const bar = job ? `<div class="rel-progress"><div class="pd-bar big"><i style="width:${Math.round((job.progress || 0) * 100)}%"></i></div>
-      <div class="rel-line"><span class="small muted"><span class="spin-dot"></span> ${esc(job.stage)}${job.found ? ` · ${job.found} found` : ''}</span>
-      ${job.cancel ? '' : '<button class="btn btn-ghost btn-sm" data-r="cancel">Cancel</button>'}</div></div>` : '';
-  const button = (label) => `<button class="btn btn-white rel-find" data-r="find" ${data.running ? 'disabled' : ''}>
-    ${data.running ? '<span class="spin-dot"></span> Looking…' : label}</button>`;
-  const head = `<div class="rel-head"><h3>Everything connected</h3>
-    ${data.entries ? '<button class="rel-refresh" data-r="find" title="Look again">↻</button>' : ''}</div>`;
-  if (!data.entries) {
-    setHTML(box, head + `<p class="muted small">Every season, film, OVA, ONA, special, sequel, prequel and spin-off of ${esc(item.title)}${aiNames.length ? `, found through ${item.type === 'anime' ? 'MyAnimeList and ' : ''}${esc(aiNames[0])}` : item.type === 'anime' ? ', found through MyAnimeList' : ''}, with what's on your ${pcName()} and what isn't.</p>
-      ${button(`✨ Find everything connected`)}
-      ${data.running ? `${bar}${'<div class="rel-row skeleton"><div class="sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(3)}` : ''}
-      ${data.note ? `<p class="bad small">${esc(data.note)}</p>` : ''}`);
-    return;
-  }
-  const entries = data.entries;
-  const here = entries.filter((x) => x.in_list && x.files);
-  const listed = entries.filter((x) => x.in_list && !x.files);
-  const missing = entries.filter((x) => !x.in_list);
-  const row = (x) => {
-    const i = entries.indexOf(x);
-    const eps = x.in_list && x.episodes_total > 1 ? ` · ${x.episodes_here} of ${x.episodes_total} episodes` : '';
-    const status = x.in_list
-      ? (x.files ? `<span class="rel-pill in">${ICON.check} On your ${pcName()}${eps}</span>` : '<span class="rel-pill">In your list · not downloaded</span>')
-      : x.waiting ? `<span class="rel-pill dl">In your downloads · ${x.waiting} file${x.waiting === 1 ? '' : 's'} not sorted</span>`
-        : '<span class="rel-pill miss">Not on your PC</span>';
-    return `<div class="rel-row${x.in_list ? ' is-in' : ''}" ${x.in_list ? `data-open="${esc(x.in_list)}"` : ''} style="--i:${Math.min(i, 14)}">
-      ${x.poster ? `<img src="${esc(x.poster)}" alt="" loading="lazy">` : '<span class="rel-ph"></span>'}
-      <div class="rel-text"><b>${esc(x.title)}</b><small>${[kindName(x), x.year, x.relation].filter(Boolean).map(esc).join(' · ')}${x.via ? ` (of ${esc(x.via)})` : ''}</small>${status}</div>
-      ${x.in_list ? '' : `<button class="rel-add" data-r="add" data-i="${i}" title="Add to your list">+</button>`}</div>`;
-  };
-  // The same story first (by kind), then other versions and series of the franchise.
-  const main = entries.filter((x) => x.group !== 'other');
-  const other = entries.filter((x) => x.group === 'other');
-  const groups = KIND_GROUPS.map(([k, label]) => [label, main.filter((x) => connectedKind(x) === k)])
-    .filter(([, list]) => list.length);
-  if (other.length) groups.push(['Other versions & related series', other]);
-  setHTML(box, head + bar
-    + `<button class="btn btn-red rel-guide" data-r="guide" ${job && !data.guide ? 'disabled' : ''}>📖 ${job && !data.guide ? 'The story guide is being written…' : 'Open the story guide'}</button>`
-    + `<div class="rel-summary"><b>${entries.length}</b> connected · <span class="ok">${here.length} on your ${pcName()}</span>
-        ${listed.length ? ` · ${listed.length} in your list, not downloaded` : ''} · <span class="${missing.length ? 'bad' : ''}">${missing.length} not in your list</span></div>`
-    + (missing.length > 1 ? `<button class="btn btn-sm btn-white rel-all" data-r="all">+ Add all ${missing.length} missing</button>` : '')
-    + (entries.length ? groups.map(([g, list]) => `<div class="rel-group"><h5>${esc(g)} <span>${list.length}</span></h5>${list.map(row).join('')}</div>`).join('')
-      : '<p class="muted small">Nothing connected was found.</p>')
-    + (data.note ? `<p class="muted small">${esc(data.note)}</p>` : '')
-    + (data.at ? `<p class="muted small">Looked ${esc(ago(data.at))}.</p>` : ''));
+  const n = (data.entries || []).length;
+  const finder = job
+    ? `<button class="btn btn-white rel-find" disabled><span class="spin-dot"></span> Looking…</button>
+      <div class="rel-progress"><div class="pd-bar big"><i style="width:${Math.round((job.progress || 0) * 100)}%"></i></div>
+      <div class="rel-line"><span class="small muted">${esc(job.stage)}${job.found ? ` · ${job.found} found` : ''}</span>
+      ${job.cancel ? '' : '<button class="btn btn-ghost btn-sm" data-r="cancel">Cancel</button>'}</div></div>`
+    : data.entries
+      ? `<div class="rel-buttons"><button class="btn btn-white rel-find" data-r="guide">✨ Everything connected (${n})</button>
+        <button class="rel-refresh" data-r="find" title="Look again">↻</button></div>`
+      : '<button class="btn btn-white rel-find" data-r="find">✨ Find everything connected</button>';
+  const sim = wrap.st.similar;
+  const simRows = !sim ? '<div class="rel-row skeleton"><div class="sk-poster"></div><div class="sk-lines"><i></i><i></i></div></div>'.repeat(3)
+    : sim.length ? sim.map((x, i) => `<div class="rel-row${x.in_list ? ' is-in' : ''}" ${x.in_list ? `data-open="${esc(x.in_list)}"` : ''} style="--i:${i}">
+        ${x.poster ? `<img src="${esc(x.poster)}" alt="" loading="lazy">` : '<span class="rel-ph"></span>'}
+        <div class="rel-text"><b>${esc(x.title)}</b><small>${[kindName(x), x.year].filter(Boolean).map(esc).join(' · ')}</small>
+          ${x.in_list ? `<span class="rel-pill in">${ICON.check} In your list</span>` : ''}</div>
+        ${x.in_list ? '' : `<button class="rel-add" data-r="sim-add" data-i="${i}" title="Add to your list">+</button>`}</div>`).join('')
+      : `<p class="muted small">${esc(wrap.st.similarNote || `Nothing else with a name like ${item.title} on ${item.type === 'anime' ? 'MyAnimeList' : 'TMDB'}.`)}</p>`;
+  setHTML(box, `${finder}${data.note ? `<p class="bad small">${esc(data.note)}</p>` : ''}
+    <div class="rel-head"><h3>Related</h3></div>${simRows}`);
+}
+
+async function loadSimilar(wrap) {
+  const item = findItem(wrap.dataset.itemId);
+  try {
+    const { entries, note } = await api('GET', `/api/items/${item.id}/similar`);
+    wrap.st.similar = entries;
+    wrap.st.similarNote = note || '';
+  } catch { wrap.st.similar = []; }
+  if (wrap.isConnected) drawRelated(wrap);
 }
 
 async function addRelated(wrap, x, quiet) {
@@ -3010,7 +3171,6 @@ async function addRelated(wrap, x, quiet) {
 async function relatedClick(wrap, e) {
   const r = e.target.closest('[data-r]');
   if (r) {
-    const entries = wrap.st.related?.entries || [];
     if (r.dataset.r === 'find') { loadRelated(wrap, true); return true; }
     if (r.dataset.r === 'cancel') {
       const item = findItem(wrap.dataset.itemId);
@@ -3020,24 +3180,22 @@ async function relatedClick(wrap, e) {
       return true;
     }
     if (r.dataset.r === 'guide') { openGuide(wrap); return true; }
-    try {
-      if (r.dataset.r === 'add') {
-        r.disabled = true;
-        r.classList.add('spin');
-        await addRelated(wrap, entries[Number(r.dataset.i)]);
-      } else if (r.dataset.r === 'all') {
-        const missing = entries.filter((x) => !x.in_list);
-        r.disabled = true;
-        for (const [n, x] of missing.entries()) {
-          r.textContent = `Adding ${n + 1} of ${missing.length}…`;
-          await addRelated(wrap, x, true);
-        }
-        toast(`Added ${missing.length} titles`);
-      }
-    } catch (err) { fail(err); }
-    await reload();
-    loadRelated(wrap);
-    return true;
+    if (r.dataset.r === 'sim-add') {
+      const x = wrap.st.similar?.[Number(r.dataset.i)];
+      if (!x) return true;
+      r.disabled = true;
+      r.classList.add('spin');
+      try {
+        const added = await api('POST', '/api/items', { type: x.type, source: x.source, source_id: x.source_id, hint: x });
+        upsert(added);
+        x.in_list = added.id;
+        toast(`Added ${added.title}`);
+        render();
+      } catch (err) { fail(err); }
+      drawRelated(wrap);
+      return true;
+    }
+    return false;
   }
   const open = e.target.closest('[data-open]');
   if (open) { openTitle(open.dataset.open); return true; }
@@ -3071,6 +3229,21 @@ async function titleClick(wrap, e) {
     openMoveFile(item, v);
     return;
   }
+  const txPlay = e.target.closest('[data-tx-play]');
+  if (txPlay) {
+    const [h, index] = txPlay.dataset.txPlay.split(':');
+    const t = (wrap.st.torrents?.torrents || []).find((x) => x.hash === h);
+    const f = t?.files.find((x) => String(x.index) === index);
+    if (f) {
+      const path = `${t.save_path.replace(/[\\/]+$/, '')}/${f.path}`;
+      api('POST', `/api/items/${item.id}/play`, { path, extra: true })
+        .then((res) => toast(`Playing ${f.path.split(/[\\/]/).pop()}${res.player === 'vlc' ? ' in VLC' : ''}`)).catch(fail);
+    }
+    return;
+  }
+  const txFolder = e.target.closest('[data-tx-folder]');
+  if (txFolder) { api('POST', `/api/torrents/${txFolder.dataset.txFolder}/folder`).catch(fail); return; }
+  if (e.target.closest('.extra-stuff summary')) return;
   const famTitle = e.target.closest('[data-open-title]');
   if (famTitle) { openTitle(famTitle.dataset.openTitle); return; }
   const famPlay = e.target.closest('[data-family-play]');
@@ -3238,13 +3411,12 @@ async function loadLocal(wrap) {
   wrap.st.local = local;
   wrap.st.torrents = tor;
   drawTorrentBox(wrap);
+  drawExtras(wrap);
   // A show you only stream from a torrent can be watched together too.
   $('[data-t="party"]', wrap)?.classList.toggle('hidden', !hasFiles(item) && !Object.keys(local?.by_episode || {}).length && !local?.target);
   if (changed || !wrap.st.drawnOnce) {
     wrap.st.drawnOnce = true;
     drawFolderLine(wrap);
-    drawExtras(wrap);
-    drawFamily(wrap);
     if (isSeries(item)) drawEpisodes(wrap);
   }
   // While a torrent is busy, keep its progress (and the episode list) current.
@@ -3766,15 +3938,9 @@ function drawEpisodeSummary(wrap, item, available, streamable = new Set()) {
     <span class="muted">· missing ${esc(missing.slice(0, 12).join(', '))}${missing.length > 12 ? '…' : ''}</span>${streamNote}</div>`;
 }
 
-// Films, OVAs, specials and extras in the same folder as this title's files.
-function drawFamily(wrap) {
-  const box = $('#family', wrap);
-  const fam = wrap.st.local?.family;
-  if (!box) return;
-  const has = fam && (fam.titles.length || fam.files.length);
-  $('#family-section', wrap).classList.toggle('hidden', !has);
-  if (!has) return;
-  box.innerHTML = (fam.titles.length ? `<div class="family-titles">${fam.titles.map((t) => `<button class="family-title" data-open-title="${esc(t.id)}">
+// "From the same folder": films, OVAs, specials and extras next to this title's files (in Extra stuff).
+function familyHTML(fam) {
+  return (fam.titles.length ? `<div class="family-titles">${fam.titles.map((t) => `<button class="family-title" data-open-title="${esc(t.id)}">
       ${t.poster ? `<img src="${esc(t.poster)}" alt="" loading="lazy">` : '<span class="rel-ph"></span>'}
       <span><b>${esc(t.title)}</b><small>${esc(kindName(t) || t.kind)} · ${t.files} file${t.files === 1 ? '' : 's'}</small></span></button>`).join('')}</div>` : '')
     + (fam.files.length ? `<div class="extras">${fam.files.map((v, i) => `<div class="extra-tile family-file">
@@ -3837,17 +4003,67 @@ function openMoveFile(item, file, done) {
   });
 }
 
-// Openings, endings, trailers... found with the show's files: ready to play, kept apart from episodes.
+// Extra stuff, folded away: what the title's torrents downloaded that isn't one of
+// its episodes (every folder can be opened), and for your own downloads the
+// openings, endings, films, OVAs and other files in the same folder as its files.
+function torrentExtras(wrap, item) {
+  const out = [];
+  for (const t of wrap.st.torrents?.torrents || []) {
+    const files = t.files.filter((f) => !f.episode && (f.complete || f.done > 0)
+      && (f.item_id === item.id || (!f.item_id && t.item_id === item.id)));
+    if (files.length) out.push({ t, files });
+  }
+  return out;
+}
+
+function fileTreeHTML(t, files) {
+  const root = { dirs: {}, files: [] };
+  for (const f of files) {
+    const parts = f.path.split(/[\\/]/);
+    let node = root;
+    for (const d of parts.slice(0, -1)) node = node.dirs[d] = node.dirs[d] || { dirs: {}, files: [] };
+    node.files.push(f);
+  }
+  const fileRow = (f) => `<div class="xs-file"><span class="xs-kind">${f.kind === 'video' ? (f.complete ? ICON.play : ICON.download) : ICON.file}</span>
+      <span class="xs-name" title="${esc(f.path)}">${esc(f.path.split(/[\\/]/).pop())}</span><small class="muted">${fmtBytes(f.size)}${f.complete ? '' : ` · ${Math.floor((f.done / (f.size || 1)) * 100)}%`}</small>
+      ${f.kind === 'video' && f.complete ? `<button class="btn btn-ghost btn-sm" data-tx-play="${esc(t.hash)}:${f.index}">Play</button>` : ''}</div>`;
+  const node = (n, depth) => Object.entries(n.dirs).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true })).map(([name, d]) => {
+    const count = (function c(x) { return x.files.length + Object.values(x.dirs).reduce((k, y) => k + c(y), 0); })(d);
+    return `<details class="xs-dir" ${depth < 1 ? 'open' : ''}><summary>${ICON.folder}<span>${esc(name)}</span><small class="muted">${count}</small></summary>
+      <div class="xs-in">${node(d, depth + 1)}</div></details>`;
+  }).join('') + n.files.map(fileRow).join('');
+  return node(root, 0);
+}
+
 function drawExtras(wrap) {
-  const box = $('#extras', wrap);
-  const extras = wrap.st.local?.extras || [];
-  if (!box) return;
-  $('#extras-section', wrap).classList.toggle('hidden', !extras.length);
-  if (!extras.length) return;
-  $('#extras-count', wrap).textContent = `${extras.length} file${extras.length === 1 ? '' : 's'}`;
-  box.innerHTML = extras.map((v, i) => `<button class="extra-tile" data-extra="${i}" style="--i:${i}">
+  const body = $('#extra-body', wrap);
+  if (!body) return;
+  const item = findItem(wrap.dataset.itemId);
+  const local = wrap.st.local || {};
+  const extras = local.extras || [];
+  const fam = local.family || { titles: [], files: [] };
+  const tor = torrentExtras(wrap, item);
+  const torCount = tor.reduce((n, x) => n + x.files.length, 0);
+  const total = extras.length + fam.titles.length + fam.files.length + torCount;
+  $('#extra-section', wrap)?.classList.toggle('hidden', !total);
+  if (!total) return;
+  $('#extra-count', wrap).textContent = `${total} thing${total === 1 ? '' : 's'}`;
+  const parts = [];
+  if (tor.length) {
+    parts.push(`<div class="xs-group"><h5>From the torrent <span class="muted small">downloaded, not one of the episodes</span></h5>
+      ${tor.map(({ t, files }) => `<div class="xs-torrent"><div class="xs-tname">${ICON.download}<b title="${esc(t.name)}">${esc(t.name || 'Torrent')}</b>
+        <button class="btn btn-ghost btn-sm" data-tx-folder="${esc(t.hash)}">Open folder</button></div>${fileTreeHTML(t, files)}</div>`).join('')}</div>`);
+  }
+  if (extras.length) {
+    parts.push(`<div class="xs-group"><h5>Openings, endings & trailers</h5><div class="extras">${extras.map((v, i) => `<button class="extra-tile" data-extra="${i}" style="--i:${i}">
       <span class="extra-play">${ICON.play}</span><span class="extra-name">${esc(extraLabel(v))}</span>
-      <small>${esc(v.rel)}</small></button>`).join('');
+      <small>${esc(v.rel)}</small></button>`).join('')}</div></div>`);
+  }
+  if (fam.titles.length || fam.files.length) {
+    parts.push(`<div class="xs-group"><h5>In the same folder <span class="muted small">films, OVAs, specials and other files next to this title's files</span></h5>${familyHTML(fam)}</div>`);
+  }
+  setHTML(body, parts.join(''));
+  $('#extra-stuff', wrap).ontoggle = (e) => { wrap.st.extraOpen = e.target.open; };
 }
 
 function extraLabel(v) {
@@ -3964,10 +4180,10 @@ async function chooseFolder(item) {
   } catch (e) { fail(e); return null; }
 }
 
-// Watch now: a title with a working folder plays straight away; one marked
-// "not working" goes online; anything else asks On my PC / Online.
-// Watch now: a file on your computer plays straight away; otherwise you choose
-// between the torrent, online, or finding the file.
+// Watch now, as "Play this with" says on the title's page. "Use anything": the
+// file on your computer plays straight away; else the torrent's episode streams
+// straight away; else, with both your video sites and streaming services, you
+// choose (with only one of them, that one is used). Nothing set up: you choose.
 function openWatch(item, ep, { player = '' } = {}) {
   const wrap = openModal('', 'watch-modal');
   wrap.st = { id: item.id, ep: ep ? { ...ep } : { ...item.progress }, player };
@@ -3977,20 +4193,41 @@ function openWatch(item, ep, { player = '' } = {}) {
 async function decideWatch(wrap) {
   const item = findItem(wrap.st.id);
   const what = whatLabel(wrap);
+  // Only the first time: going Back (or picking another episode) in the window offers everything.
+  const first = !wrap.st.decided;
+  wrap.st.decided = true;
+  const how = wrap.st.player === 'vlc' ? 'file' : first ? (item.play_with || '') : '';
+  if (how === 'scraped' && videoSites(item).length) { playScraped(wrap); return; }
+  if (how === 'online') { watchOnline(wrap); return; }
   watchBody(wrap, `<div class="center"><div class="spinner"></div><p class="muted">Getting ${esc(what)} ready…</p></div>`);
   let info = null;
   try { info = await fetchLocal(wrap); } catch { /* choose below */ }
   if (!wrap.isConnected) return;
   const t = info?.target;
+  const local = t && !t.stream ? t : null;
+  const stream = t && t.stream ? t : null;
   let reason = '';
-  if (t && !t.stream) {
+  if (local && how !== 'torrent') {
     if (!item.local_broken) {
-      try { await playFile(wrap, t, info.subtitles[0], wrap.st.player); return; } catch (e) {
+      try { await playFile(wrap, local, info.subtitles[0], wrap.st.player); return; } catch (e) {
         reason = `The file couldn't be played (${e.message}).`;
       }
     } else reason = 'Its file is marked as not working.';
-  } else reason = `${what} isn't on your ${pcName()}.`;
-  if (wrap.isConnected) watchChoice(wrap, { reason });
+  } else if (how === 'file') reason = `${what} isn't on your ${pcName()}.`;
+  if (stream && how !== 'file' && wrap.isConnected) {
+    try { await playFile(wrap, stream, null, wrap.st.player); return; } catch (e) {
+      reason = `The torrent's episode couldn't be played (${e.message}).`;
+    }
+  } else if (how === 'torrent') reason = `${what} isn't in this title's torrents.`;
+  if (!wrap.isConnected) return;
+  if (first && !reason && !local && !stream && !how) {
+    // Nothing on your computer or in a torrent: your video sites and services.
+    const mine = videoSites(item).length;
+    const services = hasServices(item);
+    if (mine && !services) { playScraped(wrap); return; }
+    if (services && !mine) { watchOnline(wrap); return; }
+  }
+  watchChoice(wrap, { reason: reason || `${what} isn't on your ${pcName()}.` });
 }
 
 // Pick a file by hand (from the title page or after a wrong episode).
@@ -4179,6 +4416,7 @@ function watchChoice(wrap, { reason = '' } = {}) {
         <span>${(wrap.st.torrentCount || 0) ? "This show's torrent doesn't have this episode. Add another magnet link:" : "Paste this show's magnet link - only the episode you play downloads:"}</span></div>
         <div class="magnet-row"><input class="input" id="w-magnet" placeholder="magnet:?xt=…" spellcheck="false"><button class="btn btn-white btn-sm" data-choice="add-magnet">Add & stream</button></div></div>` : ''}
       ${!stream && tor.available && hasTorrentSite(item) ? `<button class="choice" data-choice="get-magnet">${ICON.search}<b>Get magnet from my sites</b><span>Finds the best torrent of it on your sites and adds it</span></button>` : ''}
+      ${videoSites(item).length ? `<button class="choice ${local || stream ? '' : 'primary'}" data-choice="scraped">${ICON.play}<b>Play online (my sites)</b><span>${esc(videoSites(item).map((x) => x.name).join(', '))} - found on your site and played here straight away, nothing downloaded first</span></button>` : ''}
       <button class="choice" data-choice="online">${ICON.globe}<b>Watch online</b><span>${esc(servicesLine(item))}</span></button>
       <button class="choice" data-choice="find">${ICON.pc}<b>Find the file on my ${pcName()}</b><span>Pick the file (or a folder for this title)</span></button>
     </div>`);
@@ -4205,6 +4443,7 @@ function watchChoice(wrap, { reason = '' } = {}) {
         upsert(await api('PUT', `/api/items/${item.id}`, { local_broken: false }));
         await playFile(wrap, local, info.subtitles?.[0], wrap.st.player);
       } else if (c === 'online') drawOnline(wrap);
+      else if (c === 'scraped') playScraped(wrap);
       else if (c === 'find') watchLocal(wrap, { choose: true });
       else if (c === 'add-magnet') await addMagnetAndStream(wrap);
       else if (c === 'get-magnet') {
@@ -4271,9 +4510,12 @@ async function drawOnline(wrap) {
   if (!wrap.isConnected) return;
   const region = regionName(data.region);
   const best = data.options.find((o) => o.kind === 'search' || o.has_it);
+  const mine = videoSites(item);
   const body = watchBody(wrap, `<h2>Watch ${esc(whatLabel(wrap))} online</h2>
     <p class="sub">Opens in ${browserName()}. ${data.streaming.length ? `In ${esc(region)} it streams on ${esc(data.streaming.join(', '))}.` : ''}</p>
     ${data.message ? `<p class="note">${esc(data.message)}</p>` : ''}
+    ${mine.length ? `<div class="choices">${mine.map((x) => `<button class="choice" data-scrape="${esc(x.id)}">${ICON.play}<b>${esc(x.name)}</b>
+      <span>Your video site - played here straight away</span></button>`).join('')}</div>` : ''}
     <div class="choices">${data.options.map((o) => `<button class="choice ${o === best ? 'primary' : ''}" data-svc="${esc(o.id)}">${ICON.globe}<b>${esc(o.name)}</b>
       <span>${onlineMark(o, region)}${o === best ? ' · best match' : ''}</span></button>`).join('')
     || `<p class="muted">No streaming services or sites for ${esc(TYPE_PLURAL[item.type].toLowerCase())} yet - add them in Settings.</p>`}</div>
@@ -4283,9 +4525,67 @@ async function drawOnline(wrap) {
   body.addEventListener('click', (e) => {
     if (e.target.closest('[data-w="back"]')) { decideWatch(wrap); return; }
     if (e.target.closest('[data-w="settings"]')) { closeModal(wrap); openSettings('svc'); return; }
+    const sc = e.target.closest('[data-scrape]');
+    if (sc) { playScraped(wrap, { site: sc.dataset.scrape }); return; }
     const b = e.target.closest('[data-svc]');
     if (b) watchOnline(wrap, { service: b.dataset.svc });
   });
+}
+
+/* ---- Play online (my sites): found on your own video site, played straight away */
+
+async function playScraped(wrap, opts = {}) {
+  const item = findItem(wrap.st.id);
+  const sites = videoSites(item);
+  const site = sites.find((x) => x.id === opts.site) || sites[0];
+  if (!site) { watchChoice(wrap, { reason: 'Add your own video site in Settings → Your video sites first.' }); return; }
+  const what = whatLabel(wrap);
+  watchBody(wrap, `<div class="center"><div class="spinner"></div><h2>Finding ${esc(what)} on ${esc(site.name)}…</h2>
+    <p class="muted small">It plays as soon as its video is found - nothing is downloaded first.</p></div>`);
+  let res;
+  try {
+    res = await api('POST', `/api/items/${item.id}/scraped`, {
+      site: site.id, season: wrap.st.ep.season, episode: wrap.st.ep.episode, entry: opts.entry || '',
+      open_page: !!opts.openPage, from_start: !!opts.fromStart });
+  } catch (e) { fail(e); if (wrap.isConnected) watchChoice(wrap); return; }
+  if (!wrap.isConnected) return;
+  const others = (res.others || []).filter((o) => o.url !== res.entry?.url);
+  const pickList = others.length ? `<details class="scrape-others" ${res.ok ? '' : 'open'}><summary>${res.ok ? 'Not the right title? Pick another' : 'Pick the right title'}</summary>
+    <div class="file-list">${others.map((o, i) => `<button data-pick="${i}"><span class="tag">${o.score}%</span><span class="fname">${esc(o.name)}</span></button>`).join('')}</div></details>` : '';
+  if (!res.ok) {
+    const body = watchBody(wrap, `<div class="center"><div class="result-icon">🔎</div><h2>Couldn't play it from ${esc(res.site)}</h2>
+      <p class="sub">${esc(res.error)}</p>
+      <div class="btns" style="justify-content:center;margin-top:12px">
+        ${res.page ? '<button class="btn btn-white" data-x="page">Open the page in the browser instead</button>' : ''}
+        <button class="btn btn-ghost" data-x="back">Back</button></div></div>${pickList}`);
+    body.addEventListener('click', (e) => {
+      const x = e.target.closest('[data-x]')?.dataset.x;
+      const pick = e.target.closest('[data-pick]');
+      if (x === 'page') playScraped(wrap, { ...opts, site: site.id, openPage: true });
+      else if (x === 'back') watchChoice(wrap);
+      else if (pick) playScraped(wrap, { site: site.id, entry: others[Number(pick.dataset.pick)].url });
+    });
+    return;
+  }
+  if (res.player === 'android') phone()?.play(JSON.stringify(res));
+  await reload();
+  if (!wrap.isConnected) return;
+  const inBrowser = res.player === 'browser';
+  const body = watchBody(wrap, `<div class="center"><div class="result-icon">${inBrowser ? '🌐' : '▶️'}</div>
+    <h2>${inBrowser ? `Opened ${esc(what)} in ${browserName()}` : `Playing ${esc(what)}`}</h2>
+    <p class="sub">From ${esc(res.site)}: <b>${esc(res.entry?.name || '')}</b>${res.resumed_at ? `<br><span class="small">Resumed at ${fmtTime(res.resumed_at)}</span>` : ''}
+      ${res.note ? `<br><span class="small muted">${esc(res.note)}</span>` : ''}</p>
+    ${res.player === 'mpv' ? '<div class="live muted small" id="live">Opening the player…</div>' : ''}
+    <div class="btns" style="justify-content:center"><button class="btn btn-white" data-x="done">Done</button>
+      ${inBrowser ? '' : '<button class="btn btn-ghost" data-x="page">Open the page in the browser instead</button>'}</div></div>${pickList}`);
+  body.addEventListener('click', (e) => {
+    const x = e.target.closest('[data-x]')?.dataset.x;
+    const pick = e.target.closest('[data-pick]');
+    if (x === 'done') closeModal(wrap);
+    else if (x === 'page') { api('POST', '/api/player/stop').catch(() => {}); api('POST', '/api/open', { url: res.page }).catch(fail); }
+    else if (pick) playScraped(wrap, { site: site.id, entry: others[Number(pick.dataset.pick)].url });
+  });
+  if (res.player === 'mpv') followPlayer(wrap);
 }
 
 async function startLocal(wrap) {
@@ -4637,6 +4937,61 @@ async function siteAction(wrap, a, row) {
   }
 }
 
+// Your own video sites (Settings → Your video sites), for Play online (my sites).
+function drawVideoSites(wrap) {
+  const box = $('#vsite-list', wrap);
+  if (!box) return;
+  box.innerHTML = wrap.vsites.length ? wrap.vsites.map((x, i) => `<div class="site-row ${x.on ? '' : 'off'}" data-i="${i}">
+      <label class="svc-on" title="Use it"><input type="checkbox" class="vsite-on" ${x.on ? 'checked' : ''}></label>
+      <div class="svc-main">
+        <div class="svc-line"><input class="input vsite-name" value="${esc(x.name)}" placeholder="Name">
+          <input class="input vsite-url" value="${esc(x.url)}" placeholder="https://yoursite/search?q={title}" spellcheck="false"></div>
+        <div class="svc-line small">${[['anime', 'Anime'], ['tv', 'TV shows'], ['movie', 'Movies']].map(([k, l]) => `<label class="svc-chip"><input type="checkbox" class="vsite-type" value="${k}" ${(x.types || []).includes(k) ? 'checked' : ''}>${l}</label>`).join('')}
+          <label class="svc-chip check" title="Where it plays">Opens in
+            <select class="vsite-open">${[['player', 'the player'], ['browser', 'a browser window']].map(([v, l]) => `<option value="${v}" ${(x.open || 'player') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></div>
+        <div class="site-test-out small"></div></div>
+      <div class="svc-tools">
+        <button type="button" class="svc-btn" data-s="vsite-test" title="Search it and show what's read">Test</button>
+        <button type="button" class="svc-btn danger" data-s="vsite-del" title="Remove">✕</button></div></div>`).join('')
+    : '<p class="muted small">No video site yet.</p>';
+}
+
+function readVideoSites(wrap) {
+  $$('#vsite-list .site-row', wrap).forEach((row) => {
+    const x = wrap.vsites[Number(row.dataset.i)];
+    if (!x) return;
+    x.on = $('.vsite-on', row).checked;
+    x.name = $('.vsite-name', row).value.trim();
+    x.url = $('.vsite-url', row).value.trim();
+    x.types = $$('.vsite-type', row).filter((c) => c.checked).map((c) => c.value);
+    x.open = $('.vsite-open', row).value;
+  });
+  return wrap.vsites;
+}
+
+async function videoSiteAction(wrap, a, row) {
+  readVideoSites(wrap);
+  if (a === 'vsite-add') {
+    wrap.vsites.push({ id: '', name: '', url: '', on: true, types: ['anime', 'tv', 'movie'], open: 'player' });
+    drawVideoSites(wrap);
+    $$('#vsite-list .site-row', wrap).pop()?.querySelector('.vsite-name')?.focus();
+    return;
+  }
+  const i = Number(row?.dataset.i);
+  if (a === 'vsite-del') { wrap.vsites.splice(i, 1); drawVideoSites(wrap); return; }
+  if (a === 'vsite-test') {
+    const out = $('.site-test-out', row);
+    out.innerHTML = '<span class="spin-dot"></span> Searching it…';
+    try {
+      const r = await api('POST', '/api/video-sites/test', { site: wrap.vsites[i] });
+      out.innerHTML = r.count
+        ? `<span class="ok">✓ ${r.count} results read for "${esc(r.query)}"</span>, best match first:
+           <ul class="site-examples">${r.examples.map((x) => `<li>${esc(x.name)} · ${x.score}% match</li>`).join('')}</ul>`
+        : `<span class="bad">No results read for "${esc(r.query)}"</span> from ${esc(r.url)}. Check the link has {title} where the name goes.`;
+    } catch (err) { out.innerHTML = `<span class="bad">${esc(err.message)}</span>`; }
+  }
+}
+
 const COUNTRIES = 'PK IN AE SA QA KW OM BH BD LK NP AF IR TR EG MA US CA GB IE AU NZ DE FR IT ES NL BE SE NO DK FI PL PT CH AT CZ RO GR HU JP KR CN HK TW SG MY ID TH PH VN BR MX AR CL CO PE ZA NG KE'.split(' ');
 
 // The browser choice: built-in, recommended (auto), each browser found, yours, or Browse.
@@ -4661,25 +5016,79 @@ function playerOptions(s, data) {
   return opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
 }
 
-// A picture made small and square (a profile picture), as a JPEG data link.
-// (Read as a data link: the page's security rules don't allow blob: images.)
-function smallPicture(file, size) {
+// A profile picture: zoomed and moved inside the circle, then Save (made small, as a JPEG data link).
+function openCropper(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('unreadable'));
     reader.onload = () => {
       const img = new Image();
-      img.onload = () => {
-        const c = document.createElement('canvas');
-        c.width = c.height = size;
-        const side = Math.min(img.naturalWidth, img.naturalHeight);
-        c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
-        let q = 0.82;
-        let out = c.toDataURL('image/jpeg', q);
-        while (out.length > 11000 && q > 0.3) { q -= 0.12; out = c.toDataURL('image/jpeg', q); }
-        resolve(out);
-      };
       img.onerror = () => reject(new Error('unreadable'));
+      img.onload = () => {
+        const SIZE = 260;
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        const base = Math.max(SIZE / w, SIZE / h);
+        const st = { zoom: 1, x: 0, y: 0 };
+        const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad center">
+          <h2>Your picture</h2><p class="sub">Drag it to move it, and zoom, until it sits right in the circle.</p>
+          <div class="crop-stage" style="width:${SIZE}px;height:${SIZE}px"><img src="${reader.result}" alt="" draggable="false"><div class="crop-ring"></div></div>
+          <label class="crop-zoom"><span>−</span><input type="range" min="1" max="4" step="0.01" value="1"><span>+</span></label>
+          <div class="btns" style="justify-content:center"><button class="btn btn-red" data-c="save">Save</button>
+            <button class="btn btn-ghost" data-c="cancel">Cancel</button></div></div>`, 'crop-modal');
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        wrap.onClose = () => finish(null);
+        const stage = $('.crop-stage', wrap);
+        const pic = $('.crop-stage img', stage);
+        const range = $('.crop-zoom input', wrap);
+        const clamp = () => {
+          const scale = base * st.zoom;
+          const mx = Math.max(0, (w * scale - SIZE) / 2);
+          const my = Math.max(0, (h * scale - SIZE) / 2);
+          st.x = Math.min(mx, Math.max(-mx, st.x));
+          st.y = Math.min(my, Math.max(-my, st.y));
+        };
+        const draw = () => {
+          clamp();
+          pic.style.width = `${w * base * st.zoom}px`;
+          pic.style.height = `${h * base * st.zoom}px`;
+          pic.style.transform = `translate(calc(-50% + ${st.x}px), calc(-50% + ${st.y}px))`;
+        };
+        draw();
+        let drag = null;
+        stage.addEventListener('pointerdown', (e) => { drag = { x: e.clientX - st.x, y: e.clientY - st.y }; stage.setPointerCapture(e.pointerId); });
+        stage.addEventListener('pointermove', (e) => { if (drag) { st.x = e.clientX - drag.x; st.y = e.clientY - drag.y; draw(); } });
+        stage.addEventListener('pointerup', () => { drag = null; });
+        stage.addEventListener('wheel', (e) => {
+          e.preventDefault();
+          st.zoom = Math.min(4, Math.max(1, st.zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08)));
+          range.value = st.zoom;
+          draw();
+        }, { passive: false });
+        range.addEventListener('input', () => { st.zoom = Number(range.value); draw(); });
+        wrap.addEventListener('click', (e) => {
+          const c = e.target.closest('[data-c]')?.dataset.c;
+          if (c === 'cancel') closeModal(wrap);
+          if (c !== 'save') return;
+          const out = 128;
+          const scale = base * st.zoom;
+          const side = SIZE / scale;                       // the circle's size in the picture's own pixels
+          const cx = w / 2 - st.x / scale;
+          const cy = h / 2 - st.y / scale;
+          const canvas = document.createElement('canvas');
+          canvas.width = canvas.height = out;
+          const g = canvas.getContext('2d');
+          g.fillStyle = '#111';
+          g.fillRect(0, 0, out, out);
+          g.drawImage(img, cx - side / 2, cy - side / 2, side, side, 0, 0, out, out);
+          let q = 0.85;
+          let data = canvas.toDataURL('image/jpeg', q);
+          while (data.length > 11000 && q > 0.3) { q -= 0.1; data = canvas.toDataURL('image/jpeg', q); }
+          finish(data);
+          closeModal(wrap);
+        });
+      };
       img.src = reader.result;
     };
     reader.readAsDataURL(file);
@@ -4696,6 +5105,8 @@ async function openSettings(focus = '') {
     .map((c) => ({ c, name: regionName(c) })).sort((a, b) => a.name.localeCompare(b.name));
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><form class="modal-pad" autocomplete="off">
     <h2>Settings</h2><p class="sub">Saved only on this ${pcName()}. Keys and app locations are set separately on each computer.</p>
+    <div class="btns" style="margin:-6px 0 12px"><button class="btn btn-white btn-sm" type="button" data-s="guide">🧭 Setup guide</button>
+      <span class="muted small">Walks you through setting everything up, one step at a time.</span></div>
     <h4>Online info</h4>
     <label class="field"><span>TMDB token (movies & TV shows)</span>
       <input class="input" name="tmdb_api_key" type="password" value="${esc(s.tmdb_api_key)}" placeholder="Paste your API Read Access Token or API Key">
@@ -4741,6 +5152,16 @@ async function openSettings(focus = '') {
       <small><b>Get magnet</b> on a title's page searches the sites ticked for its kind (anime, TV shows, movies), picks the torrent that has every episode (for a TV show, of the season you're on; a pack with other seasons, films or OVAs is fine) or the film, in the best quality with the most seeders, and adds it.
         For the search link: search for any anime on your site, copy the address of the results page, and put <b>{title}</b> where the name was.
         <b>Test</b> shows what the app can read from it.</small></div>
+    <h4 id="set-video">Your video sites <span class="tag-optional">play online</span></h4>
+    <div class="field"><div id="vsite-list"></div>
+      <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="vsite-add">+ Add a site</button></div>
+      <small>Your own site where your videos are. Then Watch now (or <b>Play this with → My video sites</b> on a title) shows
+        <b>Play online (my sites)</b>: the app searches your site for the title, opens the right entry (going by its name and season,
+        so another season, a film or a special isn't picked; the closest one when nothing matches exactly), finds the episode and plays
+        its video straight away in the player - it streams, nothing is downloaded first. <b>Opens in</b>: the player, or a browser window
+        for a site whose videos only play in a browser.
+        For the search link: search for any title on your site, copy the address of the results page, and put <b>{title}</b> where the name was.
+        <b>Test</b> shows what the app can read.</small></div>
     <h4>Your downloads</h4>
     <label class="field"><span>Downloads folder</span>
       <div class="input-row"><input class="input" name="downloads_folder" value="${esc(s.downloads_folder)}" placeholder="The one folder all your downloads go into">
@@ -4782,6 +5203,7 @@ async function openSettings(focus = '') {
         <i style="background:linear-gradient(135deg, ${a}, ${b})"></i>${l}</button>`).join('')}</div>
       <input type="hidden" name="theme" value="${esc(s.theme || 'violet')}">
       <small>Changes the whole app, and the built-in player's controls. You see it straight away; Save keeps it.</small></div>
+    <label class="check-row"><input type="checkbox" name="sounds" ${s.sounds !== false ? 'checked' : ''}> <span>Sounds: small, quiet ones for small things (adding a title, closing a window, changing section)</span></label>
     <div><h4>Watch together</h4>
     <label class="field"><span>Your name in watch parties</span>
       <input class="input" name="party_name" value="${esc(s.party_name)}" placeholder="e.g. Ali"></label>
@@ -4803,8 +5225,10 @@ async function openSettings(focus = '') {
   $('#avatar-file', wrap).addEventListener('change', async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    e.target.value = '';
     try {
-      const pic = await smallPicture(file, 96);
+      const pic = await openCropper(file);
+      if (!pic) return;
       form.party_avatar.value = pic;
       $('#avatar-preview', wrap).innerHTML = `<img src="${pic}" alt="">`;
       $('[data-s="avatar-off"]', wrap).classList.remove('hidden');
@@ -4813,6 +5237,8 @@ async function openSettings(focus = '') {
   wrap.svc = JSON.parse(JSON.stringify(s.services || []));
   wrap.sites = JSON.parse(JSON.stringify(s.torrent_sites || []));
   drawSites(wrap);
+  wrap.vsites = JSON.parse(JSON.stringify(s.video_sites || []));
+  drawVideoSites(wrap);
   {
     const custom = JSON.parse(JSON.stringify(s.ai_custom || []));
     const known = ['gemini', 'groq', 'openrouter', ...custom.map((c) => `custom:${c.id}`)];
@@ -4839,9 +5265,18 @@ async function openSettings(focus = '') {
   }
   drawServices(wrap);
   api('GET', '/api/services/presets').then(({ presets }) => { wrap.presets = presets; drawServicePicker(wrap); }).catch(() => {});
-  if (focus === 'svc') {
-    $('#svc-picker', wrap).classList.remove('hidden');
-    setTimeout(() => $('#svc-field', wrap)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  if (focus === 'svc') $('#svc-picker', wrap).classList.remove('hidden');
+  const spot = { svc: '#svc-field', tmdb: '[name=tmdb_api_key]', mal: '[name=mal_client_id]', sync: '[name=sync_folder]',
+    downloads: '[name=downloads_folder]', ai: '#ai-list', sites: '#site-list', video: '#vsite-list', vlc: '[name=vlc_path]' }[focus];
+  if (spot) {
+    setTimeout(() => {
+      const el = $(spot, wrap);
+      const field = el?.closest('.field') || el;
+      field?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      field?.classList.add('flash');
+      setTimeout(() => field?.classList.remove('flash'), 2400);
+      if (el?.matches('input')) el.focus({ preventScroll: true });
+    }, 80);
   }
   $('#browser-pick', wrap).addEventListener('change', (e) => {
     if (e.target.value === '__browse') { e.target.value = form.browser_path.value; $('[data-s="browser"]', wrap).click(); return; }
@@ -4856,12 +5291,12 @@ async function openSettings(focus = '') {
     const f = new FormData(form);
     return {
       tmdb_api_key: f.get('tmdb_api_key'), mal_client_id: f.get('mal_client_id'), region: f.get('region'),
-      services: readServices(wrap), torrent_sites: readSites(wrap), custom_player_path: f.get('custom_player_path'),
+      services: readServices(wrap), torrent_sites: readSites(wrap), video_sites: readVideoSites(wrap), custom_player_path: f.get('custom_player_path'),
       vlc_path: f.get('vlc_path'), browser_path: f.get('browser_path'), sync_folder: f.get('sync_folder'),
       downloads_folder: f.get('downloads_folder'), player: f.get('player'), queue_next_episodes: form.queue_next_episodes.checked,
       gemini_api_key: f.get('gemini_api_key'), groq_api_key: f.get('groq_api_key'), openrouter_api_key: f.get('openrouter_api_key'),
       ...(() => { const st = readAiList(wrap); return { ai_custom: st.custom.map(({ keys, ...c }) => c), ai_order: st.order }; })(),
-      skip_intro: form.skip_intro.checked, theme: f.get('theme'),
+      skip_intro: form.skip_intro.checked, theme: f.get('theme'), sounds: form.sounds.checked,
       party_name: f.get('party_name'), party_server: f.get('party_server'), party_avatar: f.get('party_avatar'),
     };
   };
@@ -4918,6 +5353,11 @@ async function openSettings(focus = '') {
         }
       } else if (['ai-up', 'ai-down', 'ai-del', 'ai-test-custom'].includes(a)) {
         await aiListAction(wrap, a, e.target.closest('[data-s]'));
+      } else if (a.startsWith('vsite-')) {
+        await videoSiteAction(wrap, a, e.target.closest('[data-i]'));
+      } else if (a === 'guide') {
+        closeModal(wrap);
+        startGuide(Number(prefGet('guideStep', '0')) || 0);
       } else if (a.startsWith('site-')) {
         await siteAction(wrap, a, e.target.closest('[data-i]'));
       } else if (a.startsWith('svc-')) {
@@ -4951,6 +5391,189 @@ async function openSettings(focus = '') {
       }
     } catch (err) { fail(err); }
   });
+}
+
+/* ======================================================== setup guide */
+
+// When the app opens: "Do you want help setting it up?" (until "Don't show this
+// again"). The guide goes through each step, one at a time, with what to do,
+// the links and Settings opened at the right place, and moves on by itself
+// when the step is done. Optional steps can be skipped. Settings → Setup guide
+// brings it back any time.
+const SITE_FORMAT = `Search for any title on the site, copy the address of the results page, and put <b>{title}</b> where the name was
+  - for example <code>https://example-site/search?keyword=Frieren</code> becomes <code>https://example-site/search?keyword={title}</code>. Leave {title} exactly as written.`;
+
+const GUIDE_STEPS = [
+  { id: 'tmdb', title: 'Get your TMDB token (movies & TV)', focus: 'tmdb', done: () => !!S.status.tmdb,
+    links: [['Join TMDB', 'https://www.themoviedb.org/signup'], ['TMDB API page', 'https://www.themoviedb.org/settings/api']],
+    body: `<p>TMDB is where Watch Anything gets the info for movies and TV shows.</p><ol>
+      <li>Go to themoviedb.org and click <b>Join TMDB</b>. Make an account, then click the link in the email TMDB sends you.</li>
+      <li>Log in, click your profile picture (top right) → <b>Settings</b> → <b>API</b>.</li>
+      <li>Click <b>Create</b> (or "click here to request an API key"), choose <b>Developer</b> and accept the terms.</li>
+      <li>Fill in the form: Type of use <b>Personal</b>, Application name <b>Watch Anything</b>, Application URL <b>http://localhost</b>
+        (if it's refused, <b>https://github.com</b>), a short summary ("Personal app to keep track of what I want to watch"), and your own details. Submit.</li>
+      <li>Copy the long <b>API Read Access Token</b> (it starts with eyJ…). The shorter API Key works too.</li>
+      <li>Paste it into <b>TMDB token</b> in Settings and press <b>Save</b>.</li></ol>` },
+  { id: 'mal', title: 'Get your MyAnimeList Client ID (anime)', focus: 'mal', done: () => !!S.status.mal,
+    links: [['MyAnimeList API page', 'https://myanimelist.net/apiconfig']],
+    body: `<p>MyAnimeList is where Watch Anything gets the info for anime.</p><ol>
+      <li>Log in at myanimelist.net (make an account first if you need one).</li>
+      <li>Go to myanimelist.net/apiconfig (or your picture → Account Settings → API) and click <b>Create ID</b>.</li>
+      <li>Fill in: App Name <b>Watch Anything</b>, App Type <b>other</b>, a short description, App Redirect URL and Homepage URL
+        <b>http://localhost</b>, <b>Non-Commercial</b>, your name, Purpose of Use <b>Hobbyist</b>. Tick the licence box and Submit.</li>
+      <li>Back on the API page, click <b>Edit</b> next to your app and copy the <b>Client ID</b> (you don't need the Client Secret).</li>
+      <li>Paste it into <b>MyAnimeList Client ID</b> in Settings and press <b>Save</b>.</li></ol>` },
+  { id: 'add', title: 'Add a few things to your list', optional: true, done: () => S.items.length > 0,
+    action: ['Add a title', () => openAdd('anime')],
+    body: `<p>Try it out: search for a few shows, films or anime you plan to watch and add them, with <b>+</b> in any row or <b>Find Media</b> at the top.</p>
+      <p class="muted small">If nothing shows up when you search, go back over the first two steps and make sure you pressed Save.</p>` },
+  { id: 'downloads', title: 'Choose your downloads folder', focus: 'downloads', done: () => !!S.status.downloads,
+    action: ['Choose the folder', () => chooseDownloadsFolder()],
+    body: `<p>The app uses this folder to see which shows and films you already have, and to keep files while you stream a torrent.</p><ol>
+      <li>Click <b>Choose the folder</b> (or Settings → <b>Your downloads</b>) and pick the folder your downloads go into.</li>
+      <li>Press <b>Save</b> if you chose it in Settings.</li>
+      <li>Optional: press <b>Sort now</b> on the home screen to sort what's already in it.</li></ol>` },
+  { id: 'ai', title: 'Add your AI helpers (Gemini and Groq)', optional: true, recommended: true, focus: 'ai', done: () => (S.status.ai || []).length > 0,
+    links: [['Gemini (Google AI Studio)', 'https://aistudio.google.com/'], ['Groq', 'https://console.groq.com/keys']],
+    body: `<p>Free AI services for the smart features (sorting tricky downloads, the story guide, "I'm in the mood for…", recaps). Gemini and Groq are enough; a third isn't needed.</p><ol>
+      <li><b>Gemini:</b> aistudio.google.com → <b>Get API key</b> → <b>Create API key</b>. Copy it.</li>
+      <li><b>Groq:</b> console.groq.com → <b>API Keys</b> → <b>Create API Key</b>. Copy it.</li>
+      <li>In Settings → <b>AI helpers</b>, paste each key into its field and press <b>Save</b>.</li></ol>` },
+  { id: 'sync', title: 'Add a sync folder', optional: true, desktop: true, focus: 'sync', done: () => !!S.status.sync?.folder,
+    body: `<p>Keeps your list the same on your Windows PC and your Mac, through a cloud drive (Google Drive, OneDrive, Dropbox or iCloud Drive).</p><ol>
+      <li>Install the same cloud drive app on both computers and sign in to the same account.</li>
+      <li>Make a folder for it in the cloud drive, like <b>Google Drive/Watch Anything</b>.</li>
+      <li>On both computers, keep that folder on the computer: <b>Available offline</b> (Google Drive), <b>Always keep on this device</b> (OneDrive),
+        <b>Make available offline</b> (Dropbox) or <b>Keep Downloaded</b> (iCloud Drive).</li>
+      <li>On both, Settings → <b>Sync between computers</b> → <b>Choose…</b> and pick that folder. It's used straight away.</li></ol>` },
+  { id: 'online', title: 'Add sites for watching online', optional: true, focus: 'svc',
+    body: `<p>Where <b>Watch online</b> looks, in order. In Settings → <b>Watching online</b>:</p><ol>
+      <li>Remove the services you don't use (✕), for example Netflix or HBO Max.</li>
+      <li><b>+ Add…</b> → click the services you use, or <b>Your own site…</b> for an anime site and a TV & film site of your choosing.</li>
+      <li>For your own site, the link: ${SITE_FORMAT}</li>
+      <li>Tick what each one is for (Anime, TV, Movies), set its <b>Check</b> to <b>No check</b>, and click <b>Try</b> to see it opens a search.</li>
+      <li>Press <b>Save</b>.</li></ol>` },
+  { id: 'torrent', title: 'Add a torrent site', optional: true, recommended: true, focus: 'sites',
+    done: () => Object.values(S.status.torrent_sites || {}).some((n) => n > 0),
+    body: `<p>With your own torrent site, <b>Get magnet</b> on a title finds its torrent for you, and episodes stream while they download.</p><ol>
+      <li>In Settings → <b>Your torrent sites</b>, click <b>+ Add a site</b>.</li>
+      <li><b>Name:</b> the site's name. <b>Link:</b> ${SITE_FORMAT}</li>
+      <li>Tick what it's for (Anime, TV shows, Movies), click <b>Test</b> to see what the app can read, and press <b>Save</b>.</li></ol>` },
+  { id: 'vlc', title: 'Install VLC (only if you need it)', optional: true, desktop: true, focus: 'vlc', done: () => !!S.status.vlc,
+    links: [['videolan.org', 'https://www.videolan.org/']],
+    body: `<p>Watch Anything has its own player, so you don't need VLC. Install it only if you'd like another option.</p><ol>
+      <li>Download VLC from videolan.org and install it.</li>
+      <li>Then <b>Play in VLC</b> on a title's page opens its video in VLC.</li></ol>` },
+];
+
+const guideSteps = () => GUIDE_STEPS.filter((x) => !(x.desktop && onPhone()));
+
+function maybeAskSetup() {
+  if (S.askedSetup || !S.status.setup_prompt || document.body.classList.contains('party-window')) return;
+  S.askedSetup = true;
+  const wrap = openModal(`<div class="modal-pad center">
+    <img class="setup-logo" src="logo.png" alt="">
+    <h2>Welcome to Watch Anything</h2><p class="sub">Do you want help setting it up? It goes through every step, one at a time.</p>
+    <div class="btns" style="justify-content:center"><button class="btn btn-red" data-a="yes">Yes, guide me</button>
+      <button class="btn btn-ghost" data-a="no">No thanks</button></div>
+    <label class="check-row" style="justify-content:center;margin-top:14px"><input type="checkbox" id="setup-never"> Don't show this again</label>
+    <p class="muted small">The guide is always in Settings → Setup guide.</p></div>`, 'setup-modal');
+  wrap.addEventListener('click', async (e) => {
+    const a = e.target.closest('[data-a]')?.dataset.a;
+    if (!a) return;
+    if ($('#setup-never', wrap).checked) {
+      api('PUT', '/api/settings', { setup_prompt: false }).then(() => { S.status.setup_prompt = false; }).catch(fail);
+    }
+    closeModal(wrap);
+    if (a === 'yes') startGuide(0);
+  });
+}
+
+function startGuide(at = 0) {
+  const steps = guideSteps();
+  S.guide = { i: Math.min(Math.max(0, at), steps.length) };
+  drawGuideBox();
+  clearInterval(S.guideTimer);
+  S.guideTimer = setInterval(() => { if (S.guide) drawGuideBox(); else clearInterval(S.guideTimer); }, 1500);
+}
+
+function closeGuide() {
+  S.guide = null;
+  clearInterval(S.guideTimer);
+  $('#guide')?.remove();
+  document.body.classList.remove('guide-open');
+}
+
+function drawGuideBox() {
+  const steps = guideSteps();
+  let box = $('#guide');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'guide';
+    box.addEventListener('click', guideClick);
+    document.body.append(box);
+  }
+  const i = S.guide.i;
+  prefSet('guideStep', String(i));
+  box.classList.toggle('min', !!S.guide.min);
+  document.body.classList.toggle('guide-open', !S.guide.min);
+  const minBtn = `<button class="guide-min" data-gd="min" title="${S.guide.min ? 'Show the step' : 'Make it small'}">${S.guide.min ? '▴' : '–'}</button>`;
+  if (i >= steps.length) {
+    setHTML(box, `<button class="guide-x" data-gd="close" title="Close">×</button>${minBtn}
+      <div class="guide-step">All done</div><h3>You're all set 🎉</h3>
+      <p>Everything is ready. You can come back to any step from Settings → <b>Setup guide</b>.</p>
+      <div class="btns"><button class="btn btn-red btn-sm" data-gd="close">Finish</button>
+        <button class="btn btn-ghost btn-sm" data-gd="back">Back</button></div>`);
+    return;
+  }
+  const step = steps[i];
+  const done = step.done ? step.done() : null;
+  if (done && S.guide.wasDone === false && S.guide.at === i) {
+    // Just done: a moment to see the tick, then the next step.
+    sfx('done');
+    S.guide.wasDone = true;
+    clearTimeout(S.guide.next);
+    S.guide.next = setTimeout(() => { if (S.guide && S.guide.i === i) { S.guide.i += 1; S.guide.wasDone = null; drawGuideBox(); } }, 1400);
+  }
+  if (S.guide.at !== i) S.guide.wasDone = done;
+  else if (!done) S.guide.wasDone = false;
+  S.guide.at = i;
+  const dots = steps.map((x, n) => `<i class="${n < i ? 'past' : n === i ? 'now' : ''}${x.optional ? ' opt' : ''}"></i>`).join('');
+  setHTML(box, `<button class="guide-x" data-gd="close" title="Close the guide (it's in Settings any time)">×</button>${minBtn}
+    <div class="guide-step">Step ${i + 1} of ${steps.length}${step.optional ? ` · <span class="tag-optional">${step.recommended ? 'recommended, optional' : 'optional'}</span>` : ''}</div>
+    <div class="guide-dots">${dots}</div>
+    <h3>${esc(step.title)}</h3>
+    <div class="guide-body">${step.body}</div>
+    ${step.links || step.action || step.focus ? `<div class="btns guide-links">
+      ${(step.links || []).map(([l, u], n) => `<button class="btn btn-ghost btn-sm" data-gd="link" data-n="${n}">${ICON.globe} ${esc(l)}</button>`).join('')}
+      ${step.action ? `<button class="btn btn-white btn-sm" data-gd="action">${esc(step.action[0])}</button>` : ''}
+      ${step.focus ? '<button class="btn btn-white btn-sm" data-gd="settings">Open Settings here</button>' : ''}</div>` : ''}
+    <div class="guide-state ${done ? 'ok' : ''}">${done ? `${ICON.check} Done${i < steps.length - 1 ? ' - on to the next step…' : ''}` : step.done ? 'Not done yet - this moves on by itself once it is.' : ''}</div>
+    <div class="btns guide-nav">
+      ${i ? '<button class="btn btn-ghost btn-sm" data-gd="back">Back</button>' : ''}
+      <span class="spacer"></span>
+      ${step.optional && !done ? '<button class="btn btn-ghost btn-sm" data-gd="skip">Skip</button>' : ''}
+      <button class="btn btn-red btn-sm" data-gd="next" ${!step.optional && !done ? 'disabled title="Do this step first"' : ''}>${i === steps.length - 1 ? 'Finish' : 'Next'}</button></div>`);
+}
+
+function guideClick(e) {
+  const b = e.target.closest('[data-gd]');
+  if (S.guide?.min && (!b || b.dataset.gd === 'min')) { S.guide.min = false; drawGuideBox(); return; }
+  if (!b || !S.guide) return;
+  if (b.dataset.gd === 'min') { S.guide.min = true; drawGuideBox(); return; }
+  const steps = guideSteps();
+  const step = steps[S.guide.i];
+  const g = b.dataset.gd;
+  clearTimeout(S.guide.next);
+  if (g === 'close') { closeGuide(); return; }
+  if (g === 'back') { S.guide.i = Math.max(0, S.guide.i - 1); S.guide.at = null; drawGuideBox(); return; }
+  if (g === 'next' || g === 'skip') { S.guide.i += 1; S.guide.at = null; drawGuideBox(); return; }
+  if (g === 'link') { api('POST', '/api/open', { url: step.links[Number(b.dataset.n)][1] }).catch(fail); return; }
+  if (g === 'action') { step.action[1](); return; }
+  if (g === 'settings') {
+    $$('#modal-root .settings-modal').forEach((m) => closeModal(m.closest('.overlay')));
+    openSettings(step.focus);
+  }
 }
 
 /* ================================================================ go */

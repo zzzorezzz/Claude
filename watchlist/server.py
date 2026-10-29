@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, discover, importer, launcher, library, metadata, phone_player, player, scanner, services, share, sites, sorter, syncplay
+from . import ai, dialogs, discover, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -29,6 +29,9 @@ from .store import METADATA_FIELDS, TYPES, Store, new_item, next_episode
 WEB_DIR = Path(__file__).resolve().parent / "web"
 REFRESH_AFTER = 7 * 24 * 3600
 RELATED_TTL = 3 * 24 * 3600
+# "Play this with" on a title's page: "" is "Use anything" (a file on your computer,
+# else the torrent, else it asks between your video sites and watching online).
+PLAY_WITH = ("", "file", "torrent", "scraped", "online")
 
 
 class ApiError(Exception):
@@ -75,6 +78,7 @@ class App:
         self.anime_index = discover.AnimeIndex(self.data_dir / "anime_index.json")
         self.torrents = torrents_mod.Torrents(self, self.data_dir)
         self.site_jobs = sites.Jobs(self)
+        self.scraper = scrape.Scraper(self.data_dir)                       # your video sites
         self._connected_jobs = {}           # Everything connected being looked for: how far along
         self._filler = ThreadPoolExecutor(4, thread_name_prefix="fill")   # titles added straight away
         self.moods = mood_mod.Jobs(self)                                   # I'm in the mood for…
@@ -83,6 +87,7 @@ class App:
         self._party_lock = threading.Lock()
         self._lock = threading.Lock()
         self._ai_streams = {}               # (item, country, services) -> (when, {name: has it})
+        self._similar = {}                  # (item, title) -> (when, related entries by name)
 
     # ---- syncing between computers
 
@@ -134,6 +139,8 @@ class App:
                 "torrents": {"available": torrents_mod.available(), "count": len(self.torrents.records),
                              "delete_after": torrents_mod.DELETE_AFTER},
                 "torrent_sites": {t: len(sites.sites_for(s, t)) for t in TYPES},
+                "video_sites": {t: [{"id": x["id"], "name": x["name"]} for x in scrape.sites_for(s, t)] for t in TYPES},
+                "sounds": s["sounds"], "setup_prompt": s["setup_prompt"],
                 "windows": launcher.can_open_windows(), "theme": s["theme"]}
 
     def open_link(self, url):
@@ -623,6 +630,8 @@ class App:
                 entry = self._party_torrent_entry(item, meta)
             if not entry:
                 entry = self._party_entry(item, meta.get("season") or 1, meta.get("episode") or 1, meta.get("magnet") or "")
+            if not entry and meta.get("url"):
+                entry = self._party_url_entry(item, meta)
         else:
             name = (file_ or {}).get("name") or ""
             if not name:
@@ -1048,6 +1057,51 @@ class App:
                     out.append(_entry(dict(r, relation="Same franchise"), media))
         return out
 
+    def similar(self, item, limit=5):
+        """Related entries beside a title's page: the title's name searched on
+        MyAnimeList (anime) or TMDB (films and TV shows, both), and the results
+        with a similar name, up to `limit`. Remembered for a few hours."""
+        key = (item["id"], item["title"])
+        with self._lock:
+            hit = self._similar.get(key)
+        if hit and time.time() - hit[0] < 6 * 3600:
+            return hit[1]
+        s = self.settings.get()
+        base = library.split_season(library.norm(item["title"]))[0]
+        base = re.sub(r"\b(?:" + "|".join(scanner._SEASON_WORDS) + r")\s+season\b|\b\d+(?:st|nd|rd|th)\s+season\b",
+                      " ", base)
+        base = " ".join(base.split()[:4]) or item["title"]
+        kinds = ["anime"] if item["type"] == "anime" else ["tv", "movie"] if item["type"] == "tv" else ["movie", "tv"]
+        rows = []
+
+        def one(kind):
+            try:
+                return [dict(r, type=r.get("type") or kind) for r in metadata.search(s, kind, base)[:12]]
+            except metadata.MetadataError:
+                return []
+        with ThreadPoolExecutor(2) as pool:
+            for got in pool.map(one, kinds):
+                rows += got
+        words = {w for w in base.split() if w not in library._STOP and len(w) > 1}
+        out, seen = [], set()
+        for r in rows:
+            sid = (r.get("source"), str(r.get("source_id")))
+            if sid in seen or sid == (item["source"], str(item["source_id"])):
+                continue
+            theirs = set(library.norm(" ".join(filter(None, [r.get("title"), r.get("original_title")]))).split())
+            if words and not (words & theirs):
+                continue
+            seen.add(sid)
+            existing = self.store.find_source(r["source"], r["source_id"])
+            out.append({k: r.get(k) for k in ("source", "source_id", "title", "year", "poster", "media_type",
+                                              "media_kind", "format", "type", "episodes_total")}
+                       | {"in_list": existing["id"] if existing else None})
+            if len(out) >= limit:
+                break
+        with self._lock:
+            self._similar[key] = (time.time(), out)
+        return out
+
     def refresh_stale(self):
         """Keep ratings and popularity current, quietly, in the background."""
         for item in self.store.list():
@@ -1234,7 +1288,13 @@ class App:
                 "resumed_at": start, "note": note}
 
     def _session(self, mpv, item, entries, start=0, extra=()):
-        if self.torrents.records or any(self.torrents.parse_url(e["path"]) for e in entries):
+        web = next((e for e in entries if e.get("web")), None)
+        if web:
+            # A video from your own site: sent as if from its page (some sites check).
+            extra = ["--network-timeout=60", "--cache=yes", "--demuxer-max-bytes=150MiB",
+                     "--demuxer-readahead-secs=60", f"--user-agent={scrape.UA}"] + (
+                [f"--referrer={web['referer']}"] if web.get("referer") else []) + list(extra)
+        elif self.torrents.records or any(self.torrents.parse_url(e["path"]) for e in entries):
             # Streams: wait patiently for data, and keep plenty of it ahead.
             extra = ["--network-timeout=180", "--cache=yes", "--demuxer-max-bytes=200MiB",
                      "--demuxer-readahead-secs=90"] + list(extra)
@@ -1380,6 +1440,75 @@ class App:
         self._play_vlc(entries, session.pos or 0)
         return {"ok": True, "file": Path(entries[0]["path"]).name}
 
+    # ---- your own video sites ("Play online (my sites)")
+
+    def play_scraped(self, item, body):
+        """Find the episode (or film) on your video site and play it: in the
+        player, streamed (nothing is downloaded first), or its page in the
+        browser when that's how the site is set up or its video can't be read."""
+        s = self.settings.get()
+        mine = scrape.sites_for(s, item["type"])
+        if not mine:
+            raise ApiError(f"add your own video site for {KIND_WORDS.get(item['type'], 'this')} in Settings first")
+        site = next((x for x in mine if x["id"] == body.get("site")), None) or mine[0]
+        series = item["format"] == "series"
+        season = max(0, int(body.get("season") or item["progress"]["season"] or 1)) if series else None
+        episode = max(1, int(body.get("episode") or item["progress"]["episode"] or 1)) if series else None
+        try:
+            found = self.scraper.resolve(site, item, season, episode, pin=str(body.get("entry") or ""))
+        except scrape.ScrapeError as e:
+            if body.get("open_page") and e.page:
+                self.open_link(e.page)
+                return {"ok": True, "player": "browser", "page": e.page, "site": site["name"], "note": str(e)}
+            return {"ok": False, "error": str(e), "page": e.page, "site": site["name"],
+                    "others": (self.scraper.remembered(item["id"], site["id"]) or {}).get("others") or []}
+        key = f"{season}:{episode}" if series else "movie"
+        result = {"ok": True, "site": site["name"], "entry": found["entry"], "others": found["others"],
+                  "page": found["page"]}
+        patch = {"last_played": time.time()}
+        if series:
+            patch["progress"] = {"season": max(1, season), "episode": episode}
+        if not found["url"]:
+            self.open_link(found["page"])
+            self.store.update(item["id"], patch)
+            return dict(result, player="browser")
+        entry = {"path": found["url"], "sub": None, "key": key, "web": True, "referer": found["referer"],
+                 "label": self._label(item, key), "name": f"{item['title']} ({site['name']})"}
+        entry["party"] = dict(self._party_meta(item, key), url=found["url"], referer=found["referer"])
+        start = 0 if body.get("from_start") else player.resume_point(item["positions"].get(key))
+        with self._party_lock:
+            hosting = self.party if self.party and self.party.active and self.party.role == "host" else None
+        hold = bool(hosting and any(p != hosting.me for p in hosting.people))
+        if launcher.ANDROID:
+            session = phone_player.PhoneSession(item["id"], [entry], start, paused=hold, anime=item["type"] == "anime")
+            if hosting:
+                session.party = True
+                hosting.attach(session, hold=hold)
+                self._party_now(hosting, entry)
+            self.store.update(item["id"], patch)
+            return dict(result, **session.launch(), player="android", resumed_at=start)
+        mpv = player.find_mpv()
+        if not mpv:
+            # No built-in player: the page in your browser.
+            self.open_link(found["page"])
+            self.store.update(item["id"], patch)
+            return dict(result, player="browser")
+        session = self.player.play(self._session(mpv, item, [entry], start, ["--pause"] if hold else ()))
+        if hosting:
+            hosting.attach(session, hold=hold)
+            self._party_now(hosting, entry)
+        self.store.update(item["id"], patch)
+        return dict(result, player="mpv", resumed_at=start, file=entry["name"])
+
+    def _party_url_entry(self, item, meta):
+        """The host plays a video from their own site: the guest streams the same one."""
+        if not str(meta.get("url") or "").lower().startswith(("http://", "https://")):
+            return None
+        series = item["format"] == "series"
+        key = f'{meta.get("season") or 1}:{meta.get("episode") or 1}' if series else "movie"
+        return {"path": meta["url"], "sub": None, "key": key, "web": True, "referer": meta.get("referer") or "",
+                "label": self._label(item, key), "party": self._party_meta(item, key), "item_id": item["id"]}
+
     def streaming_on(self, item):
         """Where TMDB says a title streams in your country: ([names], message)."""
         s = self.settings.get()
@@ -1514,6 +1643,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/library/sort", "library_sort"),
         ("POST", r"/api/library/route", "library_route"),
         ("GET", r"/api/items/(\w+)/connected", "connected"),
+        ("GET", r"/api/items/(\w+)/similar", "similar"),
         ("POST", r"/api/items/(\w+)/connected", "find_connected"),
         ("POST", r"/api/items/(\w+)/connected/cancel", "cancel_connected"),
         ("POST", r"/api/items/(\w+)/recap", "recap"),
@@ -1544,6 +1674,8 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/connections", "connect_file"),
         ("POST", r"/api/items/(\w+)/connections/redo", "sort_again"),
         ("POST", r"/api/sites/test", "test_site"),
+        ("POST", r"/api/video-sites/test", "test_video_site"),
+        ("POST", r"/api/items/(\w+)/scraped", "play_scraped"),
         ("POST", r"/api/torrents/(\w+)/plan", "torrent_plan_group"),
         ("POST", r"/api/torrents/(\w+)/plan/redo", "torrent_plan_redo"),
         ("POST", r"/api/torrents/(\w+)/plan/add", "torrent_plan_add"),
@@ -1833,6 +1965,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_connected(self, body, item_id):
         return self.app.connected(self.app.item(item_id))
+
+    def api_similar(self, body, item_id):
+        item = self.app.item(item_id)
+        s = self.app.settings.get()
+        if not s["mal_client_id" if item["type"] == "anime" else "tmdb_api_key"]:
+            return {"entries": [], "note": f"Add your {'MyAnimeList Client ID' if item['type'] == 'anime' else 'TMDB token'} "
+                                           "in Settings to see related titles."}
+        return {"entries": self.app.similar(item)}
 
     def api_find_connected(self, body, item_id):
         return self.app.connected(self.app.item(item_id), run=True)
@@ -2134,6 +2274,10 @@ class Handler(BaseHTTPRequestHandler):
             patch["opened_at"] = time.time()
         if "listed" in body:
             patch["listed"] = bool(body["listed"])
+        if "play_with" in body:
+            if body["play_with"] not in PLAY_WITH:
+                raise ApiError("unknown way to play")
+            patch["play_with"] = body["play_with"]
         if "local_broken" in body:
             patch["local_broken"] = bool(body["local_broken"])
         elif "local_folder" in patch or "local_file" in patch:
@@ -2154,6 +2298,7 @@ class Handler(BaseHTTPRequestHandler):
         # Its downloads wait for you; Sort now won't put them back by itself.
         self.app.library.forget_item(item_id)
         self.app.torrents.forget_item(item_id)
+        self.app.scraper.forget(item_id)
         return {"ok": True}
 
     # ---- torrents
@@ -2263,6 +2408,25 @@ class Handler(BaseHTTPRequestHandler):
             return dict(sites.test_site(site, query), query=query)
         except sites.SiteError as e:
             raise ApiError(str(e)) from e
+
+    def api_test_video_site(self, body):
+        try:
+            [site] = scrape.clean([body.get("site") or {}]) or [None]
+        except ValueError as e:
+            raise ApiError(str(e)) from e
+        if not site:
+            raise ApiError("add the site's search link first")
+        query = str(body.get("query") or "").strip()
+        if not query:
+            mine = [i for i in self.app.store.list() if i["type"] in site["types"]]
+            query = mine[0]["title"] if mine else "Frieren"
+        try:
+            return scrape.test_site(site, query)
+        except scrape.ScrapeError as e:
+            raise ApiError(str(e)) from e
+
+    def api_play_scraped(self, body, item_id):
+        return self.app.play_scraped(self.app.item(item_id), body)
 
     def api_torrent_plan(self, body, h):
         return self.app.torrents.plan_view(h)

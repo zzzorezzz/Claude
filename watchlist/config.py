@@ -22,8 +22,9 @@ DEFAULT_SETTINGS = {
     # Full path to vlc.exe. Empty means auto-detect.
     "vlc_path": "",
     # Browser for streaming sites (and the app window without pywebview).
-    # Empty means auto-detect Opera GX, falling back to the system default.
-    "browser_path": "",
+    # "builtin" (the default): a window of the app itself. Empty means
+    # auto-detect Opera GX, falling back to the system default.
+    "browser_path": "builtin",
     # Queue the following episodes in VLC after the one you start.
     "queue_next_episodes": True,
     # Links opened for online viewing. {title} is replaced with the title.
@@ -38,6 +39,9 @@ DEFAULT_SETTINGS = {
     # Your own torrent sites, searched by "Get magnet" on an anime's page:
     # [{"id", "name", "url" (its search link, with {title}), "on"}]. Empty: none.
     "torrent_sites": [],
+    # Your own video sites, played from with "Play online (my sites)": [{"id", "name",
+    # "url" (its search link, with {title}), "types", "on", "open": "player" or "browser"}].
+    "video_sites": [],
     # Your own sites, searched when Netflix and HBO Max don't have a title.
     # {title} is replaced with the title (older versions; now part of "services").
     "anime_site_url": "",
@@ -74,6 +78,12 @@ DEFAULT_SETTINGS = {
     # Your picture in watch parties (a small "data:image/jpeg;base64,..."), or "".
     "party_avatar": "",
     "party_server": "syncplay.pl:8999",
+    # Small sounds for small things (adding a title, closing a window, changing section).
+    "sounds": True,
+    # Ask "Do you want help setting it up?" when the app opens (until "Don't show again").
+    "setup_prompt": True,
+    # Changes made once to settings saved by older versions (see Settings.__init__).
+    "migrated": [],
 }
 
 URL_KEYS = ("netflix_url", "hbomax_url")
@@ -88,7 +98,7 @@ OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
 TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "custom_player_path", "sync_folder",
              "downloads_folder", "last_folder", "gemini_api_key", "groq_api_key", "openrouter_api_key",
              "party_name", "party_server")
-BOOL_KEYS = ("queue_next_episodes", "skip_intro")
+BOOL_KEYS = ("queue_next_episodes", "skip_intro", "sounds", "setup_prompt")
 
 
 def clean_ai_custom(helpers):
@@ -178,6 +188,14 @@ class Settings:
             from .services import host_name, new_id
             data["services"].append({"id": new_id(), "name": host_name(old), "url": old, "check": [],
                                      "check_mode": "off", "types": ["anime", "tv", "movie"], "on": True})
+        # The built-in browser became the default: settings saved before then had
+        # "" (Recommended) without anyone choosing it, so they switch once.
+        if not isinstance(data.get("migrated"), list):
+            data["migrated"] = []
+        if "builtin-browser" not in data["migrated"]:
+            if isinstance(stored, dict) and stored and not stored.get("browser_path"):
+                data["browser_path"] = "builtin"
+            data["migrated"] = data["migrated"] + ["builtin-browser"]
         self._data = data
 
     def get(self) -> dict:
@@ -218,6 +236,9 @@ class Settings:
             if "torrent_sites" in patch:
                 from .sites import clean as clean_sites
                 data["torrent_sites"] = clean_sites(patch["torrent_sites"])
+            if "video_sites" in patch:
+                from .scrape import clean as clean_video_sites
+                data["video_sites"] = clean_video_sites(patch["video_sites"])
             if "party_avatar" in patch:
                 pic = str(patch["party_avatar"] or "")
                 if pic and (not re.fullmatch(r"data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+", pic) or len(pic) > 12000):

@@ -42,6 +42,9 @@ LOCAL_DEFAULTS = {
     "local_file": "",
     # Set with "Not working": Watch now goes online until it's fixed.
     "local_broken": False,
+    # "Play this with" on the title's page: "" (use anything), "file", "torrent",
+    # "scraped" (your video sites) or "online" (your streaming services).
+    "play_with": "",
 }
 
 

@@ -20,6 +20,7 @@ and can change any group, before anything is added.
 """
 
 import re
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from . import ai, library, metadata, scanner
 KIND_OF_ENTRY = {"tv": "tv", "ona": "tv", "movie": "movie", "ova": "ova", "special": "ova",
                  "tv_special": "ova", "music": "other", "pv": "other", "cm": "other"}
 NOT_A_SEASON = {"summary", "spin-off", "spin off", "alternative setting", "alternative version",
-                "character", "other", "full story"}
+                "character", "other", "full story", "side story"}
 
 
 def describe(files):
@@ -111,6 +112,45 @@ def groups_of(files, common=None):
                                                   scanner.natural_key(g["sample"][0] if g["sample"] else "")))
 
 
+def quick_own(files, item):
+    """Straight away, before MyAnimeList's facts are in (no internet needed):
+    which of a pack's video files are the title's own, going by their names.
+    {key: episode or None} for those; files of the series' other seasons and
+    titles ("Second Season", "To the Top", the films) are left out until the
+    pack is worked out. None when the torrent looks like one title, or when
+    the names can't tell."""
+    groups = [g for g in groups_of(files) if g["kind"] != "extra"]
+    if len(groups) < 2:
+        return None
+    names = [n for n in [item.get("title"), item.get("original_title"), *(item.get("aliases") or [])] if n]
+    main = Counter(_base(g["title"]) for g in groups if g["kind"] == "tv" and g["title"]).most_common(1)
+    main_words = set(library.norm(main[0][0]).split()) if main and main[0][0] else set()
+    own = set()
+    for n in names:
+        own |= _words(_base(library.norm(n)), main_words)
+    season = next((x for x in (entry_season({"names": [n]}) for n in names) if x), None) or 1
+    kind = library.item_kind(item)
+    me = {"names": names}
+    chosen = []
+    for g in groups:
+        if g["kind"] == "tv" and kind == "tv":
+            if g["distinct"]:
+                if own and _name_score(g["title"], me, main_words) >= 60:
+                    chosen.append(g)
+            elif (g["season"] or 1) == season and (not own or season > 1):
+                chosen.append(g)
+        elif g["kind"] in ("movie", "ova") and kind in ("movie", "ova", "special"):
+            if _name_score(g["title"], me, main_words) >= 60:
+                chosen.append(g)
+    if not chosen:
+        return None
+    out = {}
+    for g in chosen:
+        for k in g["files"]:
+            out[k] = g["episodes"].get(k)
+    return out
+
+
 # ---- the franchise's entries
 
 def entries(settings, mal_id):
@@ -154,9 +194,37 @@ def entries(settings, mal_id):
 
 
 def _tv_chain(ents, anchor_id):
-    """The franchise's seasons in order: TV entries that continue the story."""
-    return [e for e in ents if e["kind"] == "tv" and
-            (e["source_id"] == anchor_id or (e["relation"] or "").lower() not in NOT_A_SEASON)]
+    """The franchise's seasons in order: TV entries that continue the story. ONAs
+    count only when the franchise has no TV series of its own (a web series), or
+    when they're the title itself."""
+    story = [e for e in ents if e["kind"] == "tv" and
+             (e["source_id"] == anchor_id or (e["relation"] or "").lower() not in NOT_A_SEASON)]
+    tv = [e for e in story if (e.get("media_type") or "tv").lower() == "tv" or e["source_id"] == anchor_id]
+    return tv or story
+
+
+def entry_season(entry):
+    """The season an entry's names say ("Second Season", "Haikyu!! 3rd Season"), or None."""
+    for name in entry.get("names") or [entry.get("title") or ""]:
+        n = library.norm(name)
+        if re.search(r"\bpart\s*\d|\bcour\b", n):
+            continue                     # "To the Top 2nd Season Part 2": says the part, not the season
+        found = scanner.season_of(n)
+        if found:
+            return found
+    return None
+
+
+def _season_start(chain, season):
+    """Where season N of a pack starts in the chain: the Nth TV entry, unless that
+    entry's names say it's another season and another entry's say it's N."""
+    i = min(season - 1, len(chain) - 1)
+    says = entry_season(chain[i])
+    if says and says != season:
+        named = next((j for j, e in enumerate(chain) if entry_season(e) == season), None)
+        if named is not None:
+            return named, True
+    return i, season - 1 < len(chain)
 
 
 _NOT_A_NAME = library._STOP | {"movie", "movies", "film", "gekijouban", "ova", "ovas", "oad", "oads", "special",
@@ -239,10 +307,9 @@ def rule_plan(groups, ents, anchor_id):
                 if named[0] >= 60:
                     start, why, sure = named[1], f'its name matches {chain[named[1]]["title"]}', True
                 else:
-                    start = g["season"] - 1
-                    why = f"season {g['season']} is the franchise's TV entry number {g['season']}"
-                    sure = start < len(chain)
-                    start = min(start, len(chain) - 1)
+                    start, sure = _season_start(chain, g["season"])
+                    why = (f"season {g['season']} is the franchise's TV entry number {g['season']}"
+                           if start == g["season"] - 1 else f'{chain[start]["title"]} is season {g["season"]}')
             elif named[0] >= 60:
                 start, why, sure = named[1], f'its name matches {chain[named[1]]["title"]}', True
             else:

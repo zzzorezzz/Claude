@@ -1,6 +1,6 @@
 # Notes: where we left off, and how the builds work
 
-## Where we left off (2026-10-29)
+## Where we left off (2026-10-30)
 
 Branch: `claude/blissful-mendel-jghzf5`. All work is committed and pushed. No pull request has been opened.
 
@@ -8,38 +8,48 @@ Latest builds:
 
 | Platform | State | Run |
 |---|---|---|
-| Android (APK) | Complete: list/AI/search, phone player, torrents, watch parties. Built and emulator-checked. | [run 40896330674](https://github.com/zzzorezzz/Claude/actions/runs/40896330674) |
-| Windows (exe) | Round 9 + the profile-picture fix. Not rebuilt since the Android work. | [run 40884107879](https://github.com/zzzorezzz/Claude/actions/runs/40884107879) |
+| Android (APK) | Phone player, torrents, watch parties. Built and emulator-checked before round 10. | [run 40896330674](https://github.com/zzzorezzz/Claude/actions/runs/40896330674) |
+| Windows (exe) | Round 9 + the profile-picture fix. Not rebuilt since the Android work or round 10. | [run 40884107879](https://github.com/zzzorezzz/Claude/actions/runs/40884107879) |
 | Mac (dmg) | Round 9 + the profile-picture fix. | built with the `[mac]` commit `b757170` |
 
-The Android work also changed shared code: `server.py`, `torrents.py`, `syncplay.py` and `web/`. The Windows and Mac builds don't include it yet. Rebuild them only when the user asks; they're low on credit and asked for one platform at a time.
+Round 10 was committed with `[mac only]` (no build): none of the platforms has it yet. Build only the one the user asks for.
 
-### Done recently
+### Round 10 (2026-10-30)
 
-- **Round 9** (desktop):
-  - faster watch parties (magnet in the invite, host-close closes guests, always-on-top party window, avatars)
-  - faster Everything connected, with "other versions" grouping
-  - the built-in browser keeps logins
-  - themes, a smarter "I'm in the mood for", instant adds, "Watched it all"
-  - torrents stop seeding when done
-  - new logo
-- **Android phase 1**:
-  - the same app on a phone: Chaquopy runs the Python server, a WebView shows the screens
-  - ExoPlayer phone player
-  - phone layout with a bottom tab bar
-  - in-app file browser (`/api/fs`)
-- **Android phase 2**: torrents through jlibtorrent (`watchlist/lt_android.py`).
-- **Android phase 3**: watch parties drive the phone player (`watchlist/phone_player.py`).
-- Default party name on phones is "Phone".
+- **Your video sites** (`watchlist/scrape.py`, Settings → Your video sites): "Play online (my sites)" searches the user's own site, scores the results against the title (season, kind, extra words, part), opens the entry, finds the episode links (following a Watch/Episodes link), then the video (video/source tags, player settings in scripts, iframes two levels deep). It checks the first bytes of the video and plays it in mpv with `--referrer`. Each site can be set to open in a browser window instead. What it finds is remembered in `scraped.json`: entries for 30 days, the episode pages, and video addresses for 10 minutes. Watch parties carry the video URL (`party["url"]`).
+- **Play this with** on the title page (`play_with`, kept per computer in `local.json`). The automatic order: file, then torrent, then ask between video sites and services (with only one set up, that one is used).
+- **Torrents**:
+  - `packs.quick_own` matches pack files by name straight away, until the MyAnimeList plan is ready.
+  - The season chain leaves out side stories and ONAs, and follows season numbers in the entries' names.
+  - `clean_old` deletes torrent files 48 h after they arrive (first seen in the folder) unless they've been played since or the show is kept.
+- **Title page**:
+  - The side shows the Find everything connected button, then Related: up to 5 similar names (`/api/items/<id>/similar`).
+  - One folded **Extra stuff** section: torrent files that aren't episodes, as a folder tree, plus extras and same-folder files.
+- **App**:
+  - Select (multi-select) on the category, Watched and collection pages.
+  - Sounds (WebAudio, Settings → Look).
+  - Setup prompt and step-by-step guide (`setup_prompt` setting; Settings → Setup guide).
+  - Picture cropper.
+  - The party panel sits above the windows (z-index 150).
+  - The built-in browser is the default (a one-time migration for saved settings).
+- **Player**: the controls auto-hide after 5 s (`--cursor-autohide=5000` + uosc `autohide=yes`).
+- **Android**: the HLS module (`media3-exoplayer-hls`) and the Referer header for site videos. Not built yet.
 
 ### Not tested yet
 
-- A real phone ↔ real computer party.
-- A phone joining a party as a guest. Only the hosting side ran on the emulator; the guest side is covered by unit tests.
+- A real phone ↔ real computer party, and a phone joining as a guest.
+- The scraper against the user's real site (only tested with a local fake site). Sites that build their player with JavaScript only open in the browser.
+- Round 10 on any built app.
+
+### Setup guide: steps the user's guide doesn't have (asked whether to add them)
+
+- Your video sites (the new scraper).
+- Your country (for which services have a title).
+- Your name and picture for watch parties.
+- On Windows: "Windows protected your PC" → More info → Run anyway, and the firewall prompt the first time a torrent runs.
 
 ### Possible next steps
 
-- Rebuild Windows/Mac with the shared changes, if the user asks.
 - Bigger emulator screen for nicer screenshots (the emulator is 320x640).
 - jlibtorrent 2.0.12.9 copies its native library to the cache on each start. 2.0.15.0 fixes that once it's on FrostWire's Maven repo.
 
