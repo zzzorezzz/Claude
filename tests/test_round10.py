@@ -598,5 +598,71 @@ class PlayerClosingTest(PlayScrapedTest):
         self.assertEqual(player.why_it_stopped(None), "Failed to recognize file format.")
 
 
+# ---- the Internet Archive: its search, then its file list
+
+ARCHIVE_SEARCH = {"response": {"docs": [
+    {"identifier": "NightOfTheLivingDeadTrailer", "title": "Night of the living dead Trailer"},
+    {"identifier": "notld_1990", "title": "Night of the Living Dead", "year": "1990"},
+    {"identifier": "notld_1968", "title": "Night of the Living Dead", "year": "1968"}]}}
+ARCHIVE_FILM = {"files": [
+    {"name": "notld_1080p.mkv", "source": "original", "format": "Matroska", "height": "1080", "size": "900"},
+    {"name": "notld_1080p.mp4", "source": "derivative", "format": "h.264", "height": "1080", "size": "800"},
+    {"name": "notld_512kb.mp4", "source": "derivative", "format": "512Kb MPEG4", "size": "100"},
+    {"name": "notld.thumbs/notld_000001.jpg", "format": "Thumbnail"}, {"name": "notld_meta.xml", "format": "Metadata"}]}
+ARCHIVE_SERIES = {"files": [
+    {"name": "Popeye - 01 - Popeye the Sailor.mp4", "source": "original", "height": "480"},
+    {"name": "Popeye - 02 - I Yam What I Yam.mp4", "source": "original", "height": "480"},
+    {"name": "Popeye - 02 - I Yam What I Yam_512kb.mp4", "source": "derivative", "format": "512Kb MPEG4"}]}
+
+
+def archive_answers(url, referer="", **k):
+    import json as _json
+    if "advancedsearch.php" in url:
+        assert "mediatype%3A%28movies%29" in url, url
+        return _json.dumps(ARCHIVE_SEARCH), url
+    if url.endswith("/metadata/popeye"):
+        return _json.dumps(ARCHIVE_SERIES), url
+    return _json.dumps(ARCHIVE_FILM), url
+
+
+class ArchiveTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.scraper = scrape.Scraper(self.tmp.name)
+        [self.site] = scrape.clean([{"name": "", "url": "", "kind": "archive"}])
+        patcher = mock.patch.object(scrape, "fetch", side_effect=archive_answers)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_settings(self):
+        self.assertEqual((self.site["name"], self.site["url"], self.site["kind"]), ("Internet Archive", scrape.ARCHIVE, "archive"))
+
+    def test_a_film_in_every_quality(self):
+        film = {"id": "f1", "title": "Night of the Living Dead", "aliases": [], "original_title": "", "source": "tmdb",
+                "format": "movie", "media_type": "movie", "type": "movie", "year": 1968}
+        got = self.scraper.resolve(self.site, film)
+        self.assertEqual(got["entry"]["url"], "https://archive.org/details/notld_1968")      # the year picks the original
+        self.assertEqual(got["url"], "https://archive.org/download/notld_1968/notld_1080p.mkv")
+        self.assertEqual([q["label"] for q in got["qualities"]], ["1080p", "240p"])
+        low = self.scraper.resolve(self.site, film, quality="240p")
+        self.assertEqual(low["url"], "https://archive.org/download/notld_1968/notld_512kb.mp4")
+
+    def test_a_series_by_its_episodes(self):
+        show = {"id": "p1", "title": "Popeye", "aliases": [], "original_title": "", "source": "tmdb", "format": "series",
+                "media_type": "", "type": "tv", "seasons": [{"number": 1, "episodes": 2}]}
+        with mock.patch.object(scrape, "archive_search", return_value=[
+                {"url": "https://archive.org/details/popeye", "name": "Popeye", "names": ["Popeye"], "id": "popeye"}]):
+            got = self.scraper.resolve(self.site, show, 1, 2)
+            self.assertTrue(got["url"].endswith("I%20Yam%20What%20I%20Yam.mp4"), got["url"])
+            self.assertEqual(len(got["qualities"]), 2)
+            with self.assertRaises(scrape.ScrapeError):
+                self.scraper.resolve(self.site, show, 1, 5)
+
+    def test_the_sites_test(self):
+        r = scrape.test_site(self.site, "Night of the Living Dead")
+        self.assertEqual(r["count"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

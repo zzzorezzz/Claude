@@ -29,6 +29,7 @@ the next episode starts straight away.
 
 import difflib
 import html
+import json
 import html.parser
 import re
 import threading
@@ -79,11 +80,14 @@ def clean(sites):
             continue
         name = str(x.get("name") or "").strip()[:40]
         url = str(x.get("url") or "").strip()
+        kind = "archive" if x.get("kind") == "archive" else ""
+        if kind:
+            url = ARCHIVE                  # its own search, by its API
         if not name and not url:
             continue
-        if not url.lower().startswith(("http://", "https://")):
+        if not kind and not url.lower().startswith(("http://", "https://")):
             raise ValueError(f'{name or "a video site"}: its search link must start with http:// or https://')
-        if "{title}" not in url and "{query}" not in url:
+        if not kind and "{title}" not in url and "{query}" not in url:
             raise ValueError(f'{name or "a video site"}: put {{title}} in its search link where the name goes, '
                              "like https://yoursite/search?q={title}")
         sid = re.sub(r"[^\w-]", "", str(x.get("id") or ""))[:16] or new_id()
@@ -91,9 +95,12 @@ def clean(sites):
             sid = new_id()
         seen.add(sid)
         types = [t for t in TYPES if t in (x.get("types") or [])] or list(TYPES)
-        out.append({"id": sid, "name": name or urllib.parse.urlsplit(url).hostname or "My site", "url": url,
-                    "types": types, "on": bool(x.get("on", True)),
-                    "open": "browser" if x.get("open") == "browser" else "player"})
+        site = {"id": sid, "name": name or ("Internet Archive" if kind else urllib.parse.urlsplit(url).hostname or "My site"),
+                "url": url, "types": types, "on": bool(x.get("on", True)),
+                "open": "browser" if x.get("open") == "browser" else "player"}
+        if kind:
+            site["kind"] = kind
+        out.append(site)
     return out
 
 
@@ -432,8 +439,14 @@ def best_entry(found, wanted):
         # A link saying it's an episode is an episode's page, not the title's.
         if re.search(r"\b(?:episode|ep)\s*\d", c["name"], re.I) and not re.search(r"\bepisodes\b", c["name"], re.I):
             s -= 8
-        scored.append(dict(c, score=s))
-    scored.sort(key=lambda c: (-c["score"], len(c["name"])))
+        # A result that says its year (the Internet Archive's do): another year is likely another
+        # title (a remake), and the right year settles a tie.
+        year = str(c.get("year") or "")
+        same_year = bool(wanted.get("year")) and year.isdigit() and abs(int(year) - int(wanted["year"])) <= 1
+        if wanted.get("year") and year.isdigit() and not same_year:
+            s = max(0, s - 15)
+        scored.append(dict(c, score=s, same_year=same_year))
+    scored.sort(key=lambda c: (-c["score"], not c["same_year"], len(c["name"])))
     return scored
 
 
@@ -818,6 +831,93 @@ def ytdlp_video(url, referer=""):
     return {"url": video, "referer": headers.pop("Referer", "") or referer or url, "headers": headers}
 
 
+# ---- the Internet Archive (archive.org): its own API, in two steps
+
+ARCHIVE = "https://archive.org"
+_ARCHIVE_VIDEO = re.compile(r"\.(mp4|m4v|mkv|webm|ogv|avi|mov|mpeg|mpg)$", re.I)
+_ARCHIVE_SKIP = re.compile(r"\.(ia|thumbs)\b|sample|trailer|_thumb", re.I)
+
+
+def _get_json(url):
+    text, _ = fetch(url)
+    try:
+        return json.loads(text)
+    except ValueError as e:
+        raise ScrapeError("the Internet Archive's answer couldn't be read") from e
+
+
+def archive_search(names, rows=40):
+    """Step 1: the archive's search (advancedsearch.php) for a title's names, films
+    and TV only: [{"url" (its /details/ page), "name", "names", "id", "year"}]."""
+    found, seen = [], set()
+    for name in names[:3]:
+        words = re.sub(r"[^\w\s'-]", " ", name).strip()
+        if not words:
+            continue
+        query = f'title:({words}) AND mediatype:(movies)'
+        url = (f"{ARCHIVE}/advancedsearch.php?q={urllib.parse.quote(query)}&fl[]=identifier&fl[]=title&fl[]=year"
+               f"&fl[]=downloads&sort[]=downloads+desc&rows={rows}&page=1&output=json")
+        try:
+            docs = (_get_json(url).get("response") or {}).get("docs") or []
+        except ScrapeError:
+            continue
+        for d in docs:
+            ident, title = str(d.get("identifier") or ""), str(d.get("title") or "")
+            if ident and title and ident not in seen:
+                seen.add(ident)
+                year = str(d.get("year") or "")[:4]
+                found.append({"url": f"{ARCHIVE}/details/{ident}", "name": title, "id": ident, "year": year,
+                              "names": [title] + ([f"{title} {year}"] if year.isdigit() else [])})
+    return found
+
+
+def archive_files(identifier):
+    """Step 2: an item's file list (/metadata/<id>): its videos, each with where it
+    plays from and how good it is: [{"name", "url", "height", "size", "format", "season", "episodes"}]."""
+    data = _get_json(f"{ARCHIVE}/metadata/{urllib.parse.quote(identifier)}")
+    server = f"{ARCHIVE}/download/{urllib.parse.quote(identifier)}/"
+    out = []
+    for f in data.get("files") or []:
+        name = str(f.get("name") or "")
+        if not _ARCHIVE_VIDEO.search(name) or _ARCHIVE_SKIP.search(name):
+            continue
+        try:
+            height = int(float(f.get("height") or 0))
+        except (TypeError, ValueError):
+            height = 0
+        fmt = str(f.get("format") or "")
+        if not height:
+            m = re.search(r"(2160|1440|1080|720|576|480|360|240)p", name + " " + fmt, re.I)
+            height = int(m.group(1)) if m else (240 if "512Kb" in fmt else 0)
+        season, episodes = scanner.parse_episode(Path(name).parts)
+        out.append({"name": Path(name).name, "url": server + urllib.parse.quote(name), "height": height,
+                    "size": int(f.get("size") or 0), "format": fmt, "season": season, "episodes": list(episodes),
+                    "original": f.get("source") == "original"})
+    return out
+
+
+def archive_versions(files):
+    """One episode's (or a film's) copies as qualities, best first: [{"label", "height", "url"}]."""
+    ranked = sorted(files, key=lambda f: (-f["height"], -int(f["original"]), -f["size"]))
+    out, seen = [], set()
+    for f in ranked:
+        label = f"{f['height']}p" if f["height"] else (f["format"] or Path(f["name"]).suffix.lstrip(".").upper() or "Video")
+        if label in seen:
+            continue                       # one copy of each quality (the best one of it)
+        seen.add(label)
+        out.append({"label": label, "height": f["height"], "url": f["url"]})
+    return out[:8]
+
+
+def archive_episodes(files):
+    """{(season or None, episode): [its files]} for an item that's a series."""
+    eps = {}
+    for f in files:
+        for e in f["episodes"][:1]:
+            eps.setdefault((f["season"], e), []).append(f)
+    return eps
+
+
 # ---- putting it together
 
 class Scraper:
@@ -883,6 +983,11 @@ class Scraper:
     def search(self, site, item, season=None):
         """The site's results for a title, scored: [{"url", "name", "score"}]."""
         wanted = wanted_of(item, season)
+        if site.get("kind") == "archive":
+            ranked = best_entry(archive_search(wanted["names"]), wanted)
+            self._note(f"Searched the Internet Archive for {', '.join(wanted['names'][:3])}: {len(ranked)} results"
+                       + (" - best: " + "; ".join(f"{c['name']} ({c['score']}%)" for c in ranked[:3]) if ranked else ""))
+            return ranked
         queries = list(dict.fromkeys(n for n in wanted["names"][:3]))
         if wanted["season"] > 1 and item.get("source") == "tmdb":
             queries.insert(1, f"{wanted['names'][0]} season {wanted['season']}")
@@ -1008,6 +1113,8 @@ class Scraper:
         order (the one you chose before first) until one gives a video; `skip`
         leaves out streams that didn't play. Raises ScrapeError."""
         self.log = []
+        if site.get("kind") == "archive":
+            return self._archive(site, item, season, episode, pin, quality)
         page_url, entry, others = self.episode_page(site, item, season, episode, pin)
         out = {"page": page_url, "entry": entry, "others": others, "site": site["name"], "url": "", "referer": "",
                "headers": {}, "streams": [], "stream": None, "qualities": [], "quality": ""}
@@ -1052,6 +1159,43 @@ class Scraper:
             return self._with_quality(out, prefs)
         raise ScrapeError("; ".join(errors) if errors else "no video the player can use was found on the episode's page",
                           page=page_url)
+
+    def _archive(self, site, item, season, episode, pin, quality):
+        """The Internet Archive: the item found by its search, its file list from
+        its metadata, the episode's file (or the film's), and its other copies as qualities."""
+        tv_season = season if item.get("source") == "tmdb" and item.get("format") == "series" else None
+        entry, others = self._entry(site, item, tv_season, pin)
+        ident = entry["url"].rstrip("/").split("/")[-1]
+        prefs = self.memory.setdefault("_sites", {}).setdefault(site["url"], {})
+        if quality:
+            prefs["quality"] = quality
+        files = archive_files(ident)
+        self._note(f"{entry['name']} ({ident}): {len(files)} video file{'s' if len(files) != 1 else ''}")
+        if not files:
+            raise ScrapeError(f"{entry['name']} on the Internet Archive has no video files", page=entry["url"])
+        movie = item.get("format") == "movie" or library.item_kind(item) == "movie"
+        if movie:
+            chosen = files
+        else:
+            eps = archive_episodes(files)
+            index = {k: str(i) for i, k in enumerate(eps)}
+            absolute = None
+            if item.get("seasons") and season and season > 1:
+                absolute = sum(s.get("episodes") or 0 for s in item["seasons"] if 0 < s["number"] < season) + episode
+            key = pick_episode(index, season if tv_season else None, episode, absolute) or pick_episode(index, None, episode, absolute)
+            if key is None and not eps and episode == 1:
+                chosen = files                 # one video: the whole thing
+            elif key is None:
+                raise ScrapeError(f"episode {episode} isn't among {entry['name']}'s files"
+                                  + (f" (it has {len(eps)} episodes)" if eps else ""), page=entry["url"])
+            else:
+                chosen = eps[list(eps)[int(key)]]
+        versions = archive_versions(chosen)
+        self._note(f"The file{'s' if len(versions) != 1 else ''}: " + ", ".join(v["label"] for v in versions))
+        out = {"page": entry["url"], "entry": entry, "others": others, "site": site["name"], "url": versions[0]["url"],
+               "referer": "", "headers": {}, "streams": [], "stream": None,
+               "qualities": versions if len(versions) > 1 else [], "quality": ""}
+        return self._with_quality(out, prefs)
 
     def _with_quality(self, out, prefs):
         q = pick_quality(out.get("qualities") or [], prefs.get("quality"))
@@ -1118,6 +1262,11 @@ class Scraper:
 
 def test_site(site, query):
     """Searches a site and shows what's read: {"count", "examples", "url"}."""
+    wanted = {"names": [query], "season": 1, "kind": "tv", "year": None, "part": None}
+    if site.get("kind") == "archive":
+        found = best_entry(archive_search([query]), wanted)
+        return {"url": ARCHIVE, "query": query, "count": len(found),
+                "examples": [{"name": c["name"], "score": c["score"]} for c in found[:5]]}
     url = search_url(site, query)
     text, final = fetch(url)
     found = best_entry(candidates(parse(text, final), final), {"names": [query], "season": 1, "kind": "tv",

@@ -1557,3 +1557,4 @@ body.android #guide { left: 10px; right: 10px; width: auto; bottom: 76px; }
 .chip-btn { border: 1px solid var(--line-2); background: rgba(255, 255, 255, .04); color: var(--text); border-radius: 999px; padding: 5px 12px; font-size: 13px; cursor: pointer; }
 .chip-btn:hover { border-color: var(--accent); }
 .chip-btn.on { background: rgba(var(--accent-rgb), .3); border-color: var(--accent); }
+.vsite-note { flex: 2; align-self: center; }

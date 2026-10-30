@@ -65,6 +65,17 @@ The user wanted it to work like ani-cli on their own (legal) sites. ani-cli's pr
 - **yt-dlp in the builds:** `pip install yt-dlp`, `--hidden-import yt_dlp --collect-submodules yt_dlp`, and the exe self-check requires `yt_dlp`. Android doesn't have it.
 - **Tried for real here** (scratch venv with pywebview, libtorrent, yt-dlp): the hidden window clicked "HD-1" under Dub and caught only the dub stream. All 307 tests pass.
 
+### Waiting for the next Windows build (the user is adding more first; don't build until they say)
+
+- **Internet Archive source** (2026-10-30, commit after f98dbdd): "+ Add the Internet Archive" in Settings → Your video sites (site `kind: "archive"`, url `https://archive.org`, no `{title}` needed).
+  - `scrape.archive_search` calls `advancedsearch.php` (`mediatype:movies`, sorted by downloads, with the year).
+  - `scrape.archive_files` reads `/metadata/<id>` for the video files with their heights.
+  - `archive_episodes` maps a series' files by episode number; `archive_versions` gives one copy per quality.
+  - `Scraper._archive` plugs into `resolve`, so qualities, the play window and mpv work as for other sites.
+  - `best_entry` now uses a result's year (another year −15; the right year wins ties).
+  - Tried live against archive.org: Night of the Living Dead (1968) → its 1080p…240p files.
+- The user declined a generic "JSON API mode" shaped like AnimePahe's API; the Internet Archive was offered instead.
+
 ### Not tested yet
 
 - A real phone ↔ real computer party, and a phone joining as a guest.

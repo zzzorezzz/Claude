@@ -4970,7 +4970,8 @@ function drawVideoSites(wrap) {
       <label class="svc-on" title="Use it"><input type="checkbox" class="vsite-on" ${x.on ? 'checked' : ''}></label>
       <div class="svc-main">
         <div class="svc-line"><input class="input vsite-name" value="${esc(x.name)}" placeholder="Name">
-          <input class="input vsite-url" value="${esc(x.url)}" placeholder="https://yoursite/search?q={title}" spellcheck="false"></div>
+          ${x.kind === 'archive' ? '<span class="vsite-note muted small">archive.org - searched through its own API (films, cartoons, older anime and TV that are free to watch)</span><input type="hidden" class="vsite-url" value="https://archive.org">'
+    : `<input class="input vsite-url" value="${esc(x.url)}" placeholder="https://yoursite/search?q={title}" spellcheck="false">`}</div>
         <div class="svc-line small">${[['anime', 'Anime'], ['tv', 'TV shows'], ['movie', 'Movies']].map(([k, l]) => `<label class="svc-chip"><input type="checkbox" class="vsite-type" value="${k}" ${(x.types || []).includes(k) ? 'checked' : ''}>${l}</label>`).join('')}
           <label class="svc-chip check" title="Where it plays">Opens in
             <select class="vsite-open">${[['player', 'the player'], ['browser', 'a browser window']].map(([v, l]) => `<option value="${v}" ${(x.open || 'player') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></div>
@@ -4997,6 +4998,13 @@ function readVideoSites(wrap) {
 
 async function videoSiteAction(wrap, a, row) {
   readVideoSites(wrap);
+  if (a === 'vsite-archive') {
+    if (wrap.vsites.some((x) => x.kind === 'archive')) { toast('The Internet Archive is in your list already'); return; }
+    wrap.vsites.push({ id: '', name: 'Internet Archive', url: 'https://archive.org', kind: 'archive', on: true, types: ['anime', 'tv', 'movie'], open: 'player' });
+    drawVideoSites(wrap);
+    toast('Internet Archive added - press Save');
+    return;
+  }
   if (a === 'vsite-add') {
     wrap.vsites.push({ id: '', name: '', url: '', on: true, types: ['anime', 'tv', 'movie'], open: 'player' });
     drawVideoSites(wrap);
@@ -5216,13 +5224,15 @@ async function openSettings(focus = '') {
         <b>Test</b> shows what the app can read from it.</small></div>
     <h4 id="set-video">Your video sites <span class="tag-optional">play online</span></h4>
     <div class="field"><div id="vsite-list"></div>
-      <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="vsite-add">+ Add a site</button></div>
+      <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="vsite-add">+ Add a site</button>
+        <button class="btn btn-ghost btn-sm" type="button" data-s="vsite-archive">+ Add the Internet Archive</button></div>
       <small>Your own site where your videos are. Then Watch now (or <b>Play this with → My video sites</b> on a title) shows
         <b>Play online (my sites)</b>: the app searches your site for the title, opens the right entry (going by its name and season,
         so another season, a film or a special isn't picked; the closest one when nothing matches exactly), finds the episode and plays
         its video straight away in the player - it streams, nothing is downloaded first. <b>Opens in</b>: the player, or a browser window
         for a site whose videos only play in a browser.
         For the search link: search for any title on your site, copy the address of the results page, and put <b>{title}</b> where the name was.
+        <b>+ Add the Internet Archive</b> adds archive.org, searched through its own API (no link needed): its free films, cartoons, older anime and TV, in every quality it has.
         <b>Test</b> shows what the app can read.</small></div>
     <h4>Your downloads</h4>
     <label class="field"><span>Downloads folder</span>
