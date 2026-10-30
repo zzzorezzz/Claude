@@ -65,7 +65,7 @@ The user wanted it to work like ani-cli on their own (legal) sites. ani-cli's pr
 - **yt-dlp in the builds:** `pip install yt-dlp`, `--hidden-import yt_dlp --collect-submodules yt_dlp`, and the exe self-check requires `yt_dlp`. Android doesn't have it.
 - **Tried for real here** (scratch venv with pywebview, libtorrent, yt-dlp): the hidden window clicked "HD-1" under Dub and caught only the dub stream. All 307 tests pass.
 
-### Built for Windows on 2026-10-30 (with the Internet Archive source)
+### Waiting for the next Windows build (run 41032153407 was cancelled by the user; build only when they ask)
 
 - **Internet Archive source** (2026-10-30, commit after f98dbdd): "+ Add the Internet Archive" in Settings → Your video sites (site `kind: "archive"`, url `https://archive.org`, no `{title}` needed).
   - `scrape.archive_search` calls `advancedsearch.php` (`mediatype:movies`, sorted by downloads, with the year).
