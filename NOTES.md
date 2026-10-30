@@ -52,6 +52,19 @@ Windows has everything up to the ad blocker and the scraper's browser fallbacks 
 - **Try <next site>** while searching, on failure and while playing. A skipped site never starts playing later (`_scrape_runs`).
 - Kept generic on purpose: no per-host decryption for particular video hosts.
 
+### Video sites, ani-cli style (2026-10-30)
+
+The user wanted it to work like ani-cli on their own (legal) sites. ani-cli's providers aren't used; only the same steps, done generically in `scrape.py`:
+- **Episodes:** `episode_links` skips stream/server buttons (`SERVER_WORDS`, ancestors' class/id via the parser's `_stack`), and only accepts bare numbers as a run of look-alike links.
+- **Streams:**
+  - `streams(page)` returns `[{label, kind sub/dub/raw, url, how page/embed/click}]`, and `order_streams` puts the last choice first (`_sites[url]` prefs: `kind`, `label`, `quality`, `way`).
+  - `resolve` tries up to 4 streams. For each: the page as it is, then `ytdlp_video` (the yt-dlp Python API, with its exact headers incl. Cookie), then `webtools.catch_video(click={label, kind})`.
+  - CLICK_JS clicks the button in the hidden window and pings `CLICKED`. Only requests after that count.
+- **Quality:** `qualities()` parses an HLS master, and `pick_quality` chooses. The play window shows stream and quality chips.
+- **Player closing at once:** mpv writes `--log-file` (`player.web_log`). `_web_started` waits up to 12 s; if mpv ended, `why_it_stopped` reads the log (403…) and play_scraped tries the next stream (`skip`), up to 3.
+- **yt-dlp in the builds:** `pip install yt-dlp`, `--hidden-import yt_dlp --collect-submodules yt_dlp`, and the exe self-check requires `yt_dlp`. Android doesn't have it.
+- **Tried for real here** (scratch venv with pywebview, libtorrent, yt-dlp): the hidden window clicked "HD-1" under Dub and caught only the dub stream. All 307 tests pass.
+
 ### Not tested yet
 
 - A real phone ↔ real computer party, and a phone joining as a guest.

@@ -144,7 +144,7 @@ class App:
                 "torrent_sites": {t: len(sites.sites_for(s, t)) for t in TYPES},
                 "video_sites": {t: [{"id": x["id"], "name": x["name"]} for x in scrape.sites_for(s, t)] for t in TYPES},
                 "sounds": s["sounds"], "setup_prompt": s["setup_prompt"], "adblock": s["adblock"],
-                "catch_videos": webtools.can_catch(),
+                "catch_videos": webtools.can_catch(), "ytdlp": scrape.has_ytdlp(),
                 "windows": launcher.can_open_windows(), "theme": s["theme"]}
 
     def open_link(self, url):
@@ -1297,10 +1297,11 @@ class App:
         if web:
             # A video from your own site: sent as if from its page (some sites check).
             headers = web.get("headers") or {}
-            extra = ["--network-timeout=60", "--cache=yes", "--demuxer-max-bytes=150MiB",
+            extra = [f"--log-file={player.web_log()}", "--network-timeout=60", "--cache=yes", "--demuxer-max-bytes=150MiB",
                      "--demuxer-readahead-secs=60", f"--user-agent={headers.get('User-Agent') or scrape.UA}"] + (
-                [f"--referrer={web['referer']}"] if web.get("referer") else []) + (
-                [f"--http-header-fields=Origin: {headers['Origin']}"] if headers.get("Origin") else []) + list(extra)
+                [f"--referrer={web['referer']}"] if web.get("referer") else []) + [
+                f"--http-header-fields-append={k}: {v}" for k, v in headers.items()
+                if k in ("Origin", "Cookie") and v] + list(extra)
         elif self.torrents.records or any(self.torrents.parse_url(e["path"]) for e in entries):
             # Streams: wait patiently for data, and keep plenty of it ahead.
             extra = ["--network-timeout=180", "--cache=yes", "--demuxer-max-bytes=200MiB",
@@ -1465,7 +1466,8 @@ class App:
         with self._lock:
             self._scrape_runs[item["id"]] = run
         try:
-            found = self.scraper.resolve(site, item, season, episode, pin=str(body.get("entry") or ""))
+            found = self.scraper.resolve(site, item, season, episode, pin=str(body.get("entry") or ""),
+                                         stream=str(body.get("stream") or ""), quality=str(body.get("quality") or ""))
             with self._lock:
                 if run and self._scrape_runs.get(item["id"]) != run:
                     # You moved on to another site meanwhile: this one doesn't start playing over it.
@@ -1478,7 +1480,9 @@ class App:
                     "others": (self.scraper.remembered(item["id"], site) or {}).get("others") or []}
         key = f"{season}:{episode}" if series else "movie"
         result = {"ok": True, "site": site["name"], "entry": found["entry"], "others": found["others"],
-                  "page": found["page"]}
+                  "page": found["page"], "streams": found.get("streams") or [], "stream": found.get("stream"),
+                  "qualities": [{"label": q["label"], "height": q["height"]} for q in found.get("qualities") or []],
+                  "quality": found.get("quality") or "", "tried": []}
         patch = {"last_played": time.time()}
         if series:
             patch["progress"] = {"season": max(1, season), "episode": episode}
@@ -1509,19 +1513,67 @@ class App:
             self.open_link(found["page"])
             self.store.update(item["id"], patch)
             return dict(result, player="browser")
-        session = self.player.play(self._session(mpv, item, [entry], start, ["--pause"] if hold else ()))
+        tried = []
+        while True:
+            session = self.player.play(self._session(mpv, item, [entry], start, ["--pause"] if hold else ()))
+            started, why = self._web_started(session)
+            if started:
+                break
+            # The player closed without playing (the stream refused it): the next stream, like
+            # trying the next server by hand.
+            label = (found.get("stream") or {}).get("label") or "the video"
+            tried.append(f"{label}: {why}")
+            skip = [t for t in [*(body.get("skip") or []), *(x.get("id") for x in [found.get("stream")] if x)] if t]
+            body = dict(body, skip=skip)
+            with self._lock:
+                if run and self._scrape_runs.get(item["id"]) != run:
+                    return {"ok": False, "superseded": True, "site": site["name"], "error": "skipped"}
+            if len(tried) >= 3 or not found.get("stream"):
+                return dict(result, ok=False, error="the player couldn't play it - " + "; ".join(tried),
+                            tried=tried, others=found["others"])
+            try:
+                found = self.scraper.resolve(site, item, season, episode, skip=tuple(skip))
+            except scrape.ScrapeError as e:
+                return dict(result, ok=False, error="; ".join(tried + [str(e)]), tried=tried, others=found["others"])
+            entry = dict(entry, path=found["url"], referer=found["referer"], headers=found.get("headers") or {})
+            entry["party"] = dict(entry["party"], url=found["url"], referer=found["referer"],
+                                  headers=found.get("headers") or {})
+            result.update(stream=found.get("stream"), quality=found.get("quality") or "",
+                          qualities=[{"label": q["label"], "height": q["height"]} for q in found.get("qualities") or []])
         if hosting:
             hosting.attach(session, hold=hold)
             self._party_now(hosting, entry)
         self.store.update(item["id"], patch)
-        return dict(result, player="mpv", resumed_at=start, file=entry["name"])
+        if series:
+            # The next episode's page, found now: it starts quickly too.
+            threading.Thread(target=self._prefetch_episode, args=(site, item, season, episode + 1), daemon=True).start()
+        return dict(result, player="mpv", resumed_at=start, file=entry["name"], tried=tried)
+
+    @staticmethod
+    def _web_started(session, wait=12):
+        """(True, "") once a video from a site plays (or is still loading after
+        `wait` seconds); (False, why) when the player closed without playing."""
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if session.pos is not None:
+                return True, ""
+            if session.ended:
+                return False, player.why_it_stopped(session) or "the stream refused to play"
+            time.sleep(0.25)
+        return True, ""
+
+    def _prefetch_episode(self, site, item, season, episode):
+        try:
+            self.scraper.episode_page(site, item, season, episode)
+        except Exception:  # noqa: BLE001 - only a head start: it's looked for again when played
+            pass
 
     def _render_page(self, url):
         webtools.ADBLOCK = self.settings.get()["adblock"]
         return webtools.render(url)
 
-    def _catch_video(self, url):
-        return webtools.catch_video(url)
+    def _catch_video(self, url, click=None):
+        return webtools.catch_video(url, click=click)
 
     def _party_url_entry(self, item, meta):
         """The host plays a video from their own site: the guest streams the same one."""
@@ -1530,7 +1582,7 @@ class App:
         series = item["format"] == "series"
         key = f'{meta.get("season") or 1}:{meta.get("episode") or 1}' if series else "movie"
         return {"path": meta["url"], "sub": None, "key": key, "web": True, "referer": meta.get("referer") or "",
-                "headers": {k: str(v) for k, v in (meta.get("headers") or {}).items() if k in ("Origin", "User-Agent")},
+                "headers": {k: str(v) for k, v in (meta.get("headers") or {}).items() if k in ("Origin", "User-Agent", "Cookie")},
                 "label": self._label(item, key), "party": self._party_meta(item, key), "item_id": item["id"]}
 
     def streaming_on(self, item):

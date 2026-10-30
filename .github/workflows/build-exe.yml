@@ -31,7 +31,7 @@ jobs:
         run: python -m tests.ci
 
       - name: Install build tools
-        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi
+        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi yt-dlp
 
       - name: Get mpv (the built-in player)
         shell: pwsh
@@ -68,6 +68,7 @@ jobs:
           pyinstaller main.py --noconfirm --onefile --windowed
           --name "Watch Anything"
           --hidden-import libtorrent --collect-binaries libtorrent
+          --hidden-import yt_dlp --collect-submodules yt_dlp
           --icon packaging/watchlist.ico
           --add-data "watchlist/web;watchlist/web"
           --add-data "watchlist/mpv_scripts;watchlist/mpv_scripts"
@@ -85,6 +86,7 @@ jobs:
           if ($r.web_files -ne $true) { throw "the app's screens (HTML/JS/CSS) are missing from the exe" }
           if ($r.webview -ne $true) { throw "pywebview is missing: $($r.webview)" }
           if ($r.libtorrent -ne $true) { throw "libtorrent (torrent streaming) is missing: $($r.libtorrent)" }
+          if ($r.yt_dlp -ne $true) { throw "yt-dlp (videos on your own sites) is missing: $($r.yt_dlp)" }
           if ($r.clr -ne $true) { throw "pythonnet (needed for the app window) is missing: $($r.clr)" }
           if ($r.https -ne $true) { throw "secure (HTTPS) connections don't work: $($r.https)" }
           if ($r.player_ui -ne $true) { throw "the built-in player's controls (uosc) are missing from the exe" }
@@ -155,7 +157,7 @@ jobs:
         run: python -m tests.ci
 
       - name: Install build tools
-        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi
+        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi yt-dlp
 
       - name: Get mpv (the built-in player)
         env:
@@ -198,6 +200,7 @@ jobs:
           pyinstaller main.py --noconfirm --windowed \
             --name "Watch Anything" \
             --hidden-import libtorrent --collect-binaries libtorrent \
+            --hidden-import yt_dlp --collect-submodules yt_dlp \
             --icon packaging/watchlist.icns \
             --osx-bundle-identifier app.watchanything.desktop \
             --add-data "watchlist/web:watchlist/web" \

@@ -52,6 +52,12 @@ def _self_test(path):
             report[module] = True
         except Exception as e:  # noqa: BLE001 - report whatever went wrong
             report[module] = f"{type(e).__name__}: {e}"
+    # yt-dlp, for videos on your own sites.
+    try:
+        import yt_dlp
+        report["yt_dlp"] = bool(yt_dlp.version.__version__)
+    except Exception as e:  # noqa: BLE001
+        report["yt_dlp"] = f"{type(e).__name__}: {e}"
     # Torrent streaming (libtorrent, with the libraries it needs).
     try:
         import libtorrent

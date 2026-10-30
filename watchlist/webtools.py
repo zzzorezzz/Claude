@@ -102,6 +102,35 @@ AUTOPLAY_JS = r"""(() => {
   else setTimeout(kick, 700);
 })();"""
 
+# Choose one of an episode's streams (a server / sub / dub button) in the page, by its
+# name: the hidden window then tells the app it clicked (a request to CLICKED).
+CLICKED = "https://watchanything.invalid/clicked"
+CLICK_JS = r"""(() => {
+  if (window.top !== window || window.__waClick) return; window.__waClick = true;
+  const want = __WANT__;
+  const norm = (t) => (t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const kindOk = (el) => {
+    if (!want.kind) return true;
+    for (let n = el, i = 0; n && i < 6; n = n.parentElement, i += 1) {
+      const t = norm([n.getAttribute && n.getAttribute('data-type'), n.className, n.id, i ? '' : n.textContent].join(' '));
+      if (t.includes(want.kind)) return true;
+    }
+    return false;
+  };
+  let tries = 0;
+  const pick = () => {
+    tries += 1;
+    const els = [...document.querySelectorAll('[data-server-id], [data-server], [data-type] a, [data-type] li, [data-type] button,'
+      + ' [data-link], [data-embed], [class*="server"] a, [class*="server"] li, [class*="server"] button, [class*="server-item"], a, button, li')];
+    const label = norm(want.label);
+    const hit = els.find((el) => norm(el.textContent) === label && kindOk(el)) || els.find((el) => norm(el.textContent).includes(label) && kindOk(el));
+    if (hit) { hit.click(); fetch('__CLICKED__').catch(() => {}); return; }
+    if (tries < 20) setTimeout(pick, 600);
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(pick, 400));
+  else setTimeout(pick, 400);
+})();""".replace("__CLICKED__", CLICKED)
+
 ADBLOCK = True                 # Settings → Browser → Block ads and pop-ups (kept current by the app)
 _pending = {}                  # address -> options, for a window about to open (see _options)
 _by_window = {}                # window uid -> options
@@ -197,6 +226,10 @@ def _hook(opts, core):
 
     def on_request(sender, args):
         url = str(args.Request.Uri)
+        if url.startswith(CLICKED):
+            opts["clicked_at"] = time.time()
+            args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
+            return
         if opts.get("adblock") and blocked(url):
             args.Response = core.Environment.CreateWebResourceResponse(None, 403, "Blocked", "")
             return
@@ -223,6 +256,9 @@ def _hook(opts, core):
         except Exception:  # noqa: BLE001 - (an older Edge engine)
             pass
         core.AddScriptToExecuteOnDocumentCreatedAsync(AUTOPLAY_JS)
+        if opts.get("click"):
+            import json
+            core.AddScriptToExecuteOnDocumentCreatedAsync(CLICK_JS.replace("__WANT__", json.dumps(opts["click"])))
     if opts.get("adblock"):
         core.AddScriptToExecuteOnDocumentCreatedAsync(ADBLOCK_JS)
 
@@ -281,32 +317,43 @@ def render(url, timeout=20, settle=2.5):
                 pass
 
 
-def catch_video(url, timeout=30):
-    """{"url", "headers"} for the video a page's player asks for, or None."""
+def catch_video(url, timeout=30, click=None):
+    """{"url", "headers"} for the video a page's player asks for, or None. With
+    `click` ({"label", "kind"}), that stream's button is clicked first, and only
+    what the player asks for after it counts."""
     if not can_catch():
         return None
-    found = []
+    found = []                      # (address, headers, when)
     got = threading.Event()
+    opts = {"adblock": True, "click": click}
 
     def catch(video, headers):
         u = video.lower()
-        if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key)(\?|$)", u):
+        if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt)(\?|$)", u):
             return
-        if not any(v == video for v, _ in found):
-            found.append((video, {k: v for k, v in headers.items() if v}))
-            got.set()
+        if not any(v == video for v, _, _ in found):
+            found.append((video, {k: v for k, v in headers.items() if v}, time.time()))
+            if not click or opts.get("clicked_at"):
+                got.set()
+    opts["catch"] = catch
 
     with _lock:
-        win = _hidden_window(url, {"adblock": True, "catch": catch}, "Finding the video…")
+        win = _hidden_window(url, opts, "Finding the video…")
         if win is None:
             return None
         try:
-            if not got.wait(timeout):
+            deadline = time.time() + timeout
+            while time.time() < deadline and not got.is_set():
+                got.wait(0.5)
+                if click and not opts.get("clicked_at") and found and time.time() > deadline - timeout + 15:
+                    break                   # the button wasn't found: what the page plays by itself
+            if not found:
                 return None
             # A moment more: the playlist that lists every quality often comes right after.
             time.sleep(1.2)
-            best = min(found, key=lambda f: (0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1,
-                                             found.index(f)))
+            after = [f for f in found if f[2] >= opts.get("clicked_at", 0)] or found
+            best = min(after, key=lambda f: (0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1,
+                                             after.index(f)))
             return {"url": best[0], "headers": best[1]}
         finally:
             try:

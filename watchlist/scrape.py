@@ -126,14 +126,37 @@ def fetch(url, referer="", limit=MAX_PAGE, timeout=TIMEOUT):
         raise ScrapeError(f"couldn't reach the site ({getattr(e, 'reason', e)})") from e
 
 
+_VOID = {"img", "br", "input", "meta", "link", "source", "hr", "wbr", "area", "base", "col", "track", "embed", "param"}
+# Words that mark a link or button as one of an episode's streams (a server, sub or dub,
+# a quality, a download), not an episode.
+SERVER_WORDS = re.compile(r"\b(?:servers?|mirrors?|sources?|providers?|hosts?|sub(?:bed|s)?|soft-?sub|hard-?sub|dub(?:bed)?|raw|"
+                          r"english|japanese|audio|quality|\d{3,4}p|hd-?\d|sd|fhd|download|vidstream\w*|stream\s*\d|player\s*\d|option\s*\d)\b",
+                          re.I)
+_KIND_OF_STREAM = (("dub", re.compile(r"\bdub|\benglish\b|\beng\b", re.I)), ("raw", re.compile(r"\braw\b", re.I)),
+                   ("sub", re.compile(r"\bsub|\bsoft-?sub|\bhard-?sub|\bjapanese\b", re.I)))
+
+
+def stream_kind(*texts):
+    """"sub", "dub", "raw" or "" from what a stream's button and its surroundings say."""
+    joined = " ".join(t for t in texts if t)
+    for kind, pattern in _KIND_OF_STREAM:
+        if pattern.search(joined):
+            return kind
+    return ""
+
+
 class _Page(html.parser.HTMLParser):
-    """The parts of a page that matter here: links (with their text, title and
-    pictures' alt text), embedded players, video tags and meta tags."""
+    """The parts of a page that matter here: links (with their text, title,
+    pictures' alt text and what they sit in), embedded players, video tags,
+    meta tags, and the buttons that switch an episode's stream (servers)."""
 
     def __init__(self, base):
         super().__init__(convert_charrefs=True)
         self.base = base
-        self.links = []            # {"href", "text", "title"}
+        self.links = []            # {"href", "text", "title", "num", "attrs", "ctx"}
+        self.servers = []          # {"label", "url", "attrs", "ctx"}: an episode's streams
+        self._stack = []           # (tag, its class/id/data words) of the elements we're inside
+        self._caps = []            # [depth, server] being read
         self.frames = []
         self.videos = []
         self.metas = {}
@@ -149,12 +172,38 @@ class _Page(html.parser.HTMLParser):
             return ""
         return urllib.parse.urljoin(self.base, html.unescape(value))
 
+    def _ctx(self):
+        return " ".join(c for _, c in self._stack[-5:] if c)
+
     def handle_starttag(self, tag, attrs):
         a = {k: (v or "") for k, v in attrs}
+        own = " ".join(v for k, v in a.items() if k in ("class", "id") or (k.startswith("data-") and len(v) < 40))
+        own = " ".join([own] + [k for k in a if k.startswith("data-")])
+        # A stream / server button: data saying so, or a class or id with "server" in it.
+        is_server = bool(re.search(r"server|mirror|source|provider|stream|embed|player-?btn|episode-?link|data-type", own, re.I)
+                         and (a.get("data-type") or any(k.startswith(("data-server", "data-link", "data-embed", "data-src",
+                                                                       "data-video", "data-url", "data-id", "data-hash"))
+                                                        for k in a)
+                              or re.search(r"\bserver", own, re.I)))
+        if is_server and tag not in ("iframe", "video", "source", "script", "style", "img", "ul", "div") or (
+                is_server and tag == "div" and any(k.startswith(("data-server", "data-link", "data-embed", "data-video")) for k in a)):
+            url = ""
+            for key in ("data-link", "data-embed", "data-src", "data-video", "data-url", "data-iframe", "href"):
+                v = a.get(key) or ""
+                if v.startswith(("http", "//", "/")) and not v.startswith("/#"):
+                    url = self._url(v)
+                    break
+            server = {"label": "", "url": url, "attrs": own, "ctx": self._ctx(), "tag": tag}
+            self.servers.append(server)
+            if tag not in _VOID:
+                self._caps.append([len(self._stack) + 1, server])
+        if tag not in _VOID:
+            self._stack.append((tag, own))
         if tag == "a":
             href = self._url(a.get("href"))
             self._a = {"href": href, "text": "", "title": a.get("title") or a.get("data-title") or "",
-                       "num": a.get("data-number") or a.get("data-ep") or a.get("data-episode") or ""}
+                       "num": a.get("data-number") or a.get("data-ep") or a.get("data-episode") or "",
+                       "attrs": own, "ctx": self._ctx()}
             if not href:
                 self._a = None
         elif tag == "img" and self._a is not None:
@@ -185,6 +234,15 @@ class _Page(html.parser.HTMLParser):
                 self.videos.append(self._url(v))
 
     def handle_endtag(self, tag):
+        if tag not in _VOID:
+            for i in range(len(self._stack) - 1, max(-1, len(self._stack) - 8), -1):
+                if self._stack[i][0] == tag:
+                    depth = i + 1
+                    while self._caps and self._caps[-1][0] >= depth:
+                        cap = self._caps.pop()
+                        cap[1]["label"] = " ".join(cap[1]["label"].split())[:60]
+                    del self._stack[i:]
+                    break
         if tag == "a" and self._a is not None:
             self._a["text"] = " ".join(self._a["text"].split())
             self.links.append(self._a)
@@ -200,6 +258,8 @@ class _Page(html.parser.HTMLParser):
             return
         if self._a is not None:
             self._a["text"] += " " + data
+        for _, server in self._caps:
+            server["label"] += " " + data
         if self._in_title:
             self.title += data
 
@@ -390,26 +450,35 @@ _SE = [re.compile(r"\bs(\d{1,2})[ ._-]*e(\d{1,4})\b", re.I),
 _WATCH = re.compile(r"\b(watch( now| online| episodes?)?|episodes|play( now)?|all episodes|stream)\b", re.I)
 
 
+def _shape(url):
+    """An address with its numbers taken out: links to a title's episodes share one."""
+    parts = urllib.parse.urlsplit(url)
+    return re.sub(r"\d+", "#", parts.path + ("?" + parts.query if parts.query else ""))
+
+
 def episode_links(page):
-    """{(season or None, episode): url} from a title's page."""
-    out = {}
+    """{(season or None, episode): url} from a title's page. A link counts when its
+    text or address says it's an episode ("Episode 5", ".../ep-5", "S02E05"); a
+    bare number ("5") only as one of a run of them that look alike. Buttons for
+    an episode's streams (servers, sub / dub, qualities) are never episodes."""
+    strong, weak = {}, []
     for link in page.links:
         href = link["href"].split("#")[0]
         text = " ".join(x for x in (link["text"], link["title"]) if x)
+        if SERVER_WORDS.search(" ".join((text, link.get("attrs", "")))) or (
+                SERVER_WORDS.search(link.get("ctx", "")) and not re.search(r"episode|\bep\b|\beps\b", link.get("ctx", ""), re.I)):
+            continue
         found = None
         for p in _SE:
             m = p.search(text) or p.search(urllib.parse.unquote(href))
             if m:
                 found = (int(m.group(1)), int(m.group(2)))
                 break
-        if not found and link.get("num", "").isdigit():
-            found = (None, int(link["num"]))
+        bare = False
         if not found:
-            for p in _EP_TEXT:
-                m = p.search(text)
-                if m:
-                    found = (None, int(m.group(1)))
-                    break
+            m = _EP_TEXT[0].search(text) or _EP_TEXT[2].search(text)
+            if m:
+                found = (None, int(m.group(1)))
         if not found:
             path = urllib.parse.unquote(urllib.parse.urlsplit(href).path + "?" + urllib.parse.urlsplit(href).query)
             for p in _EP_HREF:
@@ -417,9 +486,29 @@ def episode_links(page):
                 if m:
                     found = (None, int(m.group(1)))
                     break
-        if found and found[1] > 0 and not re.search(r"\b(next|prev|previous)\b", link["text"], re.I):
-            out.setdefault(found, href)
-    return out
+        if not found and link.get("num", "").isdigit():
+            found = (None, int(link["num"]))              # data-number="5": the site says so
+        if not found and _EP_TEXT[1].search(text):
+            found, bare = (None, int(_EP_TEXT[1].search(text).group(1))), True
+        if not found or found[1] <= 0 or re.search(r"\b(next|prev|previous)\b", link["text"], re.I):
+            continue
+        if bare:
+            weak.append((found, href, link))
+        else:
+            strong.setdefault(found, href)
+    if weak:
+        # Bare numbers: the biggest group of links that look alike (same address but
+        # for the number, or in a list called "episodes"), and only a real run of them.
+        groups = {}
+        for found, href, link in weak:
+            named = bool(re.search(r"episode|\bep\b|\beps\b", link.get("ctx", "") + " " + link.get("attrs", ""), re.I))
+            groups.setdefault(("named",) if named else ("shape", _shape(href)), []).append((found, href))
+        best = max(groups.values(), key=len)
+        numbers = {f[1] for f, _ in best}
+        if len(numbers) >= 3 or (("named",) in groups and groups[("named",)] is best and len(numbers) >= 1):
+            for found, href in best:
+                strong.setdefault(found, href)
+    return strong
 
 
 def pick_episode(eps, season, episode, absolute=None):
@@ -592,6 +681,143 @@ def find_video(page_url, referer="", depth=2, log=None):
     raise ScrapeError("no video the player can use was found on the episode's page", page=final)
 
 
+# ---- an episode's streams (servers, sub / dub) and a stream's qualities
+
+def streams(page):
+    """The ways an episode's page offers it: [{"label", "kind", "url", "how"}].
+    "how": "page" (another page of the site with that stream), "embed" (a player
+    from another site) or "click" (a button its scripts handle: clicked in the
+    hidden browser). Its embedded players count too when nothing names them."""
+    out, seen = [], set()
+    for sv in page.servers:
+        label = sv["label"] or re.sub(r".*?(server|mirror)[-_ ]?", "", sv["attrs"], flags=re.I)[:20] or "Stream"
+        kind = stream_kind(sv["label"], sv["attrs"], sv["ctx"])
+        url = sv["url"]
+        how = "click" if not url else "page" if _same_site(url, page.base) else "embed"
+        key = (label.lower(), kind, url)
+        if key in seen or (how == "page" and url.split("#")[0] == page.base.split("#")[0] and not sv["label"]):
+            continue
+        seen.add(key)
+        out.append({"label": label, "kind": kind, "url": url, "how": how})
+    named = {x["url"] for x in out}
+    for f in dict.fromkeys(page.frames):
+        if f not in named and not _JUNK.search(f) and not re.search(r"facebook|twitter|disqus|google|recaptcha", f):
+            out.append({"label": _host(f) or "Player", "kind": "", "url": f, "how": "embed"})
+    for i, x in enumerate(out):
+        x["id"] = f"{i}:{x['kind']}:{x['label']}"[:80]
+    return out
+
+
+def order_streams(found, prefs):
+    """Streams in the order they're tried: the one you chose last time on this site,
+    then others of the same kind (sub, else what you prefer), raw last."""
+    want_kind = prefs.get("kind") or "sub"
+    want_label = (prefs.get("label") or "").lower()
+
+    def rank(x):
+        return (0 if x["label"].lower() == want_label and x["kind"] == want_kind else 1,
+                0 if x["kind"] == want_kind else 1 if not x["kind"] else 2 if x["kind"] != "raw" else 3,
+                found.index(x))
+    return sorted(found, key=rank)
+
+
+def qualities(url, headers=None):
+    """The qualities an HLS playlist offers: [{"label", "height", "url"}], best first
+    ([] for a single-quality stream or anything else)."""
+    if ".m3u8" not in url.lower():
+        return []
+    req = urllib.request.Request(url, headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
+                                               **{k: v for k, v in (headers or {}).items() if k in ("Referer", "Origin") and v}})
+    try:
+        with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
+            text = r.read(512 * 1024).decode("utf-8", "replace")
+            base = r.geturl()
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+    out, lines = [], text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("#EXT-X-STREAM-INF"):
+            m = re.search(r"RESOLUTION=\d+x(\d+)", line)
+            nxt = next((x.strip() for x in lines[i + 1:i + 3] if x.strip() and not x.startswith("#")), "")
+            if nxt:
+                height = int(m.group(1)) if m else 0
+                out.append({"label": f"{height}p" if height else f"Stream {len(out) + 1}", "height": height,
+                            "url": urllib.parse.urljoin(base, nxt)})
+    seen, unique = set(), []
+    for q in sorted(out, key=lambda q: -q["height"]):
+        if q["label"] not in seen:
+            seen.add(q["label"])
+            unique.append(q)
+    return unique if len(unique) > 1 else []
+
+
+def pick_quality(found, wanted):
+    """The quality to play: the one asked for, else the nearest below it, else the best."""
+    if not found or not wanted or wanted == "auto":
+        return None
+    height = int(re.sub(r"\D", "", str(wanted)) or 0)
+    return next((q for q in found if q["height"] and q["height"] <= height), found[-1]) if height else None
+
+
+# ---- yt-dlp: the players of hundreds of video hosts, and plain pages too
+
+class _Quiet:
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        pass
+
+
+def has_ytdlp():
+    try:
+        import yt_dlp  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def ytdlp_video(url, referer=""):
+    """{"url", "referer", "headers"} for the video yt-dlp finds at an address (an
+    episode's page or the player it embeds), with the exact headers the stream
+    wants (so the player isn't turned away). None when yt-dlp isn't there.
+    Raises ScrapeError when it finds nothing."""
+    try:
+        import yt_dlp
+    except ImportError:
+        return None
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True, "socket_timeout": 12,
+            "extractor_retries": 1, "logger": _Quiet(), "cachedir": False,
+            "http_headers": {"User-Agent": UA, **({"Referer": referer} if referer else {})}}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:  # noqa: BLE001 - yt-dlp's own errors: nothing usable there
+        raise ScrapeError("yt-dlp found no video there (" + re.sub(r"^ERROR:\s*|\x1b\[[0-9;]*m", "", str(e))[:120] + ")") from e
+    while info and info.get("_type") in ("playlist", "multi_video") and info.get("entries"):
+        info = next((x for x in info["entries"] if x), None)
+    if not info:
+        raise ScrapeError("yt-dlp found no video there")
+    formats = [f for f in info.get("formats") or [] if f.get("url")]
+    hls = [f for f in formats if str(f.get("protocol", "")).startswith("m3u8") and f.get("manifest_url")]
+    both = [f for f in formats if f.get("vcodec") != "none" and f.get("acodec") != "none"]
+    chosen = hls[-1] if hls else both[-1] if both else (formats[-1] if formats else info)
+    video = chosen.get("manifest_url") if hls else chosen.get("url") or info.get("url")
+    if not video:
+        raise ScrapeError("yt-dlp found no video there")
+    headers = dict(chosen.get("http_headers") or info.get("http_headers") or {})
+    if chosen.get("cookies") or info.get("cookies"):
+        headers["Cookie"] = chosen.get("cookies") or info.get("cookies")
+    headers = {k: str(v) for k, v in headers.items() if k in ("Referer", "Origin", "User-Agent", "Cookie") and v}
+    return {"url": video, "referer": headers.pop("Referer", "") or referer or url, "headers": headers}
+
+
 # ---- putting it together
 
 class Scraper:
@@ -609,6 +835,7 @@ class Scraper:
         self.catch = None
         self.can_render = lambda: True
         self.can_catch = lambda: True
+        self.ytdlp = ytdlp_video       # (a stand-in in tests)
         self.log = []                  # what the last search did, step by step (the site's Test)
 
     def _renderer(self):
@@ -773,53 +1000,106 @@ class Scraper:
         self._remember(item["id"], site, episodes=cached)
         return url, entry, others
 
-    def resolve(self, site, item, season=None, episode=None, pin=""):
+    def resolve(self, site, item, season=None, episode=None, pin="", stream="", quality="", skip=()):
         """Everything needed to play: {"url" (the video, or "" when only the page
-        works), "page", "referer", "entry", "others", "site"}. Raises ScrapeError."""
+        works), "page", "referer", "headers", "entry", "others", "site",
+        "streams" (the episode's sub / dub / server choices), "stream" (the one
+        playing), "qualities", "quality"}. The episode's streams are tried in
+        order (the one you chose before first) until one gives a video; `skip`
+        leaves out streams that didn't play. Raises ScrapeError."""
         self.log = []
         page_url, entry, others = self.episode_page(site, item, season, episode, pin)
         out = {"page": page_url, "entry": entry, "others": others, "site": site["name"], "url": "", "referer": "",
-               "headers": {}}
-        mem = self.remembered(item["id"], site) or {}
-        hit = (mem.get("videos") or {}).get(page_url)
-        if hit and time.time() - hit.get("at", 0) < VIDEO_FOR:
-            out.update(url=hit["url"], referer=hit["referer"], headers=hit.get("headers") or {})
-            self._note(f"Used the video found a few minutes ago: {hit['url']}")
-            return out
+               "headers": {}, "streams": [], "stream": None, "qualities": [], "quality": ""}
         self._note(f"The episode's page: {page_url}")
         if site.get("open") == "browser":
             return out
         prefs = self.memory.setdefault("_sites", {}).setdefault(site["url"], {})
-        got = None
-        if not prefs.get("browser"):
+        if stream:
+            prefs["kind"], prefs["label"] = (stream.split(":", 2) + ["", ""])[1:3]
+        if quality:
+            prefs["quality"] = quality
+        mem = self.remembered(item["id"], site) or {}
+        cache_key = f"{page_url}|{prefs.get('kind', '')}|{prefs.get('label', '')}"
+        hit = (mem.get("videos") or {}).get(cache_key)
+        if hit and not skip and time.time() - hit.get("at", 0) < VIDEO_FOR:
+            out.update({k: hit.get(k) for k in ("url", "referer", "headers", "streams", "stream", "qualities")})
+            self._note(f"Used the video found a few minutes ago: {hit['url']}")
+            return self._with_quality(out, prefs)
+
+        text, final = self._read(page_url, lambda p: bool(streams(p) or videos_in(p, "")))
+        page = parse(text, final)
+        found = order_streams(streams(page), prefs)
+        out["streams"] = [{k: x[k] for k in ("id", "label", "kind")} for x in found]
+        if found:
+            names = ", ".join(x["label"] + (f" ({x['kind']})" if x["kind"] else "") for x in found[:8])
+            self._note(f"{len(found)} stream{'s' if len(found) != 1 else ''}: {names}")
+        tries = [x for x in found if x["id"] not in skip][:4] or ([] if found else [None])
+        errors = []
+        for x in tries:
             try:
-                got = find_video(page_url, referer=entry["url"], log=self.log)
+                got = self._stream_video(page_url, entry, prefs, x, text, final)
             except ScrapeError as e:
-                self._note(f"Not found by reading the page ({e})")
-                if not self._catcher():
-                    e.page = e.page or page_url
-                    raise
-        if not got and self._catcher():
-            self._note("Opening the episode in a hidden browser window and starting its player…")
-            caught = self.catch(page_url)
-            if not caught:
-                raise ScrapeError("its player didn't ask for a video within half a minute "
-                                  "(it may need a click on a server button, or a sign-in)", page=page_url)
-            headers = caught.get("headers") or {}
-            got = {"url": caught["url"], "referer": headers.get("Referer") or page_url, "headers": headers}
-            self._note(f"Caught the video its player asked for: {caught['url']}")
-            if not prefs.get("browser"):
-                prefs["browser"] = True        # this site's videos need the browser: straight there next time
-        elif not got:
-            raise ScrapeError("no video the player can use was found on the episode's page", page=page_url)
+                errors.append(f"{x['label'] if x else 'the page'}: {e}")
+                self._note(f"  {errors[-1]}")
+                continue
+            out.update(url=got["url"], referer=got["referer"], headers=got.get("headers") or {},
+                       stream=({k: x[k] for k in ("id", "label", "kind")} if x else None))
+            out["qualities"] = [{k: q[k] for k in ("label", "height", "url")} for q in qualities(got["url"], out["headers"] | {"Referer": out["referer"]})]
+            videos = {k: v for k, v in (mem.get("videos") or {}).items() if time.time() - v.get("at", 0) < VIDEO_FOR}
+            videos[cache_key] = {k: out[k] for k in ("url", "referer", "headers", "streams", "stream", "qualities")} | {"at": time.time()}
+            self._remember(item["id"], site, videos=videos)
+            return self._with_quality(out, prefs)
+        raise ScrapeError("; ".join(errors) if errors else "no video the player can use was found on the episode's page",
+                          page=page_url)
+
+    def _with_quality(self, out, prefs):
+        q = pick_quality(out.get("qualities") or [], prefs.get("quality"))
+        out["master"] = out["url"]
+        if q:
+            out["url"], out["quality"] = q["url"], q["label"]
         else:
-            self._note(f"Found the video: {got['url']}")
-        out.update(url=got["url"], referer=got["referer"], headers=got.get("headers") or {})
-        videos = {k: v for k, v in (mem.get("videos") or {}).items() if time.time() - v.get("at", 0) < VIDEO_FOR}
-        videos[page_url] = {"url": got["url"], "referer": got["referer"], "headers": got.get("headers") or {},
-                            "at": time.time()}
-        self._remember(item["id"], site, videos=videos)
+            out["quality"] = "auto" if out.get("qualities") else ""
         return out
+
+    def _stream_video(self, page_url, entry, prefs, x, text, final):
+        """{"url", "referer", "headers"} for one of an episode's streams (None: the page as it is)."""
+        if x is None or x["how"] in ("embed", "page"):
+            target, ref = (page_url, entry["url"]) if x is None else (x["url"], page_url)
+            of = f" of {x['label']}" if x else ""
+            way = prefs.get("way") or ("browser" if prefs.get("browser") else "")
+            if way not in ("ytdlp", "browser"):
+                try:
+                    got = find_video(target, referer=ref, log=self.log)
+                    self._note(f"Found the video{of}: {got['url']}")
+                    return got
+                except ScrapeError as e:
+                    self._note(f"Not found by reading {target} ({e})")
+            if way != "browser":
+                try:
+                    got = self.ytdlp(target, referer=ref)
+                    if got:
+                        self._note(f"yt-dlp found the video{of}: {got['url']}")
+                        prefs["way"] = "ytdlp"
+                        return got
+                    self._note("(yt-dlp isn't in this copy of the app)")
+                except ScrapeError as e:
+                    self._note(f"  {e}")
+            if not self._catcher():
+                raise ScrapeError("its video was found neither by reading the page nor by yt-dlp")
+        if not self._catcher():
+            raise ScrapeError("this stream's button only works in a browser")
+        choosing = f" and choosing {x['label']}" if x else ""
+        self._note(f"Opening the episode in a hidden browser window{choosing}…")
+        target = x["url"] if x and x["how"] == "page" else page_url
+        caught = self.catch(target, click=({"label": x["label"], "kind": x["kind"]} if x and x["how"] != "page" else None))
+        if not caught:
+            raise ScrapeError("its player didn't ask for a video within half a minute")
+        headers = caught.get("headers") or {}
+        self._note(f"Caught the video its player asked for: {caught['url']}")
+        prefs["browser"], prefs["way"] = True, "browser"
+        return {"url": caught["url"], "referer": headers.get("Referer") or page_url,
+                "headers": {k: v for k, v in headers.items() if k != "Referer"}}
 
     def diagnose(self, site, item, season=None, episode=None):
         """The site's Test: everything again from scratch (nothing remembered is

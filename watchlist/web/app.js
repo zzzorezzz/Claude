@@ -4550,11 +4550,24 @@ async function playScraped(wrap, opts = {}) {
   try {
     res = await api('POST', `/api/items/${item.id}/scraped`, {
       site: site.id, season: wrap.st.ep.season, episode: wrap.st.ep.episode, entry: opts.entry || '',
-      open_page: !!opts.openPage, from_start: !!opts.fromStart, run: `${Date.now()}-${run}` });
+      open_page: !!opts.openPage, from_start: !!opts.fromStart, run: `${Date.now()}-${run}`,
+      stream: opts.stream || '', quality: opts.quality || '' });
   } catch (e) { if (run === wrap.st.scrapeRun) { fail(e); if (wrap.isConnected) watchChoice(wrap); } return; }
   if (!wrap.isConnected || run !== wrap.st.scrapeRun) return;      // (skipped to another site meanwhile)
   const others = (res.others || []).filter((o) => o.url !== res.entry?.url);
   const next = sites[(sites.indexOf(site) + 1) % sites.length];
+  // The episode's streams (sub / dub / servers) and the stream's qualities, as on ani-cli: pick any.
+  const kindTag = (k) => ({ sub: 'Sub · ', dub: 'Dub · ', raw: 'Raw · ' }[k] || '');
+  const chips = `${(res.streams || []).length > 1 ? `<div class="scrape-chips"><span class="muted small">Stream</span>${res.streams.map((x) => `<button class="chip-btn ${res.stream?.id === x.id ? 'on' : ''}" data-stream="${esc(x.id)}">${esc(kindTag(x.kind) + x.label)}</button>`).join('')}</div>` : ''}
+    ${(res.qualities || []).length ? `<div class="scrape-chips"><span class="muted small">Quality</span>${[...res.qualities.map((q) => q.label), 'auto'].map((q) => `<button class="chip-btn ${(res.quality || 'auto') === q ? 'on' : ''}" data-quality="${esc(q)}">${q === 'auto' ? 'Auto' : esc(q)}</button>`).join('')}</div>` : ''}
+    ${(res.tried || []).length ? `<p class="muted small">Didn't play: ${esc(res.tried.join(' · '))}</p>` : ''}`;
+  const chipClick = (e) => {
+    const st = e.target.closest('[data-stream]');
+    const q = e.target.closest('[data-quality]');
+    if (st) { playScraped(wrap, { site: site.id, stream: st.dataset.stream }); return true; }
+    if (q) { playScraped(wrap, { site: site.id, stream: res.stream?.id || '', quality: q.dataset.quality }); return true; }
+    return false;
+  };
   const nextBtn = sites.length > 1 ? `<button class="btn ${res.ok ? 'btn-ghost' : 'btn-white'}" data-x="next">${res.ok ? 'Not right? ' : ''}Try ${esc(next.name)} ›</button>` : '';
   const pickList = others.length ? `<details class="scrape-others" ${res.ok ? '' : 'open'}><summary>${res.ok ? 'Not the right title? Pick another' : 'Pick the right title'}</summary>
     <div class="file-list">${others.map((o, i) => `<button data-pick="${i}"><span class="tag">${o.score}%</span><span class="fname">${esc(o.name)}</span></button>`).join('')}</div></details>` : '';
@@ -4564,8 +4577,9 @@ async function playScraped(wrap, opts = {}) {
       <div class="btns" style="justify-content:center;margin-top:12px">
         ${nextBtn}
         ${res.page ? `<button class="btn ${nextBtn ? 'btn-ghost' : 'btn-white'}" data-x="page">Open the page in the browser instead</button>` : ''}
-        <button class="btn btn-ghost" data-x="back">Back</button></div></div>${pickList}`);
+        <button class="btn btn-ghost" data-x="back">Back</button></div>${chips}</div>${pickList}`);
     body.addEventListener('click', (e) => {
+      if (chipClick(e)) return;
       const x = e.target.closest('[data-x]')?.dataset.x;
       const pick = e.target.closest('[data-pick]');
       if (x === 'page') playScraped(wrap, { ...opts, site: site.id, openPage: true });
@@ -4586,8 +4600,9 @@ async function playScraped(wrap, opts = {}) {
     ${res.player === 'mpv' ? '<div class="live muted small" id="live">Opening the player…</div>' : ''}
     <div class="btns" style="justify-content:center"><button class="btn btn-white" data-x="done">Done</button>
       ${nextBtn}
-      ${inBrowser ? '' : '<button class="btn btn-ghost" data-x="page">Open the page in the browser instead</button>'}</div></div>${pickList}`);
+      ${inBrowser ? '' : '<button class="btn btn-ghost" data-x="page">Open the page in the browser instead</button>'}</div>${chips}</div>${pickList}`);
   body.addEventListener('click', (e) => {
+    if (chipClick(e)) return;                  // (the new stream replaces the one playing)
     const x = e.target.closest('[data-x]')?.dataset.x;
     const pick = e.target.closest('[data-pick]');
     if (x === 'done') closeModal(wrap);

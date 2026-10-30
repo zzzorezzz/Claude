@@ -145,6 +145,7 @@ class ScraperTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.scraper = scrape.Scraper(self.tmp.name)
+        self.scraper.ytdlp = lambda url, referer="": None        # (yt-dlp has tests of its own)
         self.site = scrape.clean([{"name": "Mine", "url": base + "/search?q={title}"}])[0]
 
     def test_finds_the_entry_the_episode_and_its_video(self):
@@ -222,7 +223,7 @@ class PlayScrapedTest(ServerBase):
         played = []
         with mock.patch.object(self.app.scraper, "resolve", return_value=found), \
                 mock.patch.object(player, "find_mpv", return_value="mpv"), \
-                mock.patch.object(self.app.player, "play", side_effect=lambda s: played.append(s) or s):
+                mock.patch.object(self.app.player, "play", side_effect=lambda s: played.append(s) or setattr(s, "pos", 3.0) or s):
             status, res = self.call("POST", f"/api/items/{self.item['id']}/scraped", {})
         self.assertEqual(status, 200, res)
         self.assertEqual(res["player"], "mpv")
@@ -436,7 +437,7 @@ class BrowserFallbackTest(ScraperTest):
     def test_a_player_built_with_javascript_is_caught_in_the_hidden_browser(self):
         _Site.pages["/ep/haikyuu-5"] = "<div id=player></div><script src=/player.js></script>"
         caught = []
-        self.scraper.catch = lambda url: caught.append(url) or {
+        self.scraper.catch = lambda url, click=None: caught.append(url) or {
             "url": "https://cdn.test/hls/x.m3u8", "headers": {"Referer": "https://embed.test/e/1", "Origin": "https://embed.test"}}
         got = self.scraper.resolve(self.site, anime("Haikyuu!!"), 1, 5)
         self.assertEqual(caught, [self.base + "/ep/haikyuu-5"])
@@ -454,11 +455,11 @@ class BrowserFallbackTest(ScraperTest):
 
     def test_without_the_hidden_browser_it_says_so(self):
         _Site.pages["/ep/haikyuu-5"] = "<div id=player></div>"
-        self.scraper.catch = lambda url: None
+        self.scraper.catch = lambda url, click=None: None
         self.scraper.can_catch = lambda: False
         with self.assertRaises(scrape.ScrapeError) as e:
             self.scraper.resolve(self.site, anime("Haikyuu!!"), 1, 5)
-        self.assertIn("no video", str(e.exception))
+        self.assertIn("neither by reading the page nor by yt-dlp", str(e.exception))
 
     def test_the_sites_test_shows_each_step_and_keeps_your_choice(self):
         item = anime("Haikyuu!!")
@@ -489,6 +490,112 @@ class SkippedSiteTest(PlayScrapedTest):
                                                                           "item_id": self.item["id"]})
         self.assertEqual((status, res["steps"]), (200, ["a"]))
         self.assertIsNone(d.call_args[0][2])                       # a film: no season or episode
+
+
+# ---- like ani-cli: the episodes, each episode's streams (sub / dub / servers) and qualities
+
+SERVERS_PAGE = """<div class="episodes-list"><a href="/watch/x/ep-1">1</a><a href="/watch/x/ep-2">2</a><a href="/watch/x/ep-3">3</a></div>
+<div class="servers"><div class="server-group" data-type="sub">SUB:
+  <a class="server-item" data-server-id="4" href="/watch/x/ep-1?server=4">HD-1</a>
+  <a class="server-item" data-server-id="1" href="/watch/x/ep-1?server=1">HD-2</a>
+  <a class="server-item" href="/watch/x/ep-1?s=3">3</a></div>
+ <div class="server-group" data-type="dub">DUB: <a class="server-item" data-server-id="4" href="/watch/x/ep-1?server=5">HD-1</a></div></div>
+<ul class="mirrors"><li><a href="/m/1">1</a></li><li><a href="/m/2">2</a></li></ul>"""
+
+
+class StreamsTest(unittest.TestCase):
+    def test_stream_buttons_arent_episodes(self):
+        page = scrape.parse(SERVERS_PAGE, "https://s.test/watch/x/ep-1")
+        self.assertEqual(sorted(scrape.episode_links(page)), [(None, 1), (None, 2), (None, 3)])
+        found = scrape.streams(page)
+        self.assertEqual([(x["label"], x["kind"]) for x in found], [("HD-1", "sub"), ("HD-2", "sub"), ("3", "sub"), ("HD-1", "dub")])
+
+    def test_a_lone_number_isnt_an_episode(self):
+        page = scrape.parse('<a href="/about/2">2</a><a href="/watch/x/episode-7">Next</a>', "https://s.test/x")
+        self.assertEqual(scrape.episode_links(page), {})
+
+    def test_your_choice_comes_first(self):
+        page = scrape.parse(SERVERS_PAGE, "https://s.test/watch/x/ep-1")
+        ordered = scrape.order_streams(scrape.streams(page), {"kind": "dub", "label": "HD-1"})
+        self.assertEqual((ordered[0]["label"], ordered[0]["kind"]), ("HD-1", "dub"))
+        self.assertEqual(scrape.order_streams(scrape.streams(page), {})[0]["kind"], "sub")
+
+    def test_buttons_without_an_address_are_clicked(self):
+        page = scrape.parse('<ul><li class="server-item" data-type="dub" data-server-id="2">Vidstreaming</li></ul>', "https://s.test/ep")
+        [x] = scrape.streams(page)
+        self.assertEqual((x["label"], x["kind"], x["how"]), ("Vidstreaming", "dub", "click"))
+
+    def test_qualities_of_a_playlist(self):
+        master = ("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=854x480\n480/index.m3u8\n"
+                  "#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080\n1080/index.m3u8\n"
+                  "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720\n720/index.m3u8\n")
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = master.encode()
+        response.geturl.return_value = "https://cdn.test/v/master.m3u8"
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            qs = scrape.qualities("https://cdn.test/v/master.m3u8", {"Referer": "https://s.test/"})
+        self.assertEqual([q["label"] for q in qs], ["1080p", "720p", "480p"])
+        self.assertEqual(qs[1]["url"], "https://cdn.test/v/720/index.m3u8")
+        self.assertEqual(scrape.pick_quality(qs, "720p")["label"], "720p")
+        self.assertEqual(scrape.pick_quality(qs, "900p")["label"], "720p")
+        self.assertIsNone(scrape.pick_quality(qs, "auto"))
+
+
+class YtdlpStepTest(ScraperTest):
+    def test_yt_dlp_is_asked_when_reading_the_page_finds_nothing(self):
+        _Site.pages["/ep/haikyuu-5"] = '<iframe src="https://host.test/e/abc"></iframe>'
+        asked = []
+        self.scraper.ytdlp = lambda url, referer="": asked.append((url, referer)) or {
+            "url": "https://cdn.host.test/abc/master.m3u8", "referer": "https://host.test/", "headers": {"Origin": "https://host.test"}}
+        got = self.scraper.resolve(self.site, anime("Haikyuu!!"), 1, 5)
+        self.assertEqual(got["url"], "https://cdn.host.test/abc/master.m3u8")
+        self.assertIn(("https://host.test/e/abc", self.base + "/ep/haikyuu-5"), asked)
+        self.assertEqual(self.scraper.memory["_sites"][self.site["url"]]["way"], "ytdlp")
+
+    @unittest.skipUnless(scrape.has_ytdlp(), "needs yt-dlp")
+    def test_the_real_yt_dlp_reads_a_page(self):
+        _Site.pages["/plain"] = f'<html><head><title>Ep</title></head><body><video src="{self.base}/v/ep.mp4"></video></body></html>'
+        _Site.pages["/v/ep.mp4"] = "x"
+        got = scrape.ytdlp_video(self.base + "/plain", referer=self.base + "/")
+        self.assertEqual(got["url"], self.base + "/v/ep.mp4")
+
+
+class PlayerClosingTest(PlayScrapedTest):
+    def test_a_stream_the_player_cant_play_moves_on_to_the_next(self):
+        first = {"url": "https://cdn.mine.test/a.m3u8", "referer": "", "page": "https://mine.test/1", "headers": {},
+                 "entry": {"url": "https://mine.test/a", "name": "Inception"}, "others": [], "site": "Mine",
+                 "streams": [{"id": "0:sub:HD-1", "label": "HD-1", "kind": "sub"}, {"id": "1:sub:HD-2", "label": "HD-2", "kind": "sub"}],
+                 "stream": {"id": "0:sub:HD-1", "label": "HD-1", "kind": "sub"}, "qualities": [], "quality": ""}
+        second = dict(first, url="https://cdn.mine.test/b.m3u8", stream={"id": "1:sub:HD-2", "label": "HD-2", "kind": "sub"})
+        calls = []
+
+        def resolve(*a, **k):
+            calls.append(k.get("skip"))
+            return first if len(calls) == 1 else second
+
+        def play(session):
+            if session.entries[0]["path"].endswith("a.m3u8"):
+                session.ended = True                 # closed straight away
+            else:
+                session.pos = 1.0
+            return session
+        with mock.patch.object(self.app.scraper, "resolve", side_effect=resolve), \
+                mock.patch.object(player, "find_mpv", return_value="mpv"), \
+                mock.patch.object(player, "why_it_stopped", return_value="the site refused it (403)"), \
+                mock.patch.object(self.app.player, "play", side_effect=play):
+            status, res = self.call("POST", f"/api/items/{self.item['id']}/scraped", {})
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["stream"]["label"], "HD-2")
+        self.assertEqual(res["tried"], ["HD-1: the site refused it (403)"])
+        self.assertEqual(calls[1], ("0:sub:HD-1",))
+
+    def test_why_the_player_stopped(self):
+        log = Path(tempfile.gettempdir()) / "watchanything-mpv.log"
+        log.write_text("[ffmpeg] https: HTTP error 403 Forbidden\n[cplayer] Failed to open https://x/a.m3u8.\n", encoding="utf-8")
+        self.assertIn("403", player.why_it_stopped(None))
+        log.write_text("[cplayer] Failed to recognize file format.\n", encoding="utf-8")
+        self.assertEqual(player.why_it_stopped(None), "Failed to recognize file format.")
 
 
 if __name__ == "__main__":

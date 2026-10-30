@@ -8,6 +8,7 @@ later and mark an episode watched when you reach its end.
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -79,6 +80,35 @@ def script_args(skip_intro, theme="violet"):
     if SKIP_SCRIPT.is_file():
         args += [f"--script={SKIP_SCRIPT}", f"--script-opts-append=watchlist-skip={'yes' if skip_intro else 'no'}"]
     return args
+
+
+def web_log():
+    """Where the player writes what happened, for videos from your own sites (so a
+    stream that won't play can say why)."""
+    path = Path(tempfile.gettempdir()) / "watchanything-mpv.log"
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return str(path)
+
+
+def why_it_stopped(session):
+    """A short reason from the player's log when it closed without playing ("" if unknown)."""
+    try:
+        lines = (Path(tempfile.gettempdir()) / "watchanything-mpv.log").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines[-200:]):
+        m = re.search(r"HTTP error (\d{3})|(\d{3}) (?:Forbidden|Not Found|Unauthorized)", line)
+        if m:
+            code = m.group(1) or m.group(2)
+            return {"403": "the site refused it (403 - it may only play on its own page)", "404": "it's gone (404)",
+                    "401": "it needs a sign-in (401)"}.get(code, f"the site answered {code}")
+    for line in reversed(lines[-200:]):
+        if re.search(r"Failed to open|Failed to recognize file format|No video or audio streams|Errors when loading file", line):
+            return line.split("]", 1)[-1].strip()[:140]
+    return ""
 
 
 def finished(pos, dur):
