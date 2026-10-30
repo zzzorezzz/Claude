@@ -9,7 +9,7 @@ Latest builds:
 | Platform | State | Run |
 |---|---|---|
 | Android (APK) | Phone player, torrents, watch parties. Built and emulator-checked before round 10. | [run 40896330674](https://github.com/zzzorezzz/Claude/actions/runs/40896330674) |
-| Windows (exe) | Round 10, the ad blocker, video sites the ani-cli way (streams, qualities, yt-dlp bundled). Built, tests green. | [run 41022598257](https://github.com/zzzorezzz/Claude/actions/runs/41022598257) |
+| Windows (exe) | Round 10, the ad blocker, video sites (streams, qualities, yt-dlp) and the Internet Archive source. Built, tests green. | [run 41033130778](https://github.com/zzzorezzz/Claude/actions/runs/41033130778) |
 | Mac (dmg) | Round 9 + the profile-picture fix. | built with the `[mac]` commit `b757170` |
 
 Windows has everything, including the ani-cli-style video sites and yt-dlp (run 41022598257). Mac and Android don't have round 10. Build only the one the user asks for. `gh` is signed in on the user's PC.
