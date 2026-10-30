@@ -65,7 +65,7 @@ The user wanted it to work like ani-cli on their own (legal) sites. ani-cli's pr
 - **yt-dlp in the builds:** `pip install yt-dlp`, `--hidden-import yt_dlp --collect-submodules yt_dlp`, and the exe self-check requires `yt_dlp`. Android doesn't have it.
 - **Tried for real here** (scratch venv with pywebview, libtorrent, yt-dlp): the hidden window clicked "HD-1" under Dub and caught only the dub stream. All 307 tests pass.
 
-### Waiting for the next Windows build (the user is adding more first; don't build until they say)
+### Built for Windows on 2026-10-30 (with the Internet Archive source)
 
 - **Internet Archive source** (2026-10-30, commit after f98dbdd): "+ Add the Internet Archive" in Settings → Your video sites (site `kind: "archive"`, url `https://archive.org`, no `{title}` needed).
   - `scrape.archive_search` calls `advancedsearch.php` (`mediatype:movies`, sorted by downloads, with the year).
@@ -74,7 +74,8 @@ The user wanted it to work like ani-cli on their own (legal) sites. ani-cli's pr
   - `Scraper._archive` plugs into `resolve`, so qualities, the play window and mpv work as for other sites.
   - `best_entry` now uses a result's year (another year −15; the right year wins ties).
   - Tried live against archive.org: Night of the Living Dead (1968) → its 1080p…240p files.
-- The user declined a generic "JSON API mode" shaped like AnimePahe's API; the Internet Archive was offered instead.
+- Claude declined a generic "JSON API mode" shaped like AnimePahe's API; the Internet Archive was offered instead.
+- Claude also declined tuning the hidden browser's stream clicking for Anikoto (an unlicensed anime site), per the user's own rule about unlicensed streaming sites. The video-site tools stay generic, for the user's own or legal sites.
 
 ### Not tested yet
 
