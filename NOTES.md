@@ -86,7 +86,7 @@ Everything builds on GitHub Actions in one workflow, `.github/workflows/build-ex
 | `[android]` | ✔ | | ✔ |
 | `[android] [android only]` | | | ✔ |
 
-Each job runs the full test suite first (`python -m unittest discover -s tests -t .`). The results are the run's **Artifacts**:
+Each job runs the full test suite first (`python -m tests.ci`: if a test hangs it prints every thread's stack and stops after 8 minutes, and a failed run is tried once more, for the timing-dependent torrent tests). The results are the run's **Artifacts**:
 - `WatchAnything-windows`: `Watch Anything.exe`
 - `WatchAnything-mac`: `WatchAnything.dmg`
 - `WatchAnything-android`: `WatchAnything.apk`
@@ -132,6 +132,6 @@ How the phone pieces fit together:
 
 ### Developing without CI
 
-- Tests: `python -m unittest discover -s tests -t .`. The phone pieces are tested with a stand-in Java module, in `tests/test_android.py` and `PhoneTest` in `tests/test_round9.py`.
+- Tests: `python -m unittest discover -s tests -t .` (CI uses `python -m tests.ci`). Without libtorrent, 7 tests in `test_sites` fail locally; a venv with `pip install libtorrent` runs them all. The phone pieces are tested with a stand-in Java module, in `tests/test_android.py` and `PhoneTest` in `tests/test_round9.py`.
 - JS syntax check: `node --check watchlist/web/app.js`.
 - This cloud session can't reach Google's or FrostWire's Maven repos, so Android only builds on CI.

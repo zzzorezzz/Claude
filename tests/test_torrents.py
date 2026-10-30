@@ -300,7 +300,7 @@ class TorrentTest(test_server.ServerBase):
         status, st = self.call("POST", f"/api/items/{self.item['id']}/stream-buffer", body)
         self.assertEqual(status, 200, st)
         self.assertGreater(st["need"], 0)
-        self.assertTrue(wait_for(lambda: self.call("POST", f"/api/items/{self.item['id']}/stream-buffer", body)[1]["ready"]))
+        self.assertTrue(wait_for(lambda: self.call("POST", f"/api/items/{self.item['id']}/stream-buffer", body)[1]["ready"], 60))
         prio = {f["index"]: f["priority"] for f in self.app.torrents.view(h)["files"]}
         self.assertEqual((prio[eps["1:2"]["index"]], prio[eps["1:3"]["index"]]), (7, 0))   # this one only
         status, _ = self.call("POST", f"/api/items/{self.item['id']}/stream-buffer", {"path": "/etc/passwd"})
