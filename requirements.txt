@@ -1,5 +1,7 @@
 # Optional: gives Watchlist its own window. Without it, the app opens in an
 # Opera GX window (or your browser). Install with: py -m pip install -r requirements.txt
 pywebview>=5.0
+# Browser-grade TLS fingerprint for protected JSON video-site APIs when available.
+curl_cffi>=0.17
 # Trusted HTTPS certificates for the packaged Mac app.
 certifi

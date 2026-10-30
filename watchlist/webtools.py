@@ -55,6 +55,7 @@ vidoomy.com vdo.ai primis.tech aniview.com spotxchange.com springserve.com
 # Adresses that are ads wherever they're served from (players' video ads, pop-under scripts).
 AD_PATH = re.compile(r"popunder|popads|/pop(?:up)?\.js|/vast(?:\.xml|/|\?)|vpaid|/ads?\.js\b|adsbygoogle|/prebid", re.I)
 VIDEO = re.compile(r"\.(m3u8|mpd|mp4|webm|mkv)(?:[?#]|$)", re.I)
+SUBTITLE = re.compile(r"\.(vtt|srt|ass)(?:[?#]|$)", re.I)    # (a player's captions; not its preview thumbnails)
 
 ADBLOCK_JS = r"""(() => {
   if (window.__waAdblock) return; window.__waAdblock = true;
@@ -93,7 +94,7 @@ AUTOPLAY_JS = r"""(() => {
     }
     if (n % 3 === 1) {
       const b = document.querySelector('.jw-icon-display, .jw-display-icon-container, .vjs-big-play-button, .plyr__control--overlaid,'
-        + ' .fp-play, .play-button, .btn-play, .playbutton, [aria-label="Play"], [title="Play"], #play, .play-btn, .vds-play-button');
+        + ' .fp-play, .play-button, .btn-play, .playbutton, [aria-label="Play"], [title="Play"], #play, .play-btn, .vds-play-button, #player > .play');
       if (b) { try { b.click(); } catch (e) {} }
     }
     if (n < 25) setTimeout(kick, 1000);
@@ -112,7 +113,8 @@ CLICK_JS = r"""(() => {
   const kindOk = (el) => {
     if (!want.kind) return true;
     for (let n = el, i = 0; n && i < 6; n = n.parentElement, i += 1) {
-      const t = norm([n.getAttribute && n.getAttribute('data-type'), n.className, n.id, i ? '' : n.textContent].join(' '));
+      const own = i || norm(n.textContent).length > 40 ? '' : n.textContent;
+      const t = norm([n.getAttribute && n.getAttribute('data-type'), n.className, n.id, own].join(' '));
       if (t.includes(want.kind)) return true;
     }
     return false;
@@ -121,11 +123,23 @@ CLICK_JS = r"""(() => {
   const pick = () => {
     tries += 1;
     const els = [...document.querySelectorAll('[data-server-id], [data-server], [data-type] a, [data-type] li, [data-type] button,'
-      + ' [data-link], [data-embed], [class*="server"] a, [class*="server"] li, [class*="server"] button, [class*="server-item"], a, button, li')];
+      + ' [data-link], [data-embed], [class*="server"] a, [class*="server"] li, [class*="server"] button, [class*="server-item"], [class*="episode"], a, button, li, span, div')];
     const label = norm(want.label);
-    const hit = els.find((el) => norm(el.textContent) === label && kindOk(el)) || els.find((el) => norm(el.textContent).includes(label) && kindOk(el));
-    if (hit) { hit.click(); fetch('__CLICKED__').catch(() => {}); return; }
-    if (tries < 20) setTimeout(pick, 600);
+    // The button itself, not a box around it: its name exactly, else the smallest match.
+    const found = els.filter((el) => {
+      const text = norm(el.textContent);
+      const title = norm(el.getAttribute('title') || '');
+      return (text.includes(label) || title.includes(label)) && kindOk(el);
+    });
+    const exact = found.filter((el) => norm(el.textContent) === label);
+    const hit = (exact.length ? exact : found).sort((a, b) => norm(a.textContent).length - norm(b.textContent).length)[0];
+    if (hit) {
+      const clickable = hit.closest('a, button, li, [role="button"]') || hit;
+      clickable.click();
+      fetch('__CLICKED__').catch(() => {});
+      return;
+    }
+    if (tries < 25) setTimeout(pick, 600);
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(pick, 400));
   else setTimeout(pick, 400);
@@ -216,7 +230,13 @@ def _hook(opts, core):
     catch = opts.get("catch")
     if not (opts.get("adblock") or catch):
         return
-    core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All)
+    try:
+        # Every frame: a site's player is usually another site's iframe, whose
+        # requests the two-argument filter never reports.
+        from Microsoft.Web.WebView2.Core import CoreWebView2WebResourceRequestSourceKinds as Kinds
+        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All, Kinds.All)
+    except Exception:  # noqa: BLE001 - an older Edge engine: the page's own requests only
+        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All)
 
     def header(headers, name):
         try:
@@ -237,7 +257,11 @@ def _hook(opts, core):
                       or args.ResourceContext == CoreWebView2WebResourceContext.Media):
             h = args.Request.Headers
             catch(url, {"Referer": header(h, "Referer"), "Origin": header(h, "Origin"),
-                        "User-Agent": header(h, "User-Agent")})
+                        "User-Agent": header(h, "User-Agent"), "Cookie": header(h, "Cookie")})
+        elif catch and SUBTITLE.search(urllib.parse.urlsplit(url).path) and "thumbnail" not in url.lower():
+            subs = opts.setdefault("subs", [])
+            if url not in subs:
+                subs.append(url)
 
     core.WebResourceRequested += on_request
     if catch:
@@ -249,18 +273,33 @@ def _hook(opts, core):
             if "mpegurl" in kind or "dash+xml" in kind or kind.startswith("video/"):
                 h = args.Request.Headers
                 catch(str(args.Request.Uri), {"Referer": header(h, "Referer"), "Origin": header(h, "Origin"),
-                                              "User-Agent": header(h, "User-Agent")})
+                                              "User-Agent": header(h, "User-Agent"), "Cookie": header(h, "Cookie")})
         core.WebResourceResponseReceived += on_response
         try:
             core.IsMuted = True
         except Exception:  # noqa: BLE001 - (an older Edge engine)
             pass
-        core.AddScriptToExecuteOnDocumentCreatedAsync(AUTOPLAY_JS)
+    scripts = []
+    if catch:
+        scripts.append(AUTOPLAY_JS)
         if opts.get("click"):
             import json
-            core.AddScriptToExecuteOnDocumentCreatedAsync(CLICK_JS.replace("__WANT__", json.dumps(opts["click"])))
+            scripts.append(CLICK_JS.replace("__WANT__", json.dumps(opts["click"])))
     if opts.get("adblock"):
-        core.AddScriptToExecuteOnDocumentCreatedAsync(ADBLOCK_JS)
+        scripts.append(ADBLOCK_JS)
+    for script in scripts:
+        core.AddScriptToExecuteOnDocumentCreatedAsync(script)
+
+    # Those are added while the first page is already loading, so it would miss
+    # them: they're run in each page once it's read too (each runs only once).
+    def on_loaded(sender, args):
+        for script in scripts:
+            try:
+                core.ExecuteScriptAsync(script)
+            except Exception:  # noqa: BLE001
+                pass
+    if scripts:
+        core.DOMContentLoaded += on_loaded
 
 
 def page_script(window):
@@ -282,7 +321,9 @@ def _hidden_window(url, opts, title="Watch Anything"):
     patch()
     _pending[url] = opts
     try:
-        return wv.create_window(title, url, width=1280, height=720, hidden=True, focus=False)
+        # Off the screen rather than hidden: a hidden page counts as not being looked
+        # at, and many players then never start (nor ask for their video).
+        return wv.create_window(title, url, width=1280, height=720, x=-10000, y=-10000, focus=False)
     except Exception:  # noqa: BLE001
         _pending.pop(url, None)
         return None
@@ -318,13 +359,12 @@ def render(url, timeout=20, settle=2.5):
 
 
 def catch_video(url, timeout=30, click=None):
-    """{"url", "headers"} for the video a page's player asks for, or None. With
+    """{"url", "headers", "subs"} for the video a page's player asks for, or None. With
     `click` ({"label", "kind"}), that stream's button is clicked first, and only
     what the player asks for after it counts."""
     if not can_catch():
         return None
-    found = []                      # (address, headers, when)
-    got = threading.Event()
+    found, got = [], threading.Event()
     opts = {"adblock": True, "click": click}
 
     def catch(video, headers):
@@ -354,7 +394,7 @@ def catch_video(url, timeout=30, click=None):
             after = [f for f in found if f[2] >= opts.get("clicked_at", 0)] or found
             best = min(after, key=lambda f: (0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1,
                                              after.index(f)))
-            return {"url": best[0], "headers": best[1]}
+            return {"url": best[0], "headers": best[1], "subs": list(opts.get("subs") or [])}
         finally:
             try:
                 win.destroy()

@@ -1490,7 +1490,7 @@ class App:
             self.open_link(found["page"])
             self.store.update(item["id"], patch)
             return dict(result, player="browser")
-        entry = {"path": found["url"], "sub": None, "key": key, "web": True, "referer": found["referer"],
+        entry = {"path": found["url"], "sub": self._web_sub(found), "key": key, "web": True, "referer": found["referer"],
                  "headers": found.get("headers") or {},
                  "label": self._label(item, key), "name": f"{item['title']} ({site['name']})"}
         entry["party"] = dict(self._party_meta(item, key), url=found["url"], referer=found["referer"],
@@ -1535,7 +1535,8 @@ class App:
                 found = self.scraper.resolve(site, item, season, episode, skip=tuple(skip))
             except scrape.ScrapeError as e:
                 return dict(result, ok=False, error="; ".join(tried + [str(e)]), tried=tried, others=found["others"])
-            entry = dict(entry, path=found["url"], referer=found["referer"], headers=found.get("headers") or {})
+            entry = dict(entry, path=found["url"], sub=self._web_sub(found), referer=found["referer"],
+                         headers=found.get("headers") or {})
             entry["party"] = dict(entry["party"], url=found["url"], referer=found["referer"],
                                   headers=found.get("headers") or {})
             result.update(stream=found.get("stream"), quality=found.get("quality") or "",
@@ -1548,6 +1549,13 @@ class App:
             # The next episode's page, found now: it starts quickly too.
             threading.Thread(target=self._prefetch_episode, args=(site, item, season, episode + 1), daemon=True).start()
         return dict(result, player="mpv", resumed_at=start, file=entry["name"], tried=tried)
+
+    @staticmethod
+    def _web_sub(found):
+        """The subtitles the site's player loaded: shown with the sub track, not over a dub."""
+        if (found.get("stream") or {}).get("kind") == "dub":
+            return None
+        return found.get("subtitle") or None
 
     @staticmethod
     def _web_started(session, wait=12):

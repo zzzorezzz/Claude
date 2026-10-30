@@ -4,6 +4,7 @@ as this one's), old torrent files cleaned up, related entries by name, and
 the settings that came with them."""
 
 import http.server
+import json
 import os
 import tempfile
 import threading
@@ -84,6 +85,117 @@ class PageTest(unittest.TestCase):
         self.assertEqual(eps[(2, 6)], "https://site.test/tv/dark/season-2/episode-6")
         self.assertEqual(scrape.pick_episode(eps, None, 2), "https://site.test/watch/show-episode-2")
 
+    def test_episode_index_beats_a_few_mirror_links(self):
+        # Mirrors for a handful of episodes often precede a full title-page
+        # episode index. The index, not the first mirror, must drive playback.
+        html = "".join(f'<a href="https://mirror{n}.test/watch?episode={n}">Episode {n}</a>' for n in range(1, 7))
+        html += "".join(f'<a href="/watch/show-episode-{n}">Episode {n}</a>' for n in range(1, 25))
+        eps = scrape.episode_links(scrape.parse(html, "https://site.test/anime/show"))
+        self.assertEqual(len(eps), 24)
+        self.assertEqual(eps[(None, 24)], "https://site.test/watch/show-episode-24")
+
+    def test_anikoto_xhr_episode_index_uses_data_numbers_not_server_mirrors(self):
+        listing = "".join(f'<a href="#" data-id="{9000 + n}" data-num="{n}"><b>{n}</b></a>' for n in range(1, 25))
+        eps = scrape._anikoto_episode_links("https://anikototv.to/watch/show/ep-1", listing)
+        self.assertEqual(len(eps), 24)
+        self.assertEqual(eps[(None, 24)], "https://anikototv.to/watch/show/ep-24")
+
+    def test_cookie_from_browser_capture_is_preserved_for_the_player(self):
+        # Some hosts bind a playlist to the browser session that opened it.
+        page = "https://site.test/watch/episode-1"
+        scraper = scrape.Scraper(tempfile.mkdtemp())
+        scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/master.m3u8", "headers": {
+            "Referer": page, "Cookie": "session=abc", "User-Agent": "browser",
+        }})
+        got = scraper._catch_stream(page, None)
+        self.assertEqual(got["headers"]["Cookie"], "session=abc")
+
+    def test_ra_catches_autoplay_before_ambiguous_mirror_buttons(self):
+        scraper = scrape.Scraper(tempfile.mkdtemp())
+        scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/master.m3u8", "headers": {}})
+        [site] = scrape.clean([{"name": "RA", "url": "https://site.test/search?q={title}", "ra": True}])
+        item = anime("A show", id="ra")
+        with mock.patch.object(scraper, "episode_page", return_value=("https://site.test/watch/ep-1", {"url": "https://site.test/title"}, [])):
+            got = scraper.resolve(site, item, 1, 1)
+        self.assertEqual(got["url"], "https://cdn.test/master.m3u8")
+        scraper.catch.assert_called_once_with("https://site.test/watch/ep-1", click=None)
+
+    def test_anikoto_sub_and_dub_servers_come_from_its_server_list(self):
+        page = "https://anikototv.to/watch/show-x1/ep-2"
+        html = ('<div id="watch-main" class="watch" data-id="77"></div><div id="w-servers"></div>'
+                '<input type="hidden" id="report-server-id" value=""><input name="server_name" id="w-report-server-label">')
+        listing = json.dumps({"result": '<a href="#" data-id="5" data-num="1" data-ids="AAA"></a>'
+                                        '<a href="#" data-id="6" data-num="2" data-ids="BBB"></a>'})
+        servers = json.dumps({"result": '<div class="servers"><div class="type" data-type="sub"><ul>'
+                                        '<li data-sv-id="1" data-link-id="s1">HD-1</li></ul></div>'
+                                        '<div class="type" data-type="dub"><ul><li data-sv-id="1" data-link-id="d1">HD-1</li>'
+                                        '<li data-sv-id="2" data-link-id="d2">Vidstream-1</li></ul></div></div>'})
+        calls = []
+
+        def fake(url, referer="", xhr=False, **kw):
+            calls.append(url)
+            return (listing if "/episode/list/77" in url else servers), url
+        with mock.patch.object(scrape, "fetch", side_effect=fake):
+            html += scrape._anikoto_servers(page, html)
+        self.assertTrue(calls[1].endswith("/ajax/server/list?servers=BBB"))
+        found = scrape.streams(scrape.parse(html, page))
+        self.assertEqual([(x["label"], x["kind"], x["how"]) for x in found],
+                         [("HD-1", "sub", "click"), ("HD-1", "dub", "click"), ("Vidstream-1", "dub", "click")])
+
+    def test_episode_numbers_titled_with_their_tracks_are_still_episodes(self):
+        html = "".join(f'<a href="/watch/show?ep={n}" title="{n} Sub · Dub">{n}</a>' for n in range(1, 6))
+        html += '<a href="/watch/show?ep=1&server=2" title="Sub">HD-1</a>'
+        eps = scrape.episode_links(scrape.parse(html, "https://reanime.to/watch/show"))
+        self.assertEqual(eps[(None, 5)], "https://reanime.to/watch/show?ep=5")
+        self.assertEqual(eps[(None, 1)], "https://reanime.to/watch/show?ep=1")
+
+    def test_a_dub_on_a_site_whose_address_picks_the_track_is_autoplayed(self):
+        scraper = scrape.Scraper(tempfile.mkdtemp())
+        scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/dub.m3u8", "headers": {}})
+        [site] = scrape.clean([{"name": "ReAnime", "url": "https://reanime.to/search?q={title}", "ra": True}])
+        page = "https://reanime.to/watch/show?ep=2"
+        with mock.patch.object(scraper, "episode_page", return_value=(page, {"url": "https://reanime.to/anime/show"}, [])):
+            got = scraper.resolve(site, anime("A show", id="rean"), 1, 2, stream="x:dub:")
+        scraper.catch.assert_called_once_with("https://reanime.to/watch/show?ep=2&lang=dub", click=None)
+        self.assertEqual(got["stream"]["kind"], "dub")
+
+    def test_a_scrambled_playlist_is_not_handed_to_the_player(self):
+        def answer(body):
+            r = mock.MagicMock()
+            r.__enter__.return_value.read.return_value = body
+            return r
+        with mock.patch("urllib.request.urlopen", return_value=answer(b"Ub6MLrtlMWmNFvQTidhpN77VPiRy")):
+            self.assertTrue(scrape.scrambled_playlist("https://cdn.test/master.m3u8"))
+        with mock.patch("urllib.request.urlopen", return_value=answer(b"\xef\xbb\xbf#EXTM3U\n#EXT-X-VERSION:3")):
+            self.assertFalse(scrape.scrambled_playlist("https://cdn.test/master.m3u8"))
+        self.assertFalse(scrape.scrambled_playlist("https://cdn.test/video.mp4"))
+        scraper = scrape.Scraper(tempfile.mkdtemp())
+        scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/master.m3u8", "headers": {}})
+        with mock.patch.object(scrape, "scrambled_playlist", return_value=True):
+            self.assertIsNone(scraper._catch_stream("https://site.test/watch/ep-1", None))
+
+    def test_a_caught_players_subtitle_goes_to_the_player(self):
+        scraper = scrape.Scraper(tempfile.mkdtemp())
+        scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/master.m3u8", "headers": {},
+                                                "subs": ["https://cdn.test/subs/en.vtt"]})
+        [site] = scrape.clean([{"name": "RA", "url": "https://site.test/search?q={title}", "ra": True}])
+        with mock.patch.object(scraper, "episode_page", return_value=("https://site.test/watch/ep-1", {"url": "https://site.test/title"}, [])):
+            got = scraper.resolve(site, anime("A show", id="ra-subs"), 1, 1)
+        self.assertEqual(got["subtitle"], "https://cdn.test/subs/en.vtt")
+
+    def test_ra_dub_choice_clicks_the_dub_button_not_autoplay(self):
+        scraper = scrape.Scraper(tempfile.mkdtemp())
+        scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/dub.m3u8", "headers": {}})
+        [site] = scrape.clean([{"name": "RA", "url": "https://site.test/search?q={title}", "ra": True}])
+        item = anime("A show", id="ra-dub")
+        html = '<div data-type="sub"><a data-server-id="1">HD-1</a></div><div data-type="dub"><a data-server-id="2">HD-1</a></div>'
+        with mock.patch.object(scraper, "episode_page", return_value=("https://site.test/watch/ep-1", {"url": "https://site.test/title"}, [])), \
+                mock.patch.object(scrape, "fetch", return_value=(html, "https://site.test/watch/ep-1")):
+            got = scraper.resolve(site, item, 1, 1, stream="x:dub:HD-1")
+        self.assertEqual(got["url"], "https://cdn.test/dub.m3u8")
+        self.assertEqual(got["stream"]["kind"], "dub")
+        scraper.catch.assert_called_once_with("https://site.test/watch/ep-1", click={"label": "HD-1", "kind": "dub"})
+
     def test_videos_on_a_page(self):
         html = """<video><source src="/media/ep1-720p.mp4"></video>
           <script>var player = {"file":"https:\\/\\/cdn.site.test\\/hls\\/ep1\\/master.m3u8","poster":"https:\\/\\/cdn.site.test\\/thumb.jpg"};</script>
@@ -96,6 +208,62 @@ class PageTest(unittest.TestCase):
         self.assertIn("https://cdn.site.test/ep1-1080p.mp4", found)
         self.assertNotIn("https://cdn.site.test/trailer.mp4", found)
         self.assertLess(found.index("https://cdn.site.test/ep1-1080p.mp4"), found.index("https://site.test/media/ep1-720p.mp4"))
+
+
+class AnimePaheApiTest(unittest.TestCase):
+    """The AnimePahe preset is an API/session flow, not an HTML search page."""
+
+    def setUp(self):
+        [self.site] = scrape.clean([{
+            "name": "AnimePahe", "url": "https://animepahe.pw/api?m=search&q={title}",
+            "types": ["anime"], "ap": True, "ra": True,
+        }])
+
+    def test_the_preset_is_kept_as_a_json_api_with_video_catching(self):
+        self.assertEqual(self.site["kind"], "json_api")
+        self.assertTrue(self.site["ra"])
+        self.assertEqual(scrape.search_url(self.site, "Frieren: Beyond Journey's End"),
+                         "https://animepahe.pw/api?m=search&q=Frieren%3A+Beyond+Journey%27s+End")
+
+    def test_session_search_and_release_list_make_play_pages(self):
+        def payload(url, origin="", renderer=None):
+            if "m=search" in url:
+                return {"data": [{"session": "anime-session", "title": "Frieren: Beyond Journey's End", "year": 2023}]}
+            return {"data": [
+                {"episode": "1", "session": "episode-one"},
+                {"episode": 2, "session": "episode-two"},
+            ], "last_page": 1}
+
+        with mock.patch.object(scrape, "_json_payload", side_effect=payload):
+            found = scrape.json_api_search(self.site, ["Frieren"])
+            episodes = scrape.json_api_episodes(self.site, "anime-session")
+
+        self.assertEqual(found[0]["url"], "https://animepahe.pw/play/anime-session")
+        self.assertEqual([x["url"] for x in episodes], [
+            "https://animepahe.pw/play/anime-session/episode-one",
+            "https://animepahe.pw/play/anime-session/episode-two",
+        ])
+
+    def test_catch_toggle_uses_the_hidden_browser_only_when_enabled(self):
+        scraper = scrape.Scraper(tempfile.mkdtemp())
+        scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/episode.m3u8", "headers": {}})
+        page = "https://animepahe.pw/play/anime-session/episode-one"
+        entry = {"url": "https://animepahe.pw/play/anime-session"}
+
+        caught = scraper._stream_video(self.site, page, entry, {}, None, "", page)
+        self.assertEqual(caught["url"], "https://cdn.test/episode.m3u8")
+        scraper.catch.assert_called_once_with(page, click=None)
+
+        ordinary = dict(self.site, catch=False)
+        with mock.patch.object(scrape, "find_video", return_value={"url": "https://cdn.test/plain.m3u8", "referer": page}) as read:
+            resolved = scraper._stream_video(ordinary, page, entry, {}, None, "", page)
+        self.assertEqual(resolved["url"], "https://cdn.test/plain.m3u8")
+        read.assert_called_once_with(page, referer=entry["url"], log=scraper.log)
+
+    def test_cloudflare_response_is_not_reported_as_a_missing_series(self):
+        with mock.patch.object(scrape, "fetch", return_value=("<html>Just a moment... Cloudflare</html>", "https://animepahe.pw/api")):
+            with self.assertRaisesRegex(scrape.ScrapeError, "Cloudflare browser check"):
+                scrape.json_api_search(self.site, ["Frieren"])
 
 
 class _Site(http.server.BaseHTTPRequestHandler):

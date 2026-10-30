@@ -31,7 +31,7 @@ jobs:
         run: python -m tests.ci
 
       - name: Install build tools
-        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi yt-dlp
+        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi yt-dlp curl_cffi
 
       - name: Get mpv (the built-in player)
         shell: pwsh
@@ -69,6 +69,7 @@ jobs:
           --name "Watch Anything"
           --hidden-import libtorrent --collect-binaries libtorrent
           --hidden-import yt_dlp --collect-submodules yt_dlp
+          --collect-all curl_cffi
           --icon packaging/watchlist.ico
           --add-data "watchlist/web;watchlist/web"
           --add-data "watchlist/mpv_scripts;watchlist/mpv_scripts"
@@ -157,7 +158,7 @@ jobs:
         run: python -m tests.ci
 
       - name: Install build tools
-        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi yt-dlp
+        run: python -m pip install pyinstaller==6.22.1 pywebview==6.2 certifi yt-dlp curl_cffi
 
       - name: Get mpv (the built-in player)
         env:
