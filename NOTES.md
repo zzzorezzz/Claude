@@ -75,6 +75,7 @@ The user wanted it to work like ani-cli on their own (legal) sites. ani-cli's pr
   - `best_entry` now uses a result's year (another year −15; the right year wins ties).
   - Tried live against archive.org: Night of the Living Dead (1968) → its 1080p…240p files.
 - Claude declined a generic "JSON API mode" shaped like AnimePahe's API; the Internet Archive was offered instead.
+- Also not done, on purpose: making the hidden browser better at clicking through sub/dub server lists and capturing the video from embedded third-party players (aimed at unlicensed streaming sites). Don't extend the scraper in that direction.
 - Claude also declined tuning the hidden browser's stream clicking for Anikoto (an unlicensed anime site), per the user's own rule about unlicensed streaming sites. The video-site tools stay generic, for the user's own or legal sites.
 
 ### Not tested yet
