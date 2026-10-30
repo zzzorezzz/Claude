@@ -9,10 +9,10 @@ Latest builds:
 | Platform | State | Run |
 |---|---|---|
 | Android (APK) | Phone player, torrents, watch parties. Built and emulator-checked before round 10. | [run 40896330674](https://github.com/zzzorezzz/Claude/actions/runs/40896330674) |
-| Windows (exe) | Round 9 + the profile-picture fix. Not rebuilt since the Android work or round 10. | [run 40884107879](https://github.com/zzzorezzz/Claude/actions/runs/40884107879) |
+| Windows (exe) | Round 10 (with the Android work's shared changes). Built, tests green. | [run 40975144354](https://github.com/zzzorezzz/Claude/actions/runs/40975144354) |
 | Mac (dmg) | Round 9 + the profile-picture fix. | built with the `[mac]` commit `b757170` |
 
-Round 10 was committed with `[mac only]` (no build): none of the platforms has it yet. Build only the one the user asks for.
+Round 10 is built for Windows only; Mac and Android don't have it yet. Build only the one the user asks for. `gh` is signed in on the user's PC.
 
 ### Round 10 (2026-10-30)
 
@@ -39,7 +39,7 @@ Round 10 was committed with `[mac only]` (no build): none of the platforms has i
 
 - A real phone ↔ real computer party, and a phone joining as a guest.
 - The scraper against the user's real site (only tested with a local fake site). Sites that build their player with JavaScript only open in the browser.
-- Round 10 on any built app.
+- Round 10 in the built Windows app (built, not tried by hand yet); Mac and Android aren't built.
 
 ### Setup guide
 
