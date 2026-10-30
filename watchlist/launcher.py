@@ -397,11 +397,14 @@ def open_window(url, title, width=1100, height=800, kind="", on_top=False):
             return True
         except Exception:  # noqa: BLE001 - it was closed
             _windows.pop(kind, None)
+    from . import webtools
+    webtools.patch()                     # ads and pop-ups blocked in its pages (when that's on)
     try:
         win = _webview.create_window(title, url, width=width, height=height, background_color="#0d0f1a",
                                      text_select=True, on_top=on_top)
     except Exception:  # noqa: BLE001 - the window couldn't be made
         return False
+    webtools.page_script(win)
     if kind:
         _windows[kind] = win
         try:

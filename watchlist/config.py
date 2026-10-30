@@ -78,6 +78,8 @@ DEFAULT_SETTINGS = {
     # Your picture in watch parties (a small "data:image/jpeg;base64,..."), or "".
     "party_avatar": "",
     "party_server": "syncplay.pl:8999",
+    # Block ads, pop-ups and pop-unders in the built-in browser (and the hidden one that finds videos).
+    "adblock": True,
     # Small sounds for small things (adding a title, closing a window, changing section).
     "sounds": True,
     # Ask "Do you want help setting it up?" when the app opens (until "Don't show again").
@@ -98,7 +100,7 @@ OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
 TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "custom_player_path", "sync_folder",
              "downloads_folder", "last_folder", "gemini_api_key", "groq_api_key", "openrouter_api_key",
              "party_name", "party_server")
-BOOL_KEYS = ("queue_next_episodes", "skip_intro", "sounds", "setup_prompt")
+BOOL_KEYS = ("queue_next_episodes", "skip_intro", "sounds", "setup_prompt", "adblock")
 
 
 def clean_ai_custom(helpers):

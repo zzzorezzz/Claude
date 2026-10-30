@@ -459,8 +459,55 @@ def _unescape_js(text):
             .replace("\\u0026", "&").replace("&amp;", "&"))
 
 
+_PACKED = re.compile(r"eval\(function\(p,a,c,k,e,[rd]\)\{.*?\}\(\s*'(?P<p>(?:[^'\\]|\\.)*)'\s*,\s*(?P<a>\d+)\s*,"
+                     r"\s*(?P<c>\d+)\s*,\s*'(?P<k>(?:[^'\\]|\\.)*)'\.split\('\|'\)", re.S)
+_B64 = re.compile(r"[\"']([A-Za-z0-9+/]{40,}={0,2})[\"']")
+
+
+def _base_n(number, base):
+    digits = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    out = ""
+    while True:
+        number, r = divmod(number, base)
+        out = digits[r] + out
+        if not number:
+            return out
+
+
+def unpack(text):
+    """Scripts packed with the common "eval(function(p,a,c,k,e,d)" packer, unpacked
+    (players hide their video's address that way); "" when there are none."""
+    out = []
+    for m in _PACKED.finditer(text):
+        try:
+            payload, base, count = m.group("p"), int(m.group("a")), int(m.group("c"))
+            words = m.group("k").split("|")
+            if base > 62 or count > 100000:
+                continue
+            table = {_base_n(i, base): (words[i] if i < len(words) and words[i] else _base_n(i, base)) for i in range(count)}
+            out.append(re.sub(r"\b\w+\b", lambda w: table.get(w.group(0), w.group(0)), payload.replace("\\'", "'")))
+        except (ValueError, IndexError):
+            continue
+    return "\n".join(out)
+
+
+def decoded_strings(text):
+    """Text hidden in base64 strings (atob("aHR0cHM6Ly...")) that holds a web address."""
+    import base64
+    out = []
+    for m in _B64.finditer(text):
+        try:
+            plain = base64.b64decode(m.group(1) + "=" * (-len(m.group(1)) % 4)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if "http" in plain:
+            out.append(plain)
+    return "\n".join(out[:50])
+
+
 def videos_in(page, text):
-    """Every video address on a page, best first."""
+    """Every video address on a page, best first (also inside packed scripts and base64)."""
+    text = "\n".join(x for x in (text, unpack(text), decoded_strings(text)) if x)
     found = list(page.videos)
     for key in ("og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"):
         if page.metas.get(key):
@@ -513,25 +560,30 @@ def _check(url, referer):
     return True
 
 
-def find_video(page_url, referer="", depth=2):
+def find_video(page_url, referer="", depth=2, log=None):
     """{"url", "referer"} for the video on an episode's page. Raises ScrapeError."""
+    log = log if log is not None else []
     text, final = fetch(page_url, referer=referer)
     page = parse(text, final)
     found = videos_in(page, text)
+    log.append(f"{'  ' * (2 - depth)}Read {final}: {len(found)} video address{'es' if len(found) != 1 else ''}, "
+               f"{len(page.frames)} embedded player{'s' if len(page.frames) != 1 else ''}")
     if found:
         with ThreadPoolExecutor(3) as pool:
             ok = list(pool.map(lambda u: _check(u, final), found[:3]))
         for u, good in zip(found[:3], ok):
             if good:
                 return {"url": u, "referer": final}
+            log.append(f"{'  ' * (2 - depth)}  {u} didn't answer with a video")
     if depth > 0 and page.frames:
         frames = [f for f in dict.fromkeys(page.frames) if not _JUNK.search(f)
                   and not re.search(r"(facebook|twitter|disqus|google|recaptcha|youtube\.com/embed/videoseries)", f)][:4]
 
         def inside(f):
             try:
-                return find_video(f, referer=final, depth=depth - 1)
-            except ScrapeError:
+                return find_video(f, referer=final, depth=depth - 1, log=log)
+            except ScrapeError as e:
+                log.append(f"{'  ' * (3 - depth)}{f}: {e}")
                 return None
         with ThreadPoolExecutor(4) as pool:
             for got in pool.map(inside, frames):
@@ -551,6 +603,39 @@ class Scraper:
         self.memory = read_json(self.path, {})
         if not isinstance(self.memory, dict):
             self.memory = {}
+        # Set by the app: a page read after its JavaScript has run ((html, address) or None),
+        # and a video caught from a page's player ({"url", "headers"} or None).
+        self.render = None
+        self.catch = None
+        self.can_render = lambda: True
+        self.can_catch = lambda: True
+        self.log = []                  # what the last search did, step by step (the site's Test)
+
+    def _renderer(self):
+        return self.render if self.render and self.can_render() else None
+
+    def _catcher(self):
+        return self.catch if self.catch and self.can_catch() else None
+
+    def _note(self, text):
+        self.log.append(text)
+
+    def _read(self, url, enough, referer=""):
+        """A page as a ScrapeError-free (text, address): read as it is, and when that
+        isn't `enough` (nothing found that's needed), after its JavaScript has run."""
+        try:
+            text, final = fetch(url, referer=referer)
+        except ScrapeError as e:
+            text, final = "", url
+            self._note(f"Couldn't read {url} ({e})")
+        if enough(parse(text, final)) or not self._renderer():
+            return text, final
+        self._note(f"Nothing usable in {final} as it is - reading it after its scripts have run")
+        got = self.render(url)
+        if got:
+            return got[0], got[1]
+        self._note("The page couldn't be opened in the hidden browser")
+        return text, final
 
     def _save(self):
         with self.lock:
@@ -583,8 +668,15 @@ class Scraper:
                 text, final = fetch(url)
             except ScrapeError as e:
                 errors.append(str(e))
-                return []
-            return candidates(parse(text, final), final)
+                text, final = "", url
+            found = candidates(parse(text, final), final)
+            if not found and self._renderer():
+                got = self.render(url)                 # results the site only shows with JavaScript
+                if got:
+                    found = candidates(parse(got[0], got[1]), got[1])
+                    if found and errors:
+                        errors.pop()
+            return found
 
         found, seen = [], set()
         with ThreadPoolExecutor(4) as pool:
@@ -595,7 +687,10 @@ class Scraper:
                         found.append(r)
         if not found and errors and len(errors) == len(queries[:4]):
             raise ScrapeError(f"{site['name']}: {errors[0]}")
-        return best_entry(found, wanted)
+        ranked = best_entry(found, wanted)
+        self._note(f"Searched {site['name']} for {', '.join(queries[:4])}: {len(ranked)} results"
+                   + (" - best: " + "; ".join(f"{c['name']} ({c['score']}%)" for c in ranked[:3]) if ranked else ""))
+        return ranked
 
     def _entry(self, site, item, season, pin=""):
         """(entry url, entry name, other results) for a title, remembered."""
@@ -617,6 +712,7 @@ class Scraper:
                               + (f" (closest: {ranked[0]['name']})" if ranked else ""))
         best = ranked[0]
         got = {"url": best["url"], "name": best["name"], "score": best["score"], "at": time.time()}
+        self._note(f"Opened {best['name']} ({best['score']}% match): {best['url']}")
         entries[key] = got
         others = [{"url": c["url"], "name": c["name"], "score": c["score"]} for c in ranked[:8]]
         self._remember(item["id"], site, entries=entries, others=others, episodes={})
@@ -633,18 +729,17 @@ class Scraper:
 
     def _episodes(self, entry_url, fresh=False):
         """{(season, episode): url} on a title's page (following its Watch link if needed)."""
-        text, final = fetch(entry_url)
+        text, final = self._read(entry_url, lambda p: bool(episode_links(p) or watch_links(p, entry_url)))
         page = parse(text, final)
         eps = episode_links(page)
         if not eps:
             for link in watch_links(page, final):
-                try:
-                    t2, f2 = fetch(link, referer=final)
-                except ScrapeError:
-                    continue
+                t2, f2 = self._read(link, lambda p: bool(episode_links(p)), referer=final)
                 eps = episode_links(parse(t2, f2))
                 if eps:
+                    self._note(f"Followed its link {link}")
                     break
+        self._note(f"{final}: {len(eps)} episode link{'s' if len(eps) != 1 else ''}")
         return eps, final, page, text
 
     def episode_page(self, site, item, season, episode, pin=""):
@@ -681,25 +776,64 @@ class Scraper:
     def resolve(self, site, item, season=None, episode=None, pin=""):
         """Everything needed to play: {"url" (the video, or "" when only the page
         works), "page", "referer", "entry", "others", "site"}. Raises ScrapeError."""
+        self.log = []
         page_url, entry, others = self.episode_page(site, item, season, episode, pin)
-        out = {"page": page_url, "entry": entry, "others": others, "site": site["name"], "url": "", "referer": ""}
+        out = {"page": page_url, "entry": entry, "others": others, "site": site["name"], "url": "", "referer": "",
+               "headers": {}}
         mem = self.remembered(item["id"], site) or {}
         hit = (mem.get("videos") or {}).get(page_url)
         if hit and time.time() - hit.get("at", 0) < VIDEO_FOR:
-            out.update(url=hit["url"], referer=hit["referer"])
+            out.update(url=hit["url"], referer=hit["referer"], headers=hit.get("headers") or {})
+            self._note(f"Used the video found a few minutes ago: {hit['url']}")
             return out
+        self._note(f"The episode's page: {page_url}")
         if site.get("open") == "browser":
             return out
-        try:
-            got = find_video(page_url, referer=entry["url"])
-        except ScrapeError as e:
-            e.page = e.page or page_url
-            raise
-        out.update(url=got["url"], referer=got["referer"])
+        prefs = self.memory.setdefault("_sites", {}).setdefault(site["url"], {})
+        got = None
+        if not prefs.get("browser"):
+            try:
+                got = find_video(page_url, referer=entry["url"], log=self.log)
+            except ScrapeError as e:
+                self._note(f"Not found by reading the page ({e})")
+                if not self._catcher():
+                    e.page = e.page or page_url
+                    raise
+        if not got and self._catcher():
+            self._note("Opening the episode in a hidden browser window and starting its player…")
+            caught = self.catch(page_url)
+            if not caught:
+                raise ScrapeError("its player didn't ask for a video within half a minute "
+                                  "(it may need a click on a server button, or a sign-in)", page=page_url)
+            headers = caught.get("headers") or {}
+            got = {"url": caught["url"], "referer": headers.get("Referer") or page_url, "headers": headers}
+            self._note(f"Caught the video its player asked for: {caught['url']}")
+            if not prefs.get("browser"):
+                prefs["browser"] = True        # this site's videos need the browser: straight there next time
+        elif not got:
+            raise ScrapeError("no video the player can use was found on the episode's page", page=page_url)
+        else:
+            self._note(f"Found the video: {got['url']}")
+        out.update(url=got["url"], referer=got["referer"], headers=got.get("headers") or {})
         videos = {k: v for k, v in (mem.get("videos") or {}).items() if time.time() - v.get("at", 0) < VIDEO_FOR}
-        videos[page_url] = {"url": got["url"], "referer": got["referer"], "at": time.time()}
+        videos[page_url] = {"url": got["url"], "referer": got["referer"], "headers": got.get("headers") or {},
+                            "at": time.time()}
         self._remember(item["id"], site, videos=videos)
         return out
+
+    def diagnose(self, site, item, season=None, episode=None):
+        """The site's Test: everything again from scratch (nothing remembered is
+        used), each step written down. {"ok", "steps", "url", "error"}."""
+        mem = self.memory.get(item["id"], {}).pop(site["id"], None) or {}
+        pinned = {k: v for k, v in (mem.get("entries") or {}).items() if v.get("pinned")}
+        if pinned and mem.get("link") == site["url"]:
+            self._remember(item["id"], site, entries=pinned)    # (a title you picked yourself is kept)
+        self.memory.get("_sites", {}).pop(site["url"], None)
+        try:
+            got = self.resolve(site, item, season, episode)
+            return {"ok": True, "steps": list(self.log), "url": got["url"], "page": got["page"], "error": ""}
+        except ScrapeError as e:
+            return {"ok": False, "steps": list(self.log), "url": "", "page": e.page, "error": str(e)}
 
 
 def test_site(site, query):

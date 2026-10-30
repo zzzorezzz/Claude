@@ -4541,27 +4541,35 @@ async function playScraped(wrap, opts = {}) {
   if (!site) { watchChoice(wrap, { reason: 'Add your own video site in Settings → Your video sites first.' }); return; }
   const what = whatLabel(wrap);
   watchBody(wrap, `<div class="center"><div class="spinner"></div><h2>Finding ${esc(what)} on ${esc(site.name)}…</h2>
-    <p class="muted small">It plays as soon as its video is found - nothing is downloaded first.</p></div>`);
+    <p class="muted small">It plays as soon as its video is found - nothing is downloaded first.${S.status.catch_videos ? ' When the page needs it, its player is started in a hidden browser window to catch the video (a few seconds more).' : ''}</p>
+    ${sites.length > 1 ? `<div class="btns" style="justify-content:center;margin-top:10px"><button class="btn btn-ghost btn-sm" data-x="skip">Skip - try ${esc(sites[(sites.indexOf(site) + 1) % sites.length].name)} instead</button></div>` : ''}</div>`);
+  wrap.st.scrapeRun = (wrap.st.scrapeRun || 0) + 1;
+  const run = wrap.st.scrapeRun;
+  $('[data-x="skip"]', wrap)?.addEventListener('click', () => playScraped(wrap, { site: sites[(sites.indexOf(site) + 1) % sites.length].id }));
   let res;
   try {
     res = await api('POST', `/api/items/${item.id}/scraped`, {
       site: site.id, season: wrap.st.ep.season, episode: wrap.st.ep.episode, entry: opts.entry || '',
-      open_page: !!opts.openPage, from_start: !!opts.fromStart });
-  } catch (e) { fail(e); if (wrap.isConnected) watchChoice(wrap); return; }
-  if (!wrap.isConnected) return;
+      open_page: !!opts.openPage, from_start: !!opts.fromStart, run: `${Date.now()}-${run}` });
+  } catch (e) { if (run === wrap.st.scrapeRun) { fail(e); if (wrap.isConnected) watchChoice(wrap); } return; }
+  if (!wrap.isConnected || run !== wrap.st.scrapeRun) return;      // (skipped to another site meanwhile)
   const others = (res.others || []).filter((o) => o.url !== res.entry?.url);
+  const next = sites[(sites.indexOf(site) + 1) % sites.length];
+  const nextBtn = sites.length > 1 ? `<button class="btn ${res.ok ? 'btn-ghost' : 'btn-white'}" data-x="next">${res.ok ? 'Not right? ' : ''}Try ${esc(next.name)} ›</button>` : '';
   const pickList = others.length ? `<details class="scrape-others" ${res.ok ? '' : 'open'}><summary>${res.ok ? 'Not the right title? Pick another' : 'Pick the right title'}</summary>
     <div class="file-list">${others.map((o, i) => `<button data-pick="${i}"><span class="tag">${o.score}%</span><span class="fname">${esc(o.name)}</span></button>`).join('')}</div></details>` : '';
   if (!res.ok) {
     const body = watchBody(wrap, `<div class="center"><div class="result-icon">🔎</div><h2>Couldn't play it from ${esc(res.site)}</h2>
       <p class="sub">${esc(res.error)}</p>
       <div class="btns" style="justify-content:center;margin-top:12px">
-        ${res.page ? '<button class="btn btn-white" data-x="page">Open the page in the browser instead</button>' : ''}
+        ${nextBtn}
+        ${res.page ? `<button class="btn ${nextBtn ? 'btn-ghost' : 'btn-white'}" data-x="page">Open the page in the browser instead</button>` : ''}
         <button class="btn btn-ghost" data-x="back">Back</button></div></div>${pickList}`);
     body.addEventListener('click', (e) => {
       const x = e.target.closest('[data-x]')?.dataset.x;
       const pick = e.target.closest('[data-pick]');
       if (x === 'page') playScraped(wrap, { ...opts, site: site.id, openPage: true });
+      else if (x === 'next') playScraped(wrap, { site: next.id });
       else if (x === 'back') watchChoice(wrap);
       else if (pick) playScraped(wrap, { site: site.id, entry: others[Number(pick.dataset.pick)].url });
     });
@@ -4577,11 +4585,13 @@ async function playScraped(wrap, opts = {}) {
       ${res.note ? `<br><span class="small muted">${esc(res.note)}</span>` : ''}</p>
     ${res.player === 'mpv' ? '<div class="live muted small" id="live">Opening the player…</div>' : ''}
     <div class="btns" style="justify-content:center"><button class="btn btn-white" data-x="done">Done</button>
+      ${nextBtn}
       ${inBrowser ? '' : '<button class="btn btn-ghost" data-x="page">Open the page in the browser instead</button>'}</div></div>${pickList}`);
   body.addEventListener('click', (e) => {
     const x = e.target.closest('[data-x]')?.dataset.x;
     const pick = e.target.closest('[data-pick]');
     if (x === 'done') closeModal(wrap);
+    else if (x === 'next') { api('POST', '/api/player/stop').catch(() => {}); playScraped(wrap, { site: next.id }); }
     else if (x === 'page') { api('POST', '/api/player/stop').catch(() => {}); api('POST', '/api/open', { url: res.page }).catch(fail); }
     else if (pick) playScraped(wrap, { site: site.id, entry: others[Number(pick.dataset.pick)].url });
   });
@@ -4952,6 +4962,7 @@ function drawVideoSites(wrap) {
         <div class="site-test-out small"></div></div>
       <div class="svc-tools">
         <button type="button" class="svc-btn" data-s="vsite-test" title="Search it and show what's read">Test</button>
+        <button type="button" class="svc-btn" data-s="vsite-diag" title="Play an episode from it step by step, and see each step">Test an episode</button>
         <button type="button" class="svc-btn danger" data-s="vsite-del" title="Remove">✕</button></div></div>`).join('')
     : '<p class="muted small">No video site yet.</p>';
 }
@@ -4979,6 +4990,7 @@ async function videoSiteAction(wrap, a, row) {
   }
   const i = Number(row?.dataset.i);
   if (a === 'vsite-del') { wrap.vsites.splice(i, 1); drawVideoSites(wrap); return; }
+  if (a === 'vsite-diag') { openSiteTest(wrap.vsites[i]); return; }
   if (a === 'vsite-test') {
     const out = $('.site-test-out', row);
     out.innerHTML = '<span class="spin-dot"></span> Searching it…';
@@ -4990,6 +5002,37 @@ async function videoSiteAction(wrap, a, row) {
         : `<span class="bad">No results read for "${esc(r.query)}"</span> from ${esc(r.url)}. Check the link has {title} where the name goes.`;
     } catch (err) { out.innerHTML = `<span class="bad">${esc(err.message)}</span>`; }
   }
+}
+
+// A video site's "Test an episode": the whole way from the search to the video, each step shown.
+function openSiteTest(site) {
+  const titles = S.items.filter((i) => (site.types || []).includes(i.type)).sort((a, b) => a.title.localeCompare(b.title));
+  if (!site.url) { toast('Paste its search link first', 'error'); return; }
+  if (!titles.length) { toast(`Add a title it's for (${(site.types || []).map((t) => TYPE_PLURAL[t]).join(', ')}) to your list first`, 'error'); return; }
+  const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Test ${esc(site.name || 'your site')} with an episode</h2>
+    <p class="sub">Goes the whole way - the search, the title's page, the episode, its video - from scratch, and shows what it found at each step.</p>
+    <div class="mv-row"><label class="field" style="flex:1"><span>Title</span><select class="select" id="st-title">
+      ${titles.map((t) => `<option value="${esc(t.id)}">${esc(t.title)}</option>`).join('')}</select></label>
+      <label class="field mv-ep"><span>Season</span><input class="input q-num" id="st-season" type="number" min="1" value="1"></label>
+      <label class="field mv-ep"><span>Episode</span><input class="input q-num" id="st-ep" type="number" min="1" value="1"></label></div>
+    <div class="btns"><button class="btn btn-red" data-st="run">Run the test</button></div>
+    <div id="st-out"></div></div>`, 'site-test-modal');
+  $('[data-st="run"]', m).addEventListener('click', async (e) => {
+    const out = $('#st-out', m);
+    e.target.disabled = true;
+    out.innerHTML = `<p class="muted"><span class="spin-dot"></span> Testing… ${S.status.catch_videos ? 'this can take up to a minute when the hidden browser is needed.' : ''}</p>`;
+    try {
+      const r = await api('POST', '/api/video-sites/diagnose', { site, item_id: $('#st-title', m).value,
+        season: Number($('#st-season', m).value) || 1, episode: Number($('#st-ep', m).value) || 1 });
+      out.innerHTML = `<div class="${r.ok ? 'ok' : 'bad'}" style="margin:14px 0 8px"><b>${r.ok ? '✓ Found the video' : `✗ ${esc(r.error)}`}</b></div>
+        <ol class="st-steps">${r.steps.map((x) => `<li>${esc(x)}</li>`).join('')}</ol>
+        ${r.url ? `<p class="small">Video: <code>${esc(r.url)}</code></p>` : ''}
+        ${r.page ? `<button class="btn btn-ghost btn-sm" data-st="page">Open the episode's page in the browser</button>` : ''}`;
+      $('[data-st="page"]', out)?.addEventListener('click', () => api('POST', '/api/open', { url: r.page }).catch(fail));
+    } catch (err) { out.innerHTML = `<p class="bad">${esc(err.message)}</p>`; }
+    e.target.disabled = false;
+  });
 }
 
 const COUNTRIES = 'PK IN AE SA QA KW OM BH BD LK NP AF IR TR EG MA US CA GB IE AU NZ DE FR IT ES NL BE SE NO DK FI PL PT CH AT CZ RO GR HU JP KR CN HK TW SG MY ID TH PH VN BR MX AR CL CO PE ZA NG KE'.split(' ');
@@ -5138,6 +5181,10 @@ async function openSettings(focus = '') {
       <small>Your streaming services, sites and trailers open here. <b>Built-in browser</b> opens them in a simple window of this app${data.status.windows ? '' : ' (when the app runs in its own window)'},
         and remembers the sites you sign in to, even after you close the app; <b>Recommended</b> uses Opera GX when it's installed, else your default browser.</small>
       <div class="btns" style="margin-top:6px"><button class="btn btn-ghost btn-sm" type="button" data-s="sign-out">Sign out of every site in the built-in browser</button></div></label>
+    <label class="check-row desktop-only"><input type="checkbox" name="adblock" ${s.adblock !== false ? 'checked' : ''}>
+      <span><b>Block ads and pop-ups in the built-in browser</b><br><span class="muted small">Ad and tracker servers are refused before they load,
+        pop-up and pop-under windows are stopped, and the invisible layers some players put over the video (that open an ad when clicked) are removed.
+        ${data.status.platform === 'win32' ? '' : 'On a Mac, what a page script can do: pop-ups and ad boxes.'} Applies to windows opened after you save.</span></span></label>
     <div class="field" id="svc-field"><span>Your streaming services and sites</span>
       <div id="svc-list"></div>
       <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-s="svc-add">+ Add…</button></div>
@@ -5297,6 +5344,7 @@ async function openSettings(focus = '') {
       gemini_api_key: f.get('gemini_api_key'), groq_api_key: f.get('groq_api_key'), openrouter_api_key: f.get('openrouter_api_key'),
       ...(() => { const st = readAiList(wrap); return { ai_custom: st.custom.map(({ keys, ...c }) => c), ai_order: st.order }; })(),
       skip_intro: form.skip_intro.checked, theme: f.get('theme'), sounds: form.sounds.checked,
+      ...(form.adblock ? { adblock: form.adblock.checked } : {}),
       party_name: f.get('party_name'), party_server: f.get('party_server'), party_avatar: f.get('party_avatar'),
     };
   };

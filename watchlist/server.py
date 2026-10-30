@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, discover, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay
+from . import ai, dialogs, discover, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -79,6 +79,8 @@ class App:
         self.torrents = torrents_mod.Torrents(self, self.data_dir)
         self.site_jobs = sites.Jobs(self)
         self.scraper = scrape.Scraper(self.data_dir)                       # your video sites
+        self.scraper.render, self.scraper.catch = self._render_page, self._catch_video
+        self.scraper.can_render, self.scraper.can_catch = webtools.can_render, webtools.can_catch
         self._connected_jobs = {}           # Everything connected being looked for: how far along
         self._filler = ThreadPoolExecutor(4, thread_name_prefix="fill")   # titles added straight away
         self.moods = mood_mod.Jobs(self)                                   # I'm in the mood for…
@@ -88,6 +90,7 @@ class App:
         self._lock = threading.Lock()
         self._ai_streams = {}               # (item, country, services) -> (when, {name: has it})
         self._similar = {}                  # (item, title) -> (when, related entries by name)
+        self._scrape_runs = {}              # item -> the latest "Play online (my sites)" asked for
 
     # ---- syncing between computers
 
@@ -140,10 +143,12 @@ class App:
                              "delete_after": torrents_mod.DELETE_AFTER},
                 "torrent_sites": {t: len(sites.sites_for(s, t)) for t in TYPES},
                 "video_sites": {t: [{"id": x["id"], "name": x["name"]} for x in scrape.sites_for(s, t)] for t in TYPES},
-                "sounds": s["sounds"], "setup_prompt": s["setup_prompt"],
+                "sounds": s["sounds"], "setup_prompt": s["setup_prompt"], "adblock": s["adblock"],
+                "catch_videos": webtools.can_catch(),
                 "windows": launcher.can_open_windows(), "theme": s["theme"]}
 
     def open_link(self, url):
+        webtools.ADBLOCK = self.settings.get()["adblock"]
         browser = launcher.find_browser(self.settings.get()["browser_path"])
         try:
             launcher.open_url(url, browser)
@@ -1291,9 +1296,11 @@ class App:
         web = next((e for e in entries if e.get("web")), None)
         if web:
             # A video from your own site: sent as if from its page (some sites check).
+            headers = web.get("headers") or {}
             extra = ["--network-timeout=60", "--cache=yes", "--demuxer-max-bytes=150MiB",
-                     "--demuxer-readahead-secs=60", f"--user-agent={scrape.UA}"] + (
-                [f"--referrer={web['referer']}"] if web.get("referer") else []) + list(extra)
+                     "--demuxer-readahead-secs=60", f"--user-agent={headers.get('User-Agent') or scrape.UA}"] + (
+                [f"--referrer={web['referer']}"] if web.get("referer") else []) + (
+                [f"--http-header-fields=Origin: {headers['Origin']}"] if headers.get("Origin") else []) + list(extra)
         elif self.torrents.records or any(self.torrents.parse_url(e["path"]) for e in entries):
             # Streams: wait patiently for data, and keep plenty of it ahead.
             extra = ["--network-timeout=180", "--cache=yes", "--demuxer-max-bytes=200MiB",
@@ -1454,8 +1461,15 @@ class App:
         series = item["format"] == "series"
         season = max(0, int(body.get("season") or item["progress"]["season"] or 1)) if series else None
         episode = max(1, int(body.get("episode") or item["progress"]["episode"] or 1)) if series else None
+        run = str(body.get("run") or "")
+        with self._lock:
+            self._scrape_runs[item["id"]] = run
         try:
             found = self.scraper.resolve(site, item, season, episode, pin=str(body.get("entry") or ""))
+            with self._lock:
+                if run and self._scrape_runs.get(item["id"]) != run:
+                    # You moved on to another site meanwhile: this one doesn't start playing over it.
+                    return {"ok": False, "superseded": True, "site": site["name"], "error": "skipped"}
         except scrape.ScrapeError as e:
             if body.get("open_page") and e.page:
                 self.open_link(e.page)
@@ -1473,8 +1487,10 @@ class App:
             self.store.update(item["id"], patch)
             return dict(result, player="browser")
         entry = {"path": found["url"], "sub": None, "key": key, "web": True, "referer": found["referer"],
+                 "headers": found.get("headers") or {},
                  "label": self._label(item, key), "name": f"{item['title']} ({site['name']})"}
-        entry["party"] = dict(self._party_meta(item, key), url=found["url"], referer=found["referer"])
+        entry["party"] = dict(self._party_meta(item, key), url=found["url"], referer=found["referer"],
+                              headers=found.get("headers") or {})
         start = 0 if body.get("from_start") else player.resume_point(item["positions"].get(key))
         with self._party_lock:
             hosting = self.party if self.party and self.party.active and self.party.role == "host" else None
@@ -1500,6 +1516,13 @@ class App:
         self.store.update(item["id"], patch)
         return dict(result, player="mpv", resumed_at=start, file=entry["name"])
 
+    def _render_page(self, url):
+        webtools.ADBLOCK = self.settings.get()["adblock"]
+        return webtools.render(url)
+
+    def _catch_video(self, url):
+        return webtools.catch_video(url)
+
     def _party_url_entry(self, item, meta):
         """The host plays a video from their own site: the guest streams the same one."""
         if not str(meta.get("url") or "").lower().startswith(("http://", "https://")):
@@ -1507,6 +1530,7 @@ class App:
         series = item["format"] == "series"
         key = f'{meta.get("season") or 1}:{meta.get("episode") or 1}' if series else "movie"
         return {"path": meta["url"], "sub": None, "key": key, "web": True, "referer": meta.get("referer") or "",
+                "headers": {k: str(v) for k, v in (meta.get("headers") or {}).items() if k in ("Origin", "User-Agent")},
                 "label": self._label(item, key), "party": self._party_meta(item, key), "item_id": item["id"]}
 
     def streaming_on(self, item):
@@ -1675,6 +1699,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/connections/redo", "sort_again"),
         ("POST", r"/api/sites/test", "test_site"),
         ("POST", r"/api/video-sites/test", "test_video_site"),
+        ("POST", r"/api/video-sites/diagnose", "diagnose_video_site"),
         ("POST", r"/api/items/(\w+)/scraped", "play_scraped"),
         ("POST", r"/api/torrents/(\w+)/plan", "torrent_plan_group"),
         ("POST", r"/api/torrents/(\w+)/plan/redo", "torrent_plan_redo"),
@@ -2424,6 +2449,19 @@ class Handler(BaseHTTPRequestHandler):
             return scrape.test_site(site, query)
         except scrape.ScrapeError as e:
             raise ApiError(str(e)) from e
+
+    def api_diagnose_video_site(self, body):
+        """A video site's "Test with an episode": every step, from scratch."""
+        try:
+            [site] = scrape.clean([body.get("site") or {}]) or [None]
+        except ValueError as e:
+            raise ApiError(str(e)) from e
+        if not site:
+            raise ApiError("add the site's search link first")
+        item = self.app.item(str(body.get("item_id") or ""))
+        series = item["format"] == "series"
+        return self.app.scraper.diagnose(site, item, int(body.get("season") or 1) if series else None,
+                                         int(body.get("episode") or 1) if series else None)
 
     def api_play_scraped(self, body, item_id):
         return self.app.play_scraped(self.app.item(item_id), body)

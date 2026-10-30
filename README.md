@@ -98,10 +98,13 @@ Two things are optional, and everything works without them:
 - **Play online (my sites):** your own website where your videos are uploaded. Add it in **Settings → Your video sites** with its search link (search for any title on it, copy the results page's address and put **{title}** where the name was), tick what it's for, and **Test** it. Then:
   1. The site is searched for the title (its name and other names; for a TV show's later season, "name season N" too).
   2. The right entry is picked by name: the season, the kind (a film, an OVA or a special isn't the TV series) and words the title doesn't have ("To the Top") all count, so another season isn't opened by mistake. When nothing matches exactly, the closest one is used, and **Not the right title? Pick another** shows the other results (your choice is remembered).
-  3. The entry's episodes are found on its page (following its **Watch** / **Episodes** link if needed), then the episode's video: from the page's video player, its settings and scripts, and the players it embeds.
-  4. It plays straight away in the built-in player: it streams, nothing is downloaded first, and seeking, resuming and watch parties work. When a page's video can only play in a browser (or you set the site to **Opens in: a browser window**), the episode's page opens in the browser instead.
+  3. The entry's episodes are found on its page (following its **Watch** / **Episodes** link if needed), then the episode's video: from the page's video player, its settings and scripts (packed or base64-hidden ones too), and the players it embeds.
+  4. When the page only builds its list or its player with JavaScript (an embedded player from another site, scrambled code, a Cloudflare check), the app opens the page in a browser window you don't see, starts its player (muted) and catches the video address the player asks for, with the headers it was sent with. That takes a few seconds more; a site that needs it goes straight to it from then on. (Windows; on a Mac the page opens in the browser instead.)
+  5. It plays straight away in the built-in player: it streams, nothing is downloaded first, and seeking, resuming and watch parties work. When a page's video can only play in a browser (or you set the site to **Opens in: a browser window**), the episode's page opens in the browser instead.
 
-  What was found is remembered, so the next episode starts quickly.
+  What was found is remembered, so the next episode starts quickly. Changing a site's link in Settings starts it afresh.
+  - **Several sites:** add as many as you like; they're tried in the order of the list. **Try <next site>** is one click away while it searches, when it couldn't play, and while it plays (if you don't like what it found).
+  - **Test an episode** (next to each site in Settings) goes the whole way for a title and episode you pick, from scratch, and shows each step: what the search found, the title opened, the episode links, the video addresses and embedded players, and whether the hidden browser was needed. That shows where a site goes wrong.
 - **When a file doesn't work:** press **Not working**. It's in the play window, and in the **On your PC** section of the title page.
   - Watch now then goes online for that title, and its poster shows **FILE ISSUE**.
   - Fix it later from the title page with **Choose file…** or **Use a different folder…**, or press **It works now**.
@@ -307,6 +310,8 @@ Your streaming services, sites and YouTube trailers open in the browser you choo
 - **Another… (Browse):** pick any browser's program (`.exe` on Windows, the app in Applications on a Mac).
 
 Netflix and most paid services use copy protection that only full browsers support, so pick a real browser for those.
+
+**Block ads and pop-ups** (Settings → Browser, on by default): in the built-in browser, requests to ad and tracker servers are refused before they load, pop-up and pop-under windows are stopped, and the invisible layers some players put over the video (that open an ad when clicked) are removed. On a Mac it's what a page script can do (pop-ups and ad boxes).
 
 ## Your data
 

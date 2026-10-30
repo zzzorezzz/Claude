@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.test_server import ServerBase
-from watchlist import launcher, packs, player, scrape
+from watchlist import launcher, packs, player, scrape, webtools
 from watchlist import torrents as torrents_mod
 from watchlist.config import Settings
 
@@ -387,6 +387,109 @@ class SettingsTest(unittest.TestCase):
         with mock.patch.object(Path, "is_file", return_value=True):     # (uosc is fetched by the build)
             args = player.ui_args("violet")
         self.assertIn("--cursor-autohide=5000", args)
+
+# ---- the ad blocker, unpacking, the hidden browser and the site's test
+
+class AdBlockTest(unittest.TestCase):
+    def test_ad_servers_and_addresses(self):
+        for url in ("https://pagead2.googlesyndication.com/x.js", "https://www.doubleclick.net/a", "https://cdn.popads.net/pop.js",
+                    "https://my-anime.test/js/popunder.min.js", "https://player.test/vast.xml?id=1"):
+            self.assertTrue(webtools.blocked(url), url)
+        for url in ("https://my-anime.test/watch/ep-1", "https://cdn.host.test/hls/master.m3u8", "https://adventure-time.test/"):
+            self.assertFalse(webtools.blocked(url), url)
+
+    def test_the_apps_own_windows_arent_touched(self):
+        webtools._by_window.clear()
+        own = mock.Mock(uid="a", real_url="http://127.0.0.1:8765/#/party-window")
+        site = mock.Mock(uid="b", real_url="https://www.crunchyroll.com/")
+        with mock.patch.object(webtools, "ADBLOCK", True):
+            self.assertFalse(webtools._options(own)["adblock"])
+            self.assertTrue(webtools._options(site)["adblock"])
+        with mock.patch.object(webtools, "ADBLOCK", False):
+            self.assertFalse(webtools._options(mock.Mock(uid="c", real_url="https://x.test/"))["adblock"])
+
+    def test_switch_in_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = Settings(Path(tmp) / "settings.json")
+            self.assertTrue(s.get()["adblock"])
+            s.update({"adblock": False})
+            self.assertFalse(Settings(Path(tmp) / "settings.json").get()["adblock"])
+
+
+class UnpackTest(unittest.TestCase):
+    # A script packed with the usual "eval(function(p,a,c,k,e,d)" packer.
+    PACKED = ("eval(function(p,a,c,k,e,d){e=function(c){return c.toString(36)};if(!''.replace(/^/,String)){while(c--){d[c.toString(a)]"
+              "=k[c]||c.toString(a)}k=[function(e){return d[e]}];e=function(){return'\\w+'};c=1};while(c--){if(k[c]){p=p.replace("
+              "new RegExp('\\b'+e(c)+'\\b','g'),k[c])}}return p}('0 1={2:\"3://4.5/6/7.8\"};',9,9,"
+              "'var|player|file|https|cdn|test|hls|master|m3u8'.split('|'),0,{}))")
+
+    def test_packed_and_base64_players(self):
+        import base64
+        self.assertIn("https://cdn.test/hls/master.m3u8", scrape.unpack(self.PACKED))
+        hidden = base64.b64encode(b'{"file":"https://cdn.test/v/1080p.mp4"}').decode()
+        html = f'<script>{self.PACKED}</script><script>var s = atob("{hidden}")</script>'
+        self.assertEqual(scrape.videos_in(scrape.parse(html, "https://x.test/"), html),
+                         ["https://cdn.test/hls/master.m3u8", "https://cdn.test/v/1080p.mp4"])
+
+
+class BrowserFallbackTest(ScraperTest):
+    def test_a_player_built_with_javascript_is_caught_in_the_hidden_browser(self):
+        _Site.pages["/ep/haikyuu-5"] = "<div id=player></div><script src=/player.js></script>"
+        caught = []
+        self.scraper.catch = lambda url: caught.append(url) or {
+            "url": "https://cdn.test/hls/x.m3u8", "headers": {"Referer": "https://embed.test/e/1", "Origin": "https://embed.test"}}
+        got = self.scraper.resolve(self.site, anime("Haikyuu!!"), 1, 5)
+        self.assertEqual(caught, [self.base + "/ep/haikyuu-5"])
+        self.assertEqual((got["url"], got["referer"], got["headers"]["Origin"]),
+                         ("https://cdn.test/hls/x.m3u8", "https://embed.test/e/1", "https://embed.test"))
+        # The site's videos need the browser: next time it goes straight there.
+        self.assertTrue(self.scraper.memory["_sites"][self.site["url"]]["browser"])
+
+    def test_an_episode_list_built_with_javascript_is_read_after_it_ran(self):
+        _Site.pages["/anime/haikyuu/watch"] = "<div id=eps></div><script>load()</script>"
+        rendered = '<a href="/ep/haikyuu-3">Episode 3</a>'
+        self.scraper.render = lambda url: (rendered, url)
+        got = self.scraper.resolve(self.site, anime("Haikyuu!!"), 1, 3)
+        self.assertEqual(got["page"], self.base + "/ep/haikyuu-3")
+
+    def test_without_the_hidden_browser_it_says_so(self):
+        _Site.pages["/ep/haikyuu-5"] = "<div id=player></div>"
+        self.scraper.catch = lambda url: None
+        self.scraper.can_catch = lambda: False
+        with self.assertRaises(scrape.ScrapeError) as e:
+            self.scraper.resolve(self.site, anime("Haikyuu!!"), 1, 5)
+        self.assertIn("no video", str(e.exception))
+
+    def test_the_sites_test_shows_each_step_and_keeps_your_choice(self):
+        item = anime("Haikyuu!!")
+        self.scraper.resolve(self.site, item, 1, 3, pin=self.base + "/anime/haikyuu")
+        r = self.scraper.diagnose(self.site, item, 1, 3)
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(any("episode link" in x for x in r["steps"]))
+        self.assertTrue(any("Found the video" in x for x in r["steps"]))
+        self.assertTrue(self.scraper.remembered("x1", self.site)["entries"][""]["pinned"])
+
+
+class SkippedSiteTest(PlayScrapedTest):
+    def test_a_site_you_skipped_doesnt_start_playing(self):
+        found = {"url": "https://cdn.mine.test/a.m3u8", "referer": "", "page": "https://mine.test/1", "headers": {},
+                 "entry": {"url": "https://mine.test/a", "name": "Inception"}, "others": [], "site": "Mine"}
+
+        def slow(*a, **k):
+            self.app._scrape_runs[self.item["id"]] = "newer"      # another site was asked for meanwhile
+            return found
+        with mock.patch.object(self.app.scraper, "resolve", side_effect=slow),                 mock.patch.object(self.app.player, "play") as play:
+            status, res = self.call("POST", f"/api/items/{self.item['id']}/scraped", {"run": "older"})
+        self.assertTrue(res.get("superseded"))
+        play.assert_not_called()
+
+    def test_the_diagnose_endpoint(self):
+        with mock.patch.object(self.app.scraper, "diagnose", return_value={"ok": False, "steps": ["a"], "url": "", "page": "", "error": "x"}) as d:
+            status, res = self.call("POST", "/api/video-sites/diagnose", {"site": {"name": "Mine", "url": "https://m.test/s?q={title}"},
+                                                                          "item_id": self.item["id"]})
+        self.assertEqual((status, res["steps"]), (200, ["a"]))
+        self.assertIsNone(d.call_args[0][2])                       # a film: no season or episode
+
 
 if __name__ == "__main__":
     unittest.main()

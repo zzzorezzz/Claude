@@ -12,7 +12,7 @@ Latest builds:
 | Windows (exe) | Round 10 (with the Android work's shared changes). Built, tests green. | [run 40975144354](https://github.com/zzzorezzz/Claude/actions/runs/40975144354) |
 | Mac (dmg) | Round 9 + the profile-picture fix. | built with the `[mac]` commit `b757170` |
 
-Round 10 is built for Windows only; Mac and Android don't have it yet. Build only the one the user asks for. `gh` is signed in on the user's PC.
+Round 10 is built for Windows (run 40975144354); the ad blocker and scraper fallbacks after it aren't built yet. Mac and Android don't have round 10. Build only the one the user asks for. `gh` is signed in on the user's PC.
 
 ### Round 10 (2026-10-30)
 
@@ -34,6 +34,23 @@ Round 10 is built for Windows only; Mac and Android don't have it yet. Build onl
   - The built-in browser is the default (a one-time migration for saved settings).
 - **Player**: the controls auto-hide after 5 s (`--cursor-autohide=5000` + uosc `autohide=yes`).
 - **Android**: the HLS module (`media3-exoplayer-hls`) and the Referer header for site videos. Not built yet.
+
+### After round 10 (2026-10-30)
+
+- **Changing a video site's link** starts it afresh. The scraper's memory is tied to the link, not the site id. With several sites, there's a button per site.
+- **Ad blocker** (`watchlist/webtools.py`, Settings → Browser → Block ads and pop-ups, `adblock` setting). On Windows it patches pywebview's `EdgeChrome.on_webview_ready` / `on_new_window_request`:
+  - WebResourceRequested refuses requests to `AD_HOSTS` and `AD_PATH`.
+  - NewWindowRequested is handled, so pop-ups aren't opened.
+  - `ADBLOCK_JS` hides ad boxes and removes invisible click layers.
+  - The app's own windows (127.0.0.1) are left alone. On a Mac the script runs after each load.
+- **Scraper fallbacks**:
+  - `webtools.render` reads a page after its JavaScript has run in a hidden window, for search results and episode lists.
+  - `webtools.catch_video` opens the episode in a hidden, muted window, clicks play in every frame (`AUTOPLAY_JS`), and takes the first `.m3u8` / `.mp4` request with its Referer, Origin and User-Agent. This is Windows only. Sites that need it are remembered (`_sites` in `scraped.json`).
+  - `scrape.unpack` handles the `eval(function(p,a,c,k,e,d)` packer and base64 strings.
+  - Tried for real on this PC in a hidden WebView2 window (pywebview 6.2, from a scratch venv): it caught an m3u8 inside an embedded player in 3 s, and the pop-under script was blocked.
+- **Test an episode** next to each video site: `/api/video-sites/diagnose` shows every step.
+- **Try <next site>** while searching, on failure and while playing. A skipped site never starts playing later (`_scrape_runs`).
+- Kept generic on purpose: no per-host decryption for particular video hosts.
 
 ### Not tested yet
 

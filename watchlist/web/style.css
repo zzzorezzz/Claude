@@ -1545,3 +1545,8 @@ body.android #guide { left: 10px; right: 10px; width: auto; bottom: 76px; }
 #guide.min h3 { margin: 2px 60px 0 0; font-size: 15px; }
 /* While the guide is open beside them, windows (Settings…) sit to its right on a wide screen. */
 @media (min-width: 980px) { body.guide-open #modal-root .overlay { padding-left: 440px; } }
+
+/* ---------- a video site's step-by-step test ---------- */
+.site-test-modal { width: min(720px, 100%); }
+.st-steps { margin: 6px 0 12px; padding-left: 22px; font-size: 13px; line-height: 1.5; color: var(--muted); max-height: 46vh; overflow: auto; }
+.st-steps li { white-space: pre-wrap; word-break: break-all; }
