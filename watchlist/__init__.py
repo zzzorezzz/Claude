@@ -4,4 +4,4 @@ Plays titles from folders on your PC in VLC, or finds them on Netflix / HBO Max
 and opens them in your default browser.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

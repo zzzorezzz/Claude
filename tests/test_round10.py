@@ -159,6 +159,58 @@ class PageTest(unittest.TestCase):
         scraper.catch.assert_called_once_with("https://reanime.to/watch/show?ep=2&lang=dub", click=None)
         self.assertEqual(got["stream"]["kind"], "dub")
 
+    def test_search_results_drawn_by_scripts_beat_the_sites_menus(self):
+        scraper = scrape.Scraper(tempfile.mkdtemp())
+        [site] = scrape.clean([{"name": "Miruro", "url": "https://www.miruro.test/search?query={title}"}])
+        plain = '<a href="/trending">Trending anime</a><a href="/schedule">Airing schedule</a>'
+        drawn = plain + '<a href="/watch/AbC123/naruto-shippuden">Naruto: Shippuden</a>'
+        scraper.render = lambda url: (drawn, url)
+        with mock.patch.object(scrape, "fetch", return_value=(plain, "https://www.miruro.test/search?query=x")):
+            found = scraper.search(site, anime("Naruto Shippuden"))
+        self.assertEqual(found[0]["url"], "https://www.miruro.test/watch/AbC123/naruto-shippuden")
+        self.assertFalse(any("/trending" in c["url"] for c in found))
+
+    def test_tiles_with_data_href_and_episodes_past_the_ones_shown(self):
+        html = '<div class="eps">' + "".join(f'<div role="link" data-href="/anime/X/p-{n}-sub"><span>Ep.</span> <span>{n}</span></div>'
+                                            for n in range(1, 51)) + '</div><a href="/manga/Y">Naruto Manga</a>'
+        page = scrape.parse(html, "https://mkissa.test/anime/X")
+        eps = scrape.episode_links(page)
+        self.assertEqual(eps[(None, 7)], "https://mkissa.test/anime/X/p-7-sub")
+        self.assertEqual(scrape.derive_episode(eps, 120), "https://mkissa.test/anime/X/p-120-sub")
+        self.assertEqual(scrape._track_url("https://mkissa.test/anime/X/p-120-sub", "dub"), "https://mkissa.test/anime/X/p-120-dub")
+        self.assertFalse(any("/manga/" in c["url"] for c in scrape.candidates(page, "https://mkissa.test/search")))
+        self.assertEqual(scrape._with_ep("https://ani.test/anime/naruto-1498", 3), "https://ani.test/anime/naruto-1498?ep=3")
+
+    def test_a_dub_without_a_dub_button_clicks_the_players_switch(self):
+        scraper = scrape.Scraper(tempfile.mkdtemp())
+        scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/dub.m3u8", "headers": {}})
+        [site] = scrape.clean([{"name": "Miruro", "url": "https://www.miruro.test/search?query={title}"}])
+        page = "https://www.miruro.test/watch/AbC/naruto?ep=1"
+        with mock.patch.object(scraper, "episode_page", return_value=(page, {"url": page}, [])),                 mock.patch.object(scrape, "fetch", return_value=("<div id=player></div>", page)),                 mock.patch.object(scrape, "scrambled_playlist", return_value=False):
+            got = scraper.resolve(site, anime("Naruto", id="mir"), 1, 1, track="dub")
+        scraper.catch.assert_called_once_with(page, click={"label": "Dub", "kind": "dub"})
+        self.assertEqual(got["stream"]["kind"], "dub")
+        # (the choice you made before is kept: track= finds a version without changing it)
+        self.assertNotEqual(scraper.memory["_sites"][site["url"]].get("kind"), "dub")
+
+    def test_other_versions_and_next_episodes_go_into_the_open_player(self):
+        sess = player.Session(["mpv"], "x", [{"path": "https://cdn.test/sub-1.m3u8", "key": "1:1", "label": "E1"}])
+        sent = []
+        sess.send = lambda *cmds: sent.extend(cmds) or True
+        first = sess.current()
+        sess.add_tracks(first, [{"kind": "audio", "url": "https://cdn.test/dub-1.m3u8", "title": "English dub", "lang": "en"}])
+        self.assertEqual(sent, [])                        # (not open yet: added when it is)
+        sess._loaded()
+        self.assertIn(["audio-add", "https://cdn.test/dub-1.m3u8", "auto", "English dub", "en"], sent)
+        nxt = sess.append({"path": "https://cdn.test/sub-2.m3u8", "key": "1:2", "label": "E2", "sub": "https://cdn.test/2.vtt"})
+        self.assertIn(["loadfile", "https://cdn.test/sub-2.m3u8", "append"], sent)
+        sent.clear()
+        sess.index, sess.loaded = 1, False
+        sess._loaded()
+        self.assertEqual(sess.current(), nxt)
+        self.assertIn(["set_property", "force-media-title", "E2"], sent)
+        self.assertIn(["sub-add", "https://cdn.test/2.vtt", "select"], sent)
+
     def test_a_scrambled_playlist_is_not_handed_to_the_player(self):
         def answer(body):
             r = mock.MagicMock()
@@ -216,12 +268,12 @@ class AnimePaheApiTest(unittest.TestCase):
     def setUp(self):
         [self.site] = scrape.clean([{
             "name": "AnimePahe", "url": "https://animepahe.pw/api?m=search&q={title}",
-            "types": ["anime"], "ap": True, "ra": True,
+            "types": ["anime"],
         }])
 
-    def test_the_preset_is_kept_as_a_json_api_with_video_catching(self):
+    def test_an_api_search_link_is_recognised_without_any_options(self):
         self.assertEqual(self.site["kind"], "json_api")
-        self.assertTrue(self.site["ra"])
+        self.assertNotIn("ra", self.site)
         self.assertEqual(scrape.search_url(self.site, "Frieren: Beyond Journey's End"),
                          "https://animepahe.pw/api?m=search&q=Frieren%3A+Beyond+Journey%27s+End")
 
@@ -244,7 +296,7 @@ class AnimePaheApiTest(unittest.TestCase):
             "https://animepahe.pw/play/anime-session/episode-two",
         ])
 
-    def test_catch_toggle_uses_the_hidden_browser_only_when_enabled(self):
+    def test_the_hidden_browser_is_tried_first_and_reading_the_page_without_it(self):
         scraper = scrape.Scraper(tempfile.mkdtemp())
         scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/episode.m3u8", "headers": {}})
         page = "https://animepahe.pw/play/anime-session/episode-one"
@@ -254,9 +306,9 @@ class AnimePaheApiTest(unittest.TestCase):
         self.assertEqual(caught["url"], "https://cdn.test/episode.m3u8")
         scraper.catch.assert_called_once_with(page, click=None)
 
-        ordinary = dict(self.site, catch=False)
+        scraper.can_catch = lambda: False
         with mock.patch.object(scrape, "find_video", return_value={"url": "https://cdn.test/plain.m3u8", "referer": page}) as read:
-            resolved = scraper._stream_video(ordinary, page, entry, {}, None, "", page)
+            resolved = scraper._stream_video(self.site, page, entry, {}, None, "", page)
         self.assertEqual(resolved["url"], "https://cdn.test/plain.m3u8")
         read.assert_called_once_with(page, referer=entry["url"], log=scraper.log)
 
@@ -611,8 +663,6 @@ class BrowserFallbackTest(ScraperTest):
         self.assertEqual(caught, [self.base + "/ep/haikyuu-5"])
         self.assertEqual((got["url"], got["referer"], got["headers"]["Origin"]),
                          ("https://cdn.test/hls/x.m3u8", "https://embed.test/e/1", "https://embed.test"))
-        # The site's videos need the browser: next time it goes straight there.
-        self.assertTrue(self.scraper.memory["_sites"][self.site["url"]]["browser"])
 
     def test_an_episode_list_built_with_javascript_is_read_after_it_ran(self):
         _Site.pages["/anime/haikyuu/watch"] = "<div id=eps></div><script>load()</script>"

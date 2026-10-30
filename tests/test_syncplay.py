@@ -13,6 +13,17 @@ class InviteTest(unittest.TestCase):
         self.assertEqual((got["room"], got["server"], got["source_id"], got["season"], got["episode"]),
                          ("watchlist-abc", "syncplay.pl:8999", "52991", 1, 5))
 
+    def test_an_online_episode_goes_with_the_invite_without_cookies(self):
+        now = {"src": "mal", "id": "1735", "type": "anime", "season": 1, "episode": 3, "key": "mal:1735:1:3",
+               "url": "https://cdn.test/master.m3u8", "referer": "https://player.test/", "track": "dub",
+               "headers": {"Origin": "https://player.test", "Cookie": "secret=1"},
+               "site": {"name": "Mine", "url": "https://mine.test/search?q={title}"}, "entry": "https://mine.test/anime/x"}
+        got = syncplay.read_invite(syncplay.make_invite("syncplay.pl:8999", "watchanything-ab", host="me", now=now))
+        self.assertEqual(got["now"]["site"]["url"], "https://mine.test/search?q={title}")
+        self.assertEqual((got["now"]["entry"], got["now"]["track"]), ("https://mine.test/anime/x", "dub"))
+        self.assertEqual(got["now"]["headers"], {"Origin": "https://player.test"})
+        self.assertIsNone(syncplay.online_source({"site": {"url": "javascript:alert(1)"}}))
+
     def test_bad_codes(self):
         for code in ["", "hello", "WLP1.", "WLP1.abc", "WLP1." + "e30"]:
             with self.assertRaises(ValueError):

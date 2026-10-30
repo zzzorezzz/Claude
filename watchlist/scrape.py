@@ -53,7 +53,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 VIDEO_EXTS = ("m3u8", "mp4", "webm", "mkv", "mov", "m4v", "mpd")
 ENTRY_DAYS = 30          # a title's page on your site is remembered this long
 EPISODES_FOR = 3600      # its list of episodes is read again after this, when an episode is missing
-VIDEO_FOR = 600          # a video's address (often signed for a while) is reused this long
+VIDEO_FOR = 3 * 3600   # a video's address is reused this long (found again if the player refuses it)
 
 
 class ScrapeError(Exception):
@@ -83,7 +83,7 @@ def clean(sites):
         kind = "archive" if x.get("kind") == "archive" else ""
         if kind:
             url = ARCHIVE                  # its own search, by its API
-        elif x.get("ap") or x.get("kind") == "json_api":
+        elif x.get("kind") == "json_api" or _looks_like_json_api(url):
             kind = "json_api"
         if not name and not url:
             continue
@@ -99,14 +99,7 @@ def clean(sites):
         types = [t for t in TYPES if t in (x.get("types") or [])] or list(TYPES)
         site = {"id": sid, "name": name or ("Internet Archive" if kind else urllib.parse.urlsplit(url).hostname or "My site"),
                 "url": url, "types": types, "on": bool(x.get("on", True)),
-                "open": "browser" if x.get("open") == "browser" else "player",
-                # AP is the AnimePahe session API; AK is the normal page/host
-                # extractor; RA uses the browser network catcher. Keep the old
-                # catch field readable for saved settings from earlier builds.
-                "ap": bool(x.get("ap")) or kind == "json_api",
-                "ak": bool(x.get("ak")),
-                "ra": bool(x.get("ra")) or bool(x.get("catch")),
-                "catch": bool(x.get("ra")) or bool(x.get("catch"))}
+                "open": "browser" if x.get("open") == "browser" else "player"}
         if kind:
             site["kind"] = kind
         out.append(site)
@@ -260,6 +253,12 @@ class _Page(html.parser.HTMLParser):
                        "attrs": own, "ctx": self._ctx()}
             if not href:
                 self._a = None
+        elif a.get("data-href") and tag not in _VOID and self._a is None:
+            # A link drawn by scripts: a tile that goes to data-href when clicked.
+            href = self._url(a["data-href"])
+            if href:
+                self._a = {"href": href, "text": "", "title": a.get("title") or "", "num": a.get("data-number") or "",
+                           "attrs": own, "ctx": self._ctx(), "_tag": tag, "_depth": len(self._stack) - 1}
         elif tag == "img" and self._a is not None:
             alt = a.get("alt") or a.get("title") or ""
             if alt and not self._a["title"]:
@@ -297,9 +296,10 @@ class _Page(html.parser.HTMLParser):
                         cap[1]["label"] = " ".join(cap[1]["label"].split())[:60]
                     del self._stack[i:]
                     break
-        if tag == "a" and self._a is not None:
+        if self._a is not None and (tag == "a" if "_tag" not in self._a
+                                    else tag == self._a["_tag"] and len(self._stack) <= self._a["_depth"]):
             self._a["text"] = " ".join(self._a["text"].split())
-            self.links.append(self._a)
+            self.links.append({k: v for k, v in self._a.items() if not k.startswith("_")})
             self._a = None
         elif tag == "title":
             self._in_title = False
@@ -461,7 +461,9 @@ def candidates(page, search_page):
         if not href or not _same_site(href, search_page) or href.rstrip("/") == search_page.rstrip("/"):
             continue
         path = urllib.parse.urlsplit(href).path
-        if path in ("", "/") or re.search(r"/(search|genre|genres|login|register|tag|tags|category|page)/?", path, re.I):
+        if path in ("", "/") or re.search(r"/(search|genre|genres|login|register|tag|tags|category|page|manga|manhwa|novels?|"
+                                          r"games?|characters?|people|staff|news|users?|profile|community|forum|quizzes|"
+                                          r"tierlists?|cases|trending|schedule|history|collections?|lists?)(?:/|$)", path, re.I):
             continue
         texts = [t for t in (link["title"], link["text"]) if t and not _NAV.match(t.strip())]
         if not texts:
@@ -527,7 +529,8 @@ def episode_links(page):
         text = " ".join(x for x in (link["text"], link["title"]) if x)
         # An episode's own link whose tooltip lists its tracks ("2" titled "2 Sub · Dub").
         path = urllib.parse.unquote(urllib.parse.urlsplit(href).path + "?" + urllib.parse.urlsplit(href).query)
-        own_episode = (any(p.search(path) for p in _EP_HREF)
+        own_episode = (re.fullmatch(r"(?:episode|ep|eps)\.?\s*\d{1,4}", link["text"].strip(), re.I)
+                       or any(p.search(path) for p in _EP_HREF)
                        and (_EP_TEXT[1].search(link["text"]) or _EP_TEXT[0].search(link["text"])))
         if not own_episode and (SERVER_WORDS.search(" ".join((text, link.get("attrs", "")))) or (
                 SERVER_WORDS.search(link.get("ctx", "")) and not re.search(r"episode|\bep\b|\beps\b", link.get("ctx", ""), re.I))):
@@ -536,7 +539,8 @@ def episode_links(page):
         for p in _SE:
             m = p.search(text) or p.search(urllib.parse.unquote(href))
             if m:
-                found = (int(m.group(1)), int(m.group(2)))
+                # (".../3rd-season-53/episode-1": 53 is the site's id for the title, not a season)
+                found = (int(m.group(1)) if int(m.group(1)) <= 30 else None, int(m.group(2)))
                 break
         bare = False
         if not found:
@@ -608,6 +612,48 @@ def pick_episode(eps, season, episode, absolute=None):
     return None
 
 
+def derive_episode(eps, episode):
+    """An episode's address from the pattern of the ones listed (.../p-3-sub with 1-50
+    shown makes .../p-120-sub), or None."""
+    pattern = None
+    for (season, number), url in eps.items():
+        if season is not None:
+            continue
+        spots = [m for m in re.finditer(r"(?<![0-9a-zA-Z])" + str(number) + r"(?![0-9])", url)]
+        if len(spots) != 1:
+            continue
+        shape = (url[:spots[0].start()], url[spots[0].end():])
+        if pattern is None:
+            pattern = shape
+        elif pattern != shape:
+            return None
+    if pattern is None or len(eps) < 2:
+        return None
+    return f"{pattern[0]}{episode}{pattern[1]}"
+
+
+def cloudflare_check(text):
+    """Whether a page is Cloudflare's "Just a moment..." check rather than the site."""
+    head = (text or "")[:6000]
+    return bool(re.search(r"<title>\s*just a moment|cf_chl_opt|performing security verification", head, re.I))
+
+
+def _exists(url, referer=""):
+    """False only when the site says there's no such page (404 / 410)."""
+    try:
+        fetch(url, referer=referer, limit=4096, timeout=8)
+    except ScrapeError as e:
+        return not re.search(r"\b(404|410)\b", str(e))
+    return True
+
+
+def _with_ep(url, episode):
+    """The address with ?ep= set to an episode."""
+    parts = urllib.parse.urlsplit(url)
+    query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if k != "ep"]
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode([("ep", str(episode))] + query)))
+
+
 def _anikoto_episode_links(page_url, text):
     """Episode index returned by AnikotoTV's XHR endpoint.
 
@@ -651,10 +697,14 @@ def _anikoto_servers(page_url, text):
 
 def _track_url(page_url, kind):
     """The episode's address for its sub or dub track, on sites whose address picks it
-    (ReAnime's ?lang=); otherwise the address as it is."""
-    if not _host(page_url).endswith("reanime.to") or kind not in ("sub", "dub"):
+    (?lang=sub, .../p-1-dub; ReAnime's ?lang=); otherwise the address as it is."""
+    if kind not in ("sub", "dub"):
         return page_url
     parts = urllib.parse.urlsplit(page_url)
+    if re.search(r"[-_/](?:sub|dub)$", parts.path, re.I):
+        return urllib.parse.urlunsplit(parts._replace(path=re.sub(r"(?i)(sub|dub)$", kind, parts.path)))
+    if not (_host(page_url).endswith("reanime.to") or re.search(r"(?:^|&)lang=", parts.query)):
+        return page_url
     query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if k != "lang"]
     return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query + [("lang", kind)])))
 
@@ -1183,8 +1233,9 @@ class Scraper:
         self.log.append(text)
 
     def _read(self, url, enough, referer=""):
-        """A page as a ScrapeError-free (text, address): read as it is, and when that
-        isn't `enough` (nothing found that's needed), after its JavaScript has run."""
+        """A page as (text, address): read as it is, and when that isn't `enough`
+        (nothing found that's needed), after its JavaScript has run. Raises ScrapeError
+        only when the site shows a Cloudflare check instead of the page."""
         try:
             text, final = fetch(url, referer=referer)
         except ScrapeError as e:
@@ -1195,6 +1246,9 @@ class Scraper:
         self._note(f"Nothing usable in {final} as it is - reading it after its scripts have run")
         got = self.render(url)
         if got:
+            if cloudflare_check(got[0]):
+                raise ScrapeError("the site shows a Cloudflare check (\"Verify you are human\") instead of this page: "
+                                  "open it in the built-in browser, pass the check yourself, then try again", page=url)
             return got[0], got[1]
         self._note("The page couldn't be opened in the hidden browser")
         return text, final
@@ -1210,6 +1264,11 @@ class Scraper:
         if mem and mem.get("link") != site["url"]:
             return None
         return mem
+
+    def unlink(self, item_id, site):
+        """Forget what was found for a title on one site (a wrong match): it's searched again."""
+        if (self.memory.get(item_id) or {}).pop(site["id"], None) is not None:
+            self._save()
 
     def forget(self, item_id):
         if self.memory.pop(item_id, None) is not None:
@@ -1242,12 +1301,18 @@ class Scraper:
                 errors.append(str(e))
                 text, final = "", url
             found = candidates(parse(text, final), final)
-            if not found and self._renderer():
-                got = self.render(url)                 # results the site only shows with JavaScript
+            weak = not found or max(score(n, wanted) for c in found for n in c["names"]) < 50
+            if weak and self._renderer():
+                # Results the site only shows with JavaScript (the page as it is may hold
+                # nothing but its menus: "Trending", "Schedule"...).
+                got = self.render(url)
                 if got:
-                    found = candidates(parse(got[0], got[1]), got[1])
-                    if found and errors:
-                        errors.pop()
+                    shown = candidates(parse(got[0], got[1]), got[1])
+                    if shown:
+                        known = {c["url"] for c in shown}
+                        found = shown + [c for c in found if c["url"] not in known]
+                        if errors:
+                            errors.pop()
             return found
 
         found, seen = [], set()
@@ -1353,11 +1418,18 @@ class Scraper:
             absolute = sum(s.get("episodes") or 0 for s in item["seasons"] if 0 < s["number"] < season) + episode
         want_season = season if tv_season else None
         url = pick_episode(eps, want_season, episode, absolute) or pick_episode(eps, None, episode, absolute)
+        if not url and eps:
+            url = derive_episode(eps, episode)      # a list that shows only some (1-50 of 500)
+            if url and not _exists(url, final):
+                url = None
+        if not url and eps and len(eps) < 5 and min(n for _, n in eps) > 3:
+            eps = {}            # a few numbered links (related films, "Movie 2"...) aren't an episode list
         if not url:
-            if not eps and videos_in(page, text):
-                url = final            # the title's page plays it itself
-            elif episode == 1 and not eps:
-                url = final
+            if not eps and (episode == 1 or re.search(r"(?:^|&)ep=", urllib.parse.urlsplit(final).query)
+                            or re.search(r"\bepisodes?\b", text[:400000], re.I)):
+                # The title's page plays its episodes itself, chosen by ?ep= (Miruro, ani.pm).
+                url = _with_ep(final, episode)
+                self._note(f"No episode links on the page: trying {url}")
             else:
                 raise ScrapeError(f"episode {episode} wasn't found on {site['name']}'s page for {entry['name']}"
                                   + (f" (it lists {len(eps)} episodes)" if eps else ""), page=final)
@@ -1366,13 +1438,16 @@ class Scraper:
         self._remember(item["id"], site, episodes=cached)
         return url, entry, others
 
-    def resolve(self, site, item, season=None, episode=None, pin="", stream="", quality="", skip=()):
+    def resolve(self, site, item, season=None, episode=None, pin="", stream="", quality="", skip=(),
+                track="", fresh=False):
         """Everything needed to play: {"url" (the video, or "" when only the page
         works), "page", "referer", "headers", "entry", "others", "site",
         "streams" (the episode's sub / dub / server choices), "stream" (the one
         playing), "qualities", "quality"}. The episode's streams are tried in
         order (the one you chose before first) until one gives a video; `skip`
-        leaves out streams that didn't play. Raises ScrapeError."""
+        leaves out streams that didn't play. `track` ("sub" / "dub") finds that version
+        without changing the one you chose; `fresh` doesn't reuse a video found a few
+        minutes ago. Raises ScrapeError."""
         self.log = []
         if site.get("kind") == "archive":
             return self._archive(site, item, season, episode, pin, quality)
@@ -1387,15 +1462,18 @@ class Scraper:
             return out
 
         prefs = self.memory.setdefault("_sites", {}).setdefault(site["url"], {})
-        if stream:
+        if track:
+            prefs = dict(prefs, kind=track, label="")
+        elif stream:
             prefs["kind"], prefs["label"] = (stream.split(":", 2) + ["", ""])[1:3]
         if quality:
             prefs["quality"] = quality
         mem = self.remembered(item["id"], site) or {}
         cache_key = f"{page_url}|{prefs.get('kind', '')}|{prefs.get('label', '')}"
         hit = (mem.get("videos") or {}).get(cache_key)
-        if hit and not skip and time.time() - hit.get("at", 0) < VIDEO_FOR:
+        if hit and not skip and not fresh and time.time() - hit.get("at", 0) < VIDEO_FOR:
             out.update({k: hit.get(k) for k in ("url", "referer", "headers", "subtitle", "streams", "stream", "qualities")})
+            out["cached"] = True
             self._note(f"Used the video found a few minutes ago: {hit['url']}")
             return self._with_quality(out, prefs)
 
@@ -1406,7 +1484,7 @@ class Scraper:
         # unless the site's address says which track it plays.
         want = prefs.get("kind") or "sub"
         auto_url = _track_url(page_url, want)
-        if site.get("ra") and self._catcher() and (want == "sub" or auto_url != page_url):
+        if self._catcher() and (want == "sub" or auto_url != page_url):
             got = self._catch_stream(auto_url, None)
             if got:
                 out.update(url=got["url"], referer=got["referer"], headers=got.get("headers") or {}, subtitle=got.get("subtitle") or "")
@@ -1425,6 +1503,9 @@ class Scraper:
             text += _anikoto_servers(final, text)
         page = parse(text, final)
         found = order_streams(streams(page), prefs)
+        if want != "sub" and auto_url == page_url and not any(x["kind"] == want for x in found):
+            # No dub server button: the player's own Sub / Dub switch, clicked by its name.
+            found.insert(0, {"id": f"switch:{want}", "label": want.title(), "kind": want, "url": "", "how": "click"})
         out["streams"] = [{k: x[k] for k in ("id", "label", "kind")} for x in found]
         if found:
             names = ", ".join(x["label"] + (f" ({x['kind']})" if x["kind"] else "") for x in found[:8])
@@ -1533,7 +1614,7 @@ class Scraper:
         """{"url", "referer", "headers"} for one of an episode's streams (None: the page as it is)."""
         target, ref = (page_url, entry["url"]) if x is None else (x["url"] or page_url, page_url)
         of = f" of {x['label']}" if x else ""
-        catch_on = bool(site.get("catch"))
+        catch_on = bool(self._catcher())
         if catch_on:
             got = self._catch_stream(page_url, x)
             if got:

@@ -103,6 +103,13 @@ AUTOPLAY_JS = r"""(() => {
   else setTimeout(kick, 700);
 })();"""
 
+EPISODES_TAB_JS = r"""(() => {
+  const el = [...document.querySelectorAll('button, [role="tab"], [role="button"], li, span, div')]
+    .find((e) => /^episodes?\b/i.test((e.textContent || '').trim()) && (e.textContent || '').trim().length < 24
+      && !e.closest('a[href]:not([href^="#"])') && !e.querySelector('button, [role="tab"]'));
+  if (el) { try { el.click(); } catch (e) {} }
+})();"""
+
 # Choose one of an episode's streams (a server / sub / dub button) in the page, by its
 # name: the hidden window then tells the app it clicked (a request to CLICKED).
 CLICKED = "https://watchanything.invalid/clicked"
@@ -274,6 +281,12 @@ def _hook(opts, core):
                 h = args.Request.Headers
                 catch(str(args.Request.Uri), {"Referer": header(h, "Referer"), "Origin": header(h, "Origin"),
                                               "User-Agent": header(h, "User-Agent"), "Cookie": header(h, "Cookie")})
+            elif "text/vtt" in kind or "subrip" in kind or "x-ass" in kind:
+                # Captions at an address that doesn't say so: kept as subtitles, never the video.
+                url = str(args.Request.Uri)
+                subs = opts.setdefault("subs", [])
+                if url not in subs:
+                    subs.append(url)
         core.WebResourceResponseReceived += on_response
         try:
             core.IsMuted = True
@@ -342,6 +355,11 @@ def render(url, timeout=20, settle=2.5):
                 return None
             # Wait for what scripts add (an episode list, search results) to settle.
             last, deadline = -1, time.time() + max(settle, 1) * 3
+            try:
+                # An episode list kept behind a tab ("Episodes 500"): opened, without leaving the page.
+                win.evaluate_js(EPISODES_TAB_JS)
+            except Exception:  # noqa: BLE001
+                pass
             while time.time() < deadline:
                 time.sleep(settle / 3)
                 count = win.evaluate_js("document.getElementsByTagName('a').length + document.getElementsByTagName('iframe').length")
@@ -369,7 +387,7 @@ def catch_video(url, timeout=30, click=None):
 
     def catch(video, headers):
         u = video.lower()
-        if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt)(\?|$)", u):
+        if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u):
             return
         if not any(v == video for v, _, _ in found):
             found.append((video, {k: v for k, v in headers.items() if v}, time.time()))
@@ -383,14 +401,22 @@ def catch_video(url, timeout=30, click=None):
             return None
         try:
             deadline = time.time() + timeout
-            while time.time() < deadline and not got.is_set():
+
+            def videos():
+                # (what turned out to be captions isn't the video)
+                return [f for f in found if f[0] not in (opts.get("subs") or [])]
+            while time.time() < deadline:
                 got.wait(0.5)
-                if click and not opts.get("clicked_at") and found and time.time() > deadline - timeout + 15:
+                if got.is_set():
+                    time.sleep(1.2)         # a moment more: the playlist listing every quality often comes right after
+                    if videos():
+                        break
+                    got.clear()
+                if click and not opts.get("clicked_at") and videos() and time.time() > deadline - timeout + 15:
                     break                   # the button wasn't found: what the page plays by itself
+            found[:] = videos()
             if not found:
                 return None
-            # A moment more: the playlist that lists every quality often comes right after.
-            time.sleep(1.2)
             after = [f for f in found if f[2] >= opts.get("clicked_at", 0)] or found
             best = min(after, key=lambda f: (0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1,
                                              after.index(f)))

@@ -200,6 +200,7 @@ class Session:
         self.pos_at = 0.0            # when pos was last reported (time.monotonic())
         self.listeners = []          # called with every message from mpv (watch parties)
         self._pending_sub = None
+        self.loaded = False          # the current entry's file is open (its extra tracks can be added)
         self.connected, self.error, self.ended = False, "", False
         self.done = set()
         self.proc = None
@@ -283,12 +284,11 @@ class Session:
                             self._save(force=True)
                     elif name == "playlist-pos" and isinstance(data, int) and data >= 0 and data != self.index:
                         self._wrap_up_current()
-                        self.index, self.pos, self.dur = data, None, None
+                        self.index, self.pos, self.dur, self.loaded = data, None, None, False
                 elif event == "end-file" and msg.get("reason") == "eof":
                     self._wrap_up_current(reached_end=True)
-                elif event == "file-loaded" and self._pending_sub:
-                    self.send(["sub-add", self._pending_sub, "select"])
-                    self._pending_sub = None
+                elif event == "file-loaded":
+                    self._loaded()
                 for listener in list(self.listeners):
                     try:
                         listener(self, msg)
@@ -340,6 +340,40 @@ class Session:
         finally:
             conn.close()
 
+    def _loaded(self):
+        """A file opened: its subtitles and other versions (added later) go in."""
+        entry, cmds = self.current(), []
+        if self._pending_sub:
+            cmds.append(["sub-add", self._pending_sub, "select"])
+            self._pending_sub = None
+        if entry and entry.get("appended"):
+            if entry.get("label"):
+                cmds.append(["set_property", "force-media-title", entry["label"]])
+            if entry.get("sub"):
+                cmds.append(["sub-add", entry["sub"], "select"])
+        for track in (entry or {}).get("extras") or []:
+            cmds.append(_track_command(track))
+        self.loaded = True
+        if cmds:
+            self.send(*cmds)
+
+    def add_tracks(self, entry, tracks):
+        """Other versions of an entry: [{"kind": "audio" / "sub", "url", "title", "lang"}].
+        Added to the open file now (when it's the one playing), and whenever it opens."""
+        entry.setdefault("extras", []).extend(tracks)
+        if entry is self.current() and self.loaded:
+            return self.send(*[_track_command(t) for t in tracks])
+        return True
+
+    def append(self, entry):
+        """One more entry at the end of the playlist (the next episode, found meanwhile)."""
+        entry = dict(entry, appended=True)
+        self.entries.append(entry)
+        if not self.send(["loadfile", entry["path"], "append"]):
+            self.entries.pop()
+            return None
+        return entry
+
     def replace(self, entry):
         """Play a different file in the same window (a watch party moving on)."""
         self._wrap_up_current()
@@ -361,6 +395,13 @@ class Session:
                 "label": entry.get("label") if entry else "", "key": entry["key"] if entry else "",
                 "file": Path(entry["path"]).name if entry else "", "pos": self.pos, "dur": self.dur,
                 "paused": self.paused, "connected": self.connected, "error": self.error}
+
+
+def _track_command(track):
+    """mpv's command adding an audio or subtitle track from another file, not chosen
+    (you switch to it in the player)."""
+    return ["audio-add" if track["kind"] == "audio" else "sub-add", track["url"], "auto",
+            track.get("title") or "", track.get("lang") or ""]
 
 
 class Player:

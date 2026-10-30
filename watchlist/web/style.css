@@ -1190,6 +1190,10 @@ body {
 body.party-window { background: var(--bg); }
 body.party-window #nav, body.party-window #view { display: none; }
 body.party-window #party-dock { inset: 0; width: 100%; max-height: none; border-radius: 0; border: 0; animation: none; }
+.party-src { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 12px; }
+.party-src .muted { margin-right: 4px; }
+.party-src .chip-btn[disabled] { opacity: .4; cursor: not-allowed; }
+#party-online .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .party-choice { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 6px 0 14px; }
 .party-box { display: grid; gap: 10px; align-content: start; padding: 16px; border-radius: 16px; border: 1px solid var(--edge); background: rgba(255, 255, 255, .03); }
 .party-box h4 { margin: 0; }
@@ -1557,4 +1561,13 @@ body.android #guide { left: 10px; right: 10px; width: auto; bottom: 76px; }
 .chip-btn { border: 1px solid var(--line-2); background: rgba(255, 255, 255, .04); color: var(--text); border-radius: 999px; padding: 5px 12px; font-size: 13px; cursor: pointer; }
 .chip-btn:hover { border-color: var(--accent); }
 .chip-btn.on { background: rgba(var(--accent-rgb), .3); border-color: var(--accent); }
+.chip-btn.big { padding: 9px 18px; font-size: 15px; font-weight: 600; }
+.scrape-versions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; margin-top: 16px; }
+.scrape-versions .muted { margin-right: 4px; }
+.scrape-match { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; justify-content: center; margin: 10px auto 0;
+  padding: 8px 12px; border: 1px solid var(--line-2); border-radius: 12px; background: rgba(255, 255, 255, .03); max-width: 560px; }
+.scrape-match a { color: var(--text); text-decoration: none; }
+.scrape-match a:hover { text-decoration: underline; }
+.scrape-more { max-width: 560px; margin: 10px auto 0; line-height: 1.5; }
+.scrape-more .spin-dot { display: inline-block; vertical-align: middle; }
 .vsite-note { flex: 2; align-self: center; }

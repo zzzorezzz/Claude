@@ -2437,11 +2437,26 @@ async function openStartParty(item = null) {
     }) : [];
     options = avail.map((k) => { const [s, n] = k.split(':').map(Number); return `<option value="${k}" ${k === current ? 'selected' : ''}>${esc(epLabel({ season: s, episode: n }))}</option>`; }).join('');
   }
+  // Where the party plays it from: your downloads, a torrent (the magnet goes with the invite),
+  // or your own video site (the site and the title there go with it).
+  const byEp = local.by_episode || {};
+  const hasKind = (stream) => (series ? Object.values(byEp) : [local.target].filter(Boolean)).some((v) => !!v.stream === stream);
+  const sites = item ? videoSites(item) : [];
+  const sources = item ? [['file', 'Downloaded', hasKind(false)], ['torrent', 'Magnet (torrent)', hasKind(true)], ['online', 'Watch online (my sites)', sites.length > 0]] : [];
+  let source = (sources.find(([, , ok]) => ok) || [''])[0];
+  const srcPicker = sources.length ? `<div class="party-src"><span class="muted small">Play from</span>${sources.map(([k, l, ok]) => `<button type="button" class="chip-btn big ${k === source ? 'on' : ''}" data-src="${k}" ${ok ? '' : 'disabled title="Nothing for this title yet"'}>${l}</button>`).join('')}</div>` : '';
+  const onlineFields = item ? `<div id="party-online" hidden>
+      ${sites.length > 1 ? `<label class="field"><span>Site</span><select class="select" id="party-site">${sites.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label>` : ''}
+      ${series ? `<div class="row2"><label class="field"><span>Season</span><input class="input" type="number" min="1" id="party-se" value="${item.progress.season || 1}"></label>
+        <label class="field"><span>Episode</span><input class="input" type="number" min="1" id="party-en" value="${item.progress.episode || 1}"></label></div>` : ''}
+      <p class="muted small">Found on your site and played for everyone. The invite takes the site and the title there with it: whoever joins gets the same episode (and the next ones) ready on their side.</p></div>` : '';
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>${ICON.people} ${item ? `Watch ${esc(item.title)} together` : 'Watch together'}</h2>
     <p class="sub">With people on other computers, kept in step over the internet.</p>
     ${S.status.mpv ? '' : '<div class="warn">This needs the built-in player, which is missing.</div>'}
-    ${item && series && avail.length ? `<label class="field"><span>Episode</span><select class="select" id="party-ep">${options}</select></label>` : ''}
+    ${srcPicker}
+    ${item && series && avail.length ? `<label class="field" id="party-ep-field"><span>Episode</span><select class="select" id="party-ep">${options}</select></label>` : ''}
+    ${onlineFields}
     <div class="party-choice">
       <div class="party-box"><h4>${inParty && party.st.role === 'host' ? 'Your party is on' : 'Host a party'}</h4>
         <p class="muted small">${item ? 'Starts this for everyone. After that, whatever you play, they follow.' : 'Starts an empty party: send the invite, then play anything and everyone follows.'}</p>
@@ -2453,15 +2468,28 @@ async function openStartParty(item = null) {
     </div>
     <div id="party-out"></div>${PARTY_NOTE}</div>`, 'party-modal');
   const out = $('#party-out', wrap);
+  const showSource = () => {
+    $$('[data-src]', wrap).forEach((b) => b.classList.toggle('on', b.dataset.src === source));
+    const online = source === 'online';
+    if ($('#party-online', wrap)) $('#party-online', wrap).hidden = !online;
+    if ($('#party-ep-field', wrap)) $('#party-ep-field', wrap).hidden = online;
+    $$('#party-ep option', wrap).forEach((o) => { o.hidden = !!byEp[o.value] && !!byEp[o.value].stream !== (source === 'torrent'); });
+    const sel = $('#party-ep', wrap);
+    if (sel && sel.selectedOptions[0]?.hidden) sel.value = [...sel.options].find((o) => !o.hidden)?.value || sel.value;
+  };
+  $$('[data-src]', wrap).forEach((b) => b.addEventListener('click', () => { source = b.dataset.src; showSource(); }));
+  showSource();
   $('[data-p="start"]', wrap).addEventListener('click', async (e) => {
     if (!item && party.st?.active) { party.open = true; drawPartyDock(); closeModal(wrap); return; }
-    const key = $('#party-ep', wrap)?.value || current;
+    let key = $('#party-ep', wrap)?.value || current;
+    if (source === 'online' && series) key = `${$('#party-se', wrap)?.value || 1}:${$('#party-en', wrap)?.value || 1}`;
     const [season, episode] = (key || '1:1').split(':').map(Number);
-    const path = item ? (series ? local.by_episode?.[key]?.path : local.target?.path) : '';
+    const path = item && source !== 'online' ? (series ? local.by_episode?.[key]?.path : local.target?.path) : '';
+    const site = $('#party-site', wrap)?.value || sites[0]?.id || '';
     e.target.disabled = true;
-    e.target.textContent = 'Starting…';
+    e.target.textContent = source === 'online' ? `Finding it on ${(sites.find((x) => x.id === site) || {}).name || 'your site'}…` : 'Starting…';
     try {
-      const r = await api('POST', '/api/party/start', item ? { item_id: item.id, season, episode, path: path || '' } : {});
+      const r = await api('POST', '/api/party/start', item ? { item_id: item.id, season, episode, path: path || '', source, site } : {});
       if (r.need_file) out.innerHTML = `<div class="warn">${esc(r.message)}</div>`;
       party.open = true;
       await pollParty();
@@ -4558,12 +4586,27 @@ async function playScraped(wrap, opts = {}) {
   const next = sites[(sites.indexOf(site) + 1) % sites.length];
   // The episode's streams (sub / dub / servers) and the stream's qualities, as on ani-cli: pick any.
   const kindTag = (k) => ({ sub: 'Sub · ', dub: 'Dub · ', raw: 'Raw · ' }[k] || '');
-  const chips = `${(res.streams || []).length > 1 ? `<div class="scrape-chips"><span class="muted small">Stream</span>${res.streams.map((x) => `<button class="chip-btn ${res.stream?.id === x.id ? 'on' : ''}" data-stream="${esc(x.id)}">${esc(kindTag(x.kind) + x.label)}</button>`).join('')}</div>` : ''}
+  // Sub or Dub, always offered: the one playing is lit, the other is added to the player meanwhile.
+  const track = res.track || res.stream?.kind || (res.ok ? 'sub' : '');
+  const versions = `<div class="scrape-versions"><span class="muted small">Version</span>
+    ${[['sub', 'Sub (Japanese + subtitles)'], ['dub', 'Dub (English)']].map(([k, l]) => `<button class="chip-btn big ${track === k ? 'on' : ''}" data-track="${k}">${l}</button>`).join('')}</div>`;
+  const servers = (res.streams || []).filter((x) => !track || !x.kind || x.kind === track);
+  const chips = `${versions}${servers.length > 1 ? `<div class="scrape-chips"><span class="muted small">Server</span>${servers.map((x) => `<button class="chip-btn ${res.stream?.id === x.id ? 'on' : ''}" data-stream="${esc(x.id)}">${esc(kindTag(x.kind) + x.label)}</button>`).join('')}</div>` : ''}
     ${(res.qualities || []).length ? `<div class="scrape-chips"><span class="muted small">Quality</span>${[...res.qualities.map((q) => q.label), 'auto'].map((q) => `<button class="chip-btn ${(res.quality || 'auto') === q ? 'on' : ''}" data-quality="${esc(q)}">${q === 'auto' ? 'Auto' : esc(q)}</button>`).join('')}</div>` : ''}
     ${(res.tried || []).length ? `<p class="muted small">Didn't play: ${esc(res.tried.join(' · '))}</p>` : ''}`;
   const chipClick = (e) => {
     const st = e.target.closest('[data-stream]');
     const q = e.target.closest('[data-quality]');
+    const tr = e.target.closest('[data-track]');
+    const link = e.target.closest('[data-link]')?.dataset.link;
+    if (tr) { if (tr.dataset.track !== track || !res.ok) playScraped(wrap, { site: site.id, stream: `x:${tr.dataset.track}:` }); return true; }
+    if (link === 'change') { const d = $('.scrape-others', wrap); if (d) { d.open = true; d.scrollIntoView({ block: 'nearest' }); } return true; }
+    if (link === 'unlink') {
+      api('POST', `/api/items/${item.id}/scraped/unlink`, { site: site.id })
+        .then(() => { toast(`Disconnected from ${site.name} - it's searched again next time`); api('POST', '/api/player/stop').catch(() => {}); watchChoice(wrap); })
+        .catch(fail);
+      return true;
+    }
     if (st) { playScraped(wrap, { site: site.id, stream: st.dataset.stream }); return true; }
     if (q) { playScraped(wrap, { site: site.id, stream: res.stream?.id || '', quality: q.dataset.quality }); return true; }
     return false;
@@ -4571,13 +4614,19 @@ async function playScraped(wrap, opts = {}) {
   const nextBtn = sites.length > 1 ? `<button class="btn ${res.ok ? 'btn-ghost' : 'btn-white'}" data-x="next">${res.ok ? 'Not right? ' : ''}Try ${esc(next.name)} ›</button>` : '';
   const pickList = others.length ? `<details class="scrape-others" ${res.ok ? '' : 'open'}><summary>${res.ok ? 'Not the right title? Pick another' : 'Pick the right title'}</summary>
     <div class="file-list">${others.map((o, i) => `<button data-pick="${i}"><span class="tag">${o.score}%</span><span class="fname">${esc(o.name)}</span></button>`).join('')}</div></details>` : '';
+  // The title it's matched to on the site, in front of the episode: change it or disconnect it.
+  const match = res.entry?.url ? `<div class="scrape-match"><span class="muted small">Matched to</span>
+    <a href="${esc(res.entry.url)}" target="_blank" rel="noopener"><b>${esc(res.entry.name || res.entry.url)}</b></a>
+    <span class="muted small">on ${esc(res.site)}</span>
+    ${others.length ? '<button class="chip-btn" data-link="change">Change</button>' : ''}
+    <button class="chip-btn" data-link="unlink" title="Forget this match; it's searched again next time">Disconnect</button></div>` : '';
   if (!res.ok) {
     const body = watchBody(wrap, `<div class="center"><div class="result-icon">🔎</div><h2>Couldn't play it from ${esc(res.site)}</h2>
       <p class="sub">${esc(res.error)}</p>
       <div class="btns" style="justify-content:center;margin-top:12px">
         ${nextBtn}
         ${res.page ? `<button class="btn ${nextBtn ? 'btn-ghost' : 'btn-white'}" data-x="page">Open the page in the browser instead</button>` : ''}
-        <button class="btn btn-ghost" data-x="back">Back</button></div>${chips}</div>${pickList}`);
+        <button class="btn btn-ghost" data-x="back">Back</button></div>${match}${chips}</div>${pickList}`);
     body.addEventListener('click', (e) => {
       if (chipClick(e)) return;
       const x = e.target.closest('[data-x]')?.dataset.x;
@@ -4595,8 +4644,11 @@ async function playScraped(wrap, opts = {}) {
   const inBrowser = res.player === 'browser';
   const body = watchBody(wrap, `<div class="center"><div class="result-icon">${inBrowser ? '🌐' : '▶️'}</div>
     <h2>${inBrowser ? `Opened ${esc(what)} in ${browserName()}` : `Playing ${esc(what)}`}</h2>
-    <p class="sub">From ${esc(res.site)}: <b>${esc(res.entry?.name || '')}</b>${res.resumed_at ? `<br><span class="small">Resumed at ${fmtTime(res.resumed_at)}</span>` : ''}
+    <p class="sub">${res.resumed_at ? `<span class="small">Resumed at ${fmtTime(res.resumed_at)}</span>` : ''}
       ${res.note ? `<br><span class="small muted">${esc(res.note)}</span>` : ''}</p>
+    ${match}
+    ${res.loading_more ? `<p class="muted small scrape-more"><span class="spin-dot"></span> Adding the ${track === 'dub' ? 'sub' : 'dub'} version and the next episodes to the player.
+      In the player, <b>#</b> switches the audio (Japanese / English), <b>j</b> the subtitles and <b>v</b> shows or hides them; <b>&gt;</b> plays the next episode.</p>` : ''}
     ${res.player === 'mpv' ? '<div class="live muted small" id="live">Opening the player…</div>' : ''}
     <div class="btns" style="justify-content:center"><button class="btn btn-white" data-x="done">Done</button>
       ${nextBtn}
@@ -4969,10 +5021,7 @@ function drawVideoSites(wrap) {
   box.innerHTML = wrap.vsites.length ? wrap.vsites.map((x, i) => `<div class="site-row ${x.on ? '' : 'off'}" data-i="${i}">
       <label class="svc-on" title="Use it"><input type="checkbox" class="vsite-on" ${x.on ? 'checked' : ''}></label>
       <div class="svc-main">
-        <div class="svc-line"><label class="svc-chip"><input type="checkbox" class="vsite-ap" ${x.ap ? 'checked' : ''}> AP</label>
-          <label class="svc-chip"><input type="checkbox" class="vsite-ak" ${x.ak ? 'checked' : ''}> AK</label>
-          <label class="svc-chip"><input type="checkbox" class="vsite-ra" ${x.ra || x.catch ? 'checked' : ''}> RA</label>
-          <input class="input vsite-name" value="${esc(x.name)}" placeholder="Name">
+        <div class="svc-line"><input class="input vsite-name" value="${esc(x.name)}" placeholder="Name">
           <input class="input vsite-url" value="${esc(x.url)}" placeholder="https://yoursite/search?q={title}" spellcheck="false"></div>
         <div class="svc-line small">${[['anime', 'Anime'], ['tv', 'TV shows'], ['movie', 'Movies']].map(([k, l]) => `<label class="svc-chip"><input type="checkbox" class="vsite-type" value="${k}" ${(x.types || []).includes(k) ? 'checked' : ''}>${l}</label>`).join('')}
           <label class="svc-chip check" title="Where it plays">Opens in
@@ -4994,10 +5043,6 @@ function readVideoSites(wrap) {
     x.url = $('.vsite-url', row).value.trim();
     x.types = $$('.vsite-type', row).filter((c) => c.checked).map((c) => c.value);
     x.open = $('.vsite-open', row).value;
-    x.ap = !!$('.vsite-ap', row)?.checked;
-    x.ak = !!$('.vsite-ak', row)?.checked;
-    x.ra = !!$('.vsite-ra', row)?.checked;
-    x.catch = x.ra;
   });
   return wrap.vsites;
 }

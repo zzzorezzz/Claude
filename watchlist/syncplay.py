@@ -34,12 +34,16 @@ def new_room():
 
 def make_invite(server, room, item=None, season=None, episode=None, host=None, now=None):
     """An invite to a room (and, with item, what it was started for). `now` is
-    what the host is playing (with a torrent's magnet and exact file), so a guest's
-    app starts getting it ready the moment it joins."""
+    what the host is playing (a torrent's magnet and exact file, or the video site
+    and its title there), so a guest's app starts getting it ready the moment it joins."""
     data = {"s": server, "r": room}
     if now:
         data["now"] = {k: now[k] for k in ("src", "id", "type", "title", "season", "episode", "key", "label",
-                                            "magnet", "th", "ti", "peer") if now.get(k) not in (None, "")}
+                                            "magnet", "th", "ti", "peer", "url", "referer", "sub", "track",
+                                            "site", "entry") if now.get(k) not in (None, "")}
+        if now.get("headers"):
+            # (never your cookies: only what says where the video is played from)
+            data["now"]["headers"] = {k: v for k, v in now["headers"].items() if k in ("Origin", "User-Agent")}
     if item:
         data.update({"t": item["title"], "y": item.get("year"), "k": item["type"],
                      "src": item["source"], "id": item["source_id"]})
@@ -49,6 +53,14 @@ def make_invite(server, room, item=None, season=None, episode=None, host=None, n
         data["se"], data["ep"] = season, episode
     raw = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return PREFIX + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def online_source(meta):
+    """The video site of what the host plays from one ({"name", "url"}), or None."""
+    site = (meta or {}).get("site")
+    if isinstance(site, dict) and str(site.get("url") or "").lower().startswith(("http://", "https://")):
+        return {"name": str(site.get("name") or "")[:40], "url": str(site["url"])}
+    return None
 
 
 def read_invite(code):
@@ -77,6 +89,6 @@ def read_invite(code):
     if data.get("ep"):
         out["season"], out["episode"] = int(data.get("se") or 1), int(data["ep"])
     now = data.get("now")
-    if isinstance(now, dict) and str(now.get("magnet") or "").startswith("magnet:?"):
+    if isinstance(now, dict) and (str(now.get("magnet") or "").startswith("magnet:?") or online_source(now)):
         out["now"] = now
     return out
