@@ -1461,7 +1461,7 @@ class App:
                 self.open_link(e.page)
                 return {"ok": True, "player": "browser", "page": e.page, "site": site["name"], "note": str(e)}
             return {"ok": False, "error": str(e), "page": e.page, "site": site["name"],
-                    "others": (self.scraper.remembered(item["id"], site["id"]) or {}).get("others") or []}
+                    "others": (self.scraper.remembered(item["id"], site) or {}).get("others") or []}
         key = f"{season}:{episode}" if series else "movie"
         result = {"ok": True, "site": site["name"], "entry": found["entry"], "others": found["others"],
                   "page": found["page"]}

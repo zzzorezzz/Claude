@@ -185,6 +185,18 @@ class ScraperTest(unittest.TestCase):
         self.assertEqual(got["page"], self.base + "/ep/h2-3")
         self.assertEqual(self.scraper.resolve(self.site, item, 1, 3)["entry"]["url"], self.base + "/anime/haikyuu-2")
 
+    def test_a_new_link_for_the_site_starts_afresh(self):
+        item = anime("Haikyuu!!")
+        self.scraper.resolve(self.site, item, 1, 3)
+        moved = dict(self.site, url=self.base + "/find?q={title}")       # same site in Settings, new link
+        _Site.pages["/find"] = '<a href="/anime/haikyuu-new">Haikyuu!!</a>'
+        _Site.pages["/anime/haikyuu-new"] = '<a href="/ep/new-3">Episode 3</a>'
+        _Site.pages["/ep/new-3"] = f'<video src="{self.base}/videos/abc/master.m3u8"></video>'
+        _Site.hits.clear()
+        got = self.scraper.resolve(moved, item, 1, 3)
+        self.assertEqual((got["entry"]["url"], got["page"]), (self.base + "/anime/haikyuu-new", self.base + "/ep/new-3"))
+        self.assertTrue(any(h.startswith("/find") for h in _Site.hits))
+
     def test_settings_check_the_link(self):
         with self.assertRaises(ValueError):
             scrape.clean([{"name": "x", "url": "https://site/search?q=frieren"}])

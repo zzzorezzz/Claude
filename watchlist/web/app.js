@@ -4416,7 +4416,7 @@ function watchChoice(wrap, { reason = '' } = {}) {
         <span>${(wrap.st.torrentCount || 0) ? "This show's torrent doesn't have this episode. Add another magnet link:" : "Paste this show's magnet link - only the episode you play downloads:"}</span></div>
         <div class="magnet-row"><input class="input" id="w-magnet" placeholder="magnet:?xt=…" spellcheck="false"><button class="btn btn-white btn-sm" data-choice="add-magnet">Add & stream</button></div></div>` : ''}
       ${!stream && tor.available && hasTorrentSite(item) ? `<button class="choice" data-choice="get-magnet">${ICON.search}<b>Get magnet from my sites</b><span>Finds the best torrent of it on your sites and adds it</span></button>` : ''}
-      ${videoSites(item).length ? `<button class="choice ${local || stream ? '' : 'primary'}" data-choice="scraped">${ICON.play}<b>Play online (my sites)</b><span>${esc(videoSites(item).map((x) => x.name).join(', '))} - found on your site and played here straight away, nothing downloaded first</span></button>` : ''}
+      ${videoSites(item).map((x, n) => `<button class="choice ${local || stream || n ? '' : 'primary'}" data-choice="scraped" data-site="${esc(x.id)}">${ICON.play}<b>Play online${videoSites(item).length > 1 ? `: ${esc(x.name)}` : ' (my sites)'}</b><span>${videoSites(item).length > 1 ? 'Your video site' : esc(x.name)} - found there and played here straight away, nothing downloaded first</span></button>`).join('')}
       <button class="choice" data-choice="online">${ICON.globe}<b>Watch online</b><span>${esc(servicesLine(item))}</span></button>
       <button class="choice" data-choice="find">${ICON.pc}<b>Find the file on my ${pcName()}</b><span>Pick the file (or a folder for this title)</span></button>
     </div>`);
@@ -4443,7 +4443,7 @@ function watchChoice(wrap, { reason = '' } = {}) {
         upsert(await api('PUT', `/api/items/${item.id}`, { local_broken: false }));
         await playFile(wrap, local, info.subtitles?.[0], wrap.st.player);
       } else if (c === 'online') drawOnline(wrap);
-      else if (c === 'scraped') playScraped(wrap);
+      else if (c === 'scraped') playScraped(wrap, { site: e.target.closest('[data-site]')?.dataset.site });
       else if (c === 'find') watchLocal(wrap, { choose: true });
       else if (c === 'add-magnet') await addMagnetAndStream(wrap);
       else if (c === 'get-magnet') {

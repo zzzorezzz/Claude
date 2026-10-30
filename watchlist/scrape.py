@@ -556,8 +556,13 @@ class Scraper:
         with self.lock:
             write_json(self.path, self.memory, compact=True)
 
-    def remembered(self, item_id, site_id):
-        return (self.memory.get(item_id) or {}).get(site_id)
+    def remembered(self, item_id, site):
+        """What was found for a title on a site. Nothing once the site's link has
+        changed in Settings (it's then another site, even with the same name)."""
+        mem = (self.memory.get(item_id) or {}).get(site["id"])
+        if mem and mem.get("link") != site["url"]:
+            return None
+        return mem
 
     def forget(self, item_id):
         if self.memory.pop(item_id, None) is not None:
@@ -594,14 +599,14 @@ class Scraper:
 
     def _entry(self, site, item, season, pin=""):
         """(entry url, entry name, other results) for a title, remembered."""
-        mem = self.remembered(item["id"], site["id"]) or {}
+        mem = self.remembered(item["id"], site) or {}
         key = str(season or "")
         entries = mem.get("entries") or {}
         if pin:
             got = {"url": pin, "name": (next((c["name"] for c in mem.get("others") or [] if c["url"] == pin), pin)),
                    "at": time.time(), "pinned": True}
             entries[key] = got
-            self._remember(item["id"], site["id"], entries=entries, episodes={})
+            self._remember(item["id"], site, entries=entries, episodes={})
             return got, mem.get("others") or []
         got = entries.get(key)
         if got and (got.get("pinned") or time.time() - got.get("at", 0) < ENTRY_DAYS * 86400):
@@ -614,12 +619,15 @@ class Scraper:
         got = {"url": best["url"], "name": best["name"], "score": best["score"], "at": time.time()}
         entries[key] = got
         others = [{"url": c["url"], "name": c["name"], "score": c["score"]} for c in ranked[:8]]
-        self._remember(item["id"], site["id"], entries=entries, others=others, episodes={})
+        self._remember(item["id"], site, entries=entries, others=others, episodes={})
         return got, others
 
-    def _remember(self, item_id, site_id, **patch):
+    def _remember(self, item_id, site, **patch):
         with self.lock:
-            mem = self.memory.setdefault(item_id, {}).setdefault(site_id, {})
+            sites = self.memory.setdefault(item_id, {})
+            mem = sites.get(site["id"])
+            if not mem or mem.get("link") != site["url"]:
+                mem = sites[site["id"]] = {"link": site["url"]}      # a new link: start afresh
             mem.update(patch)
         self._save()
 
@@ -646,7 +654,7 @@ class Scraper:
         entry, others = self._entry(site, item, tv_season, pin)
         if movie:
             return entry["url"], entry, others
-        mem = self.remembered(item["id"], site["id"]) or {}
+        mem = self.remembered(item["id"], site) or {}
         cached = (mem.get("episodes") or {})
         key = f"{tv_season or ''}:{season}:{episode}"
         if key in cached:
@@ -667,7 +675,7 @@ class Scraper:
                                   + (f" (it lists {len(eps)} episodes)" if eps else ""), page=final)
         cached = dict(cached)
         cached[key] = url
-        self._remember(item["id"], site["id"], episodes=cached)
+        self._remember(item["id"], site, episodes=cached)
         return url, entry, others
 
     def resolve(self, site, item, season=None, episode=None, pin=""):
@@ -675,7 +683,7 @@ class Scraper:
         works), "page", "referer", "entry", "others", "site"}. Raises ScrapeError."""
         page_url, entry, others = self.episode_page(site, item, season, episode, pin)
         out = {"page": page_url, "entry": entry, "others": others, "site": site["name"], "url": "", "referer": ""}
-        mem = self.remembered(item["id"], site["id"]) or {}
+        mem = self.remembered(item["id"], site) or {}
         hit = (mem.get("videos") or {}).get(page_url)
         if hit and time.time() - hit.get("at", 0) < VIDEO_FOR:
             out.update(url=hit["url"], referer=hit["referer"])
@@ -690,7 +698,7 @@ class Scraper:
         out.update(url=got["url"], referer=got["referer"])
         videos = {k: v for k, v in (mem.get("videos") or {}).items() if time.time() - v.get("at", 0) < VIDEO_FOR}
         videos[page_url] = {"url": got["url"], "referer": got["referer"], "at": time.time()}
-        self._remember(item["id"], site["id"], videos=videos)
+        self._remember(item["id"], site, videos=videos)
         return out
 
 
