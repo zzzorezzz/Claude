@@ -9,10 +9,10 @@ Latest builds:
 | Platform | State | Run |
 |---|---|---|
 | Android (APK) | Phone player, torrents, watch parties. Built and emulator-checked before round 10. | [run 40896330674](https://github.com/zzzorezzz/Claude/actions/runs/40896330674) |
-| Windows (exe) | Round 10 (with the Android work's shared changes). Built, tests green. | [run 40975144354](https://github.com/zzzorezzz/Claude/actions/runs/40975144354) |
+| Windows (exe) | Round 10 + the ad blocker and the hidden-browser video catcher. Built, tests green. | [run 40986454534](https://github.com/zzzorezzz/Claude/actions/runs/40986454534) |
 | Mac (dmg) | Round 9 + the profile-picture fix. | built with the `[mac]` commit `b757170` |
 
-Round 10 is built for Windows (run 40975144354); the ad blocker and scraper fallbacks after it aren't built yet. Mac and Android don't have round 10. Build only the one the user asks for. `gh` is signed in on the user's PC.
+Windows has everything up to the ad blocker and the scraper's browser fallbacks (run 40986454534). Mac and Android don't have round 10. Build only the one the user asks for. `gh` is signed in on the user's PC.
 
 ### Round 10 (2026-10-30)
 
