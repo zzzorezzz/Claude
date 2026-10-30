@@ -231,9 +231,23 @@ class PageTest(unittest.TestCase):
         scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/master.m3u8", "headers": {},
                                                 "subs": ["https://cdn.test/subs/en.vtt"]})
         [site] = scrape.clean([{"name": "RA", "url": "https://site.test/search?q={title}", "ra": True}])
-        with mock.patch.object(scraper, "episode_page", return_value=("https://site.test/watch/ep-1", {"url": "https://site.test/title"}, [])):
+        with mock.patch.object(scraper, "episode_page", return_value=("https://site.test/watch/ep-1", {"url": "https://site.test/title"}, [])),                 mock.patch.object(scrape, "pick_subtitle", side_effect=lambda urls, headers=None: urls[0]) as pick:
             got = scraper.resolve(site, anime("A show", id="ra-subs"), 1, 1)
         self.assertEqual(got["subtitle"], "https://cdn.test/subs/en.vtt")
+        pick.assert_called_once()
+
+    def test_preview_thumbnails_are_not_subtitles_and_english_comes_first(self):
+        bodies = {"https://c.test/thumbs.vtt": b"WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nsprite.jpg#xywh=0,0,160,90\n",
+                  "https://c.test/ara-7.vtt": b"WEBVTT\n\n00:00:03.120 --> 00:00:09.690\nKalimat hunaka fil nass\n",
+                  "https://c.test/eng-2.vtt": b"WEBVTT\n\n00:00:03.120 --> 00:00:09.690\nI'm fine, I'm fine.\n"}
+
+        def opened(req, **k):
+            r = mock.MagicMock()
+            r.__enter__.return_value.read.return_value = bodies[req.full_url]
+            return r
+        with mock.patch("urllib.request.urlopen", side_effect=opened):
+            self.assertEqual(scrape.pick_subtitle(list(bodies)), "https://c.test/eng-2.vtt")
+            self.assertEqual(scrape.pick_subtitle(["https://c.test/thumbs.vtt"]), "")
 
     def test_ra_dub_choice_clicks_the_dub_button_not_autoplay(self):
         scraper = scrape.Scraper(tempfile.mkdtemp())
@@ -565,19 +579,19 @@ class CleanOldTest(unittest.TestCase):
         self.deleted = []
         self.t.delete_file = lambda h, i: self.deleted.append((h, i))
 
-    def test_only_files_older_than_48_hours_and_not_kept(self):
+    def test_only_files_older_than_12_hours_and_not_kept(self):
         now = time.time()
         self.assertEqual(self.t.clean_old(now), 0)                  # first seen now: nothing is old yet
-        self.assertEqual(self.t.clean_old(now + 47 * 3600), 0)
-        self.assertEqual(self.t.clean_old(now + 49 * 3600), 2)
+        self.assertEqual(self.t.clean_old(now + 11 * 3600), 0)
+        self.assertEqual(self.t.clean_old(now + 13 * 3600), 2)
         self.assertEqual(self.deleted, [("h2", 0)])                 # the kept show's file stays
         self.assertFalse((self.folder / "leftover.mkv").exists())  # a file of no torrent goes too
 
     def test_a_file_played_recently_isnt_old(self):
         now = time.time()
         self.t.clean_old(now)
-        self.t.records["h2"]["used"] = {"0": now + 40 * 3600}
-        self.t.clean_old(now + 49 * 3600)
+        self.t.records["h2"]["used"] = {"0": now + 6 * 3600}
+        self.t.clean_old(now + 13 * 3600)
         self.assertEqual(self.deleted, [])
 
 

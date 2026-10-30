@@ -45,6 +45,17 @@ LOCAL_DEFAULTS = {
     # "Play this with" on the title's page: "" (use anything), "file", "torrent",
     # "scraped" (your video sites) or "online" (your streaming services).
     "play_with": "",
+    # Your own video sites for this title: the one preferred, one per episode (chosen by
+    # right-click), the site each episode is linked to, and "keep connected" (that link
+    # is played whatever the preferred site says).
+    "online_site": "",
+    "online_site_eps": {},
+    "online_links": {},
+    "keep_site": False,
+    # The torrent attached stays attached ("Get magnet" doesn't swap it).
+    "keep_magnet": False,
+    # The streaming service this title opens on (Troubleshoot → streaming service).
+    "online_service": "",
 }
 
 

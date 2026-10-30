@@ -71,8 +71,9 @@ DEFAULT_SETTINGS = {
     "ai_order": [],
     # The app's colours: "violet", "crimson", "ocean", "emerald", "sunset", "rose" or "mono".
     "theme": "violet",
-    # Skip openings and endings in the built-in player (when the file marks them).
-    "skip_intro": True,
+    # Skip openings and endings in the built-in player (when the file marks them): off
+    # unless you turn it on while watching (Shift+S).
+    "skip_intro": False,
     # Watch together (Syncplay): your name, the server and Syncplay's location.
     "party_name": "",
     # Your picture in watch parties (a small "data:image/jpeg;base64,..."), or "".
@@ -84,6 +85,11 @@ DEFAULT_SETTINGS = {
     "sounds": True,
     # Ask "Do you want help setting it up?" when the app opens (until "Don't show again").
     "setup_prompt": True,
+    # "full" (downloads, torrents, streaming services and your own sites) or "simple"
+    # (watching online only); "" until you choose, the first time the app opens.
+    "mode": "",
+    # Ask about the setup guide once more (after switching between full and simple).
+    "ask_guide": False,
     # Changes made once to settings saved by older versions (see Settings.__init__).
     "migrated": [],
 }
@@ -100,7 +106,8 @@ OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
 TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "custom_player_path", "sync_folder",
              "downloads_folder", "last_folder", "gemini_api_key", "groq_api_key", "openrouter_api_key",
              "party_name", "party_server")
-BOOL_KEYS = ("queue_next_episodes", "skip_intro", "sounds", "setup_prompt", "adblock")
+BOOL_KEYS = ("queue_next_episodes", "skip_intro", "sounds", "setup_prompt", "adblock", "ask_guide")
+MODES = ("full", "simple")
 
 
 def clean_ai_custom(helpers):
@@ -198,6 +205,16 @@ class Settings:
             if isinstance(stored, dict) and stored and not stored.get("browser_path"):
                 data["browser_path"] = "builtin"
             data["migrated"] = data["migrated"] + ["builtin-browser"]
+        # Only the built-in player now (VLC and other players aren't offered), the following
+        # episodes always queued, and nothing skipped unless you ask while watching.
+        if "builtin-player" not in data["migrated"]:
+            data.update(player="mpv", queue_next_episodes=True, skip_intro=False)
+            data["migrated"] = data["migrated"] + ["builtin-player"]
+        # Settings from before the full / simple choice: they were the full app.
+        if "mode" not in data["migrated"]:
+            if isinstance(stored, dict) and stored and not stored.get("mode"):
+                data["mode"] = "full"
+            data["migrated"] = data["migrated"] + ["mode"]
         self._data = data
 
     def get(self) -> dict:
@@ -250,6 +267,10 @@ class Settings:
                 if patch["theme"] not in THEMES:
                     raise ValueError("unknown colour theme")
                 data["theme"] = patch["theme"]
+            if "mode" in patch:
+                if patch["mode"] not in MODES:
+                    raise ValueError("mode must be full or simple")
+                data["mode"] = patch["mode"]
             if "player" in patch:
                 if patch["player"] not in ("mpv", "vlc", "custom"):
                     raise ValueError("player must be the built-in one, VLC or your own")

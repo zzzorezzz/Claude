@@ -48,7 +48,7 @@ except ImportError:  # pragma: no cover - the app still works without torrents
 
 DIR_NAME = "Watchlist torrents"
 DELETE_AFTER = 5 * 60         # an episode watched to the end is deleted this long after
-OLD_AFTER = 48 * 3600         # any torrent file not played this long after it arrived is deleted (unless kept)
+OLD_AFTER = 12 * 3600         # any torrent file not played this long after it arrived is deleted (unless kept)
 CLEAN_EVERY = 30 * 60         # how often the torrents folder is looked through for those
 READ_AHEAD = 32 * 1024 * 1024  # bytes asked for urgently ahead of what's being played
 WAIT_FOR_DATA = 90            # seconds a stream waits for a piece before giving up
@@ -390,6 +390,13 @@ class Torrents:
             self._add_handle(h, rec)
             self._save()
         return self.view(h)
+
+    def replace_for(self, item_id, keep):
+        """A new magnet for a title: its other torrents go (one connection per title)."""
+        with self.lock:
+            old = [h for h, rec in self.records.items() if rec["item_id"] == item_id and h != keep]
+        for h in old:
+            self.remove(h)
 
     def remove(self, h, delete_files=True):
         with self.lock:
@@ -828,7 +835,9 @@ class Torrents:
                 self._save_soon()
 
     def _prefetch_next(self):
-        """While an episode streams, the next one downloads too (quietly)."""
+        """While an episode streams, the two before and the two after it download too:
+        quietly while it's still coming, then faster once it's all here (the next one
+        first of all)."""
         now = time.time()
         for (h, index), at in list(self.reading.items()):
             if now - at > 30:
@@ -845,16 +854,20 @@ class Torrents:
             here = next((k for k, v in eps.items() if v["hash"] == h and v["index"] == index), None)
             if not here:
                 continue
-            if not eps[here]["complete"]:
-                continue                     # this one first, all of it
+            done = eps[here]["complete"]
             s, e = (int(x) for x in here.split(":"))
             nxt = eps.get(f"{s}:{e + 1}") or eps.get(f"{s + 1}:1")
-            if nxt and not nxt["complete"]:
-                other = self.records.get(nxt["hash"])
-                handle = self.handles.get(nxt["hash"])
-                if other is not None and handle is not None and int(other["priorities"].get(str(nxt["index"]), 0)) < 4:
-                    other["priorities"][str(nxt["index"])] = 4
-                    handle.file_priority(nxt["index"], 4)
+            around = [nxt, eps.get(f"{s}:{e + 2}"), eps.get(f"{s}:{e - 1}"), eps.get(f"{s}:{e - 2}")]
+            for n, ep in enumerate(around):
+                if not ep or ep["complete"]:
+                    continue
+                # (while this one comes: just a little; after: the next one highest)
+                want = (7 if n == 0 else 4) if done else 1
+                other = self.records.get(ep["hash"])
+                handle = self.handles.get(ep["hash"])
+                if other is not None and handle is not None and int(other["priorities"].get(str(ep["index"]), 0)) < want:
+                    other["priorities"][str(ep["index"])] = want
+                    handle.file_priority(ep["index"], want)
                     self._save_soon()
 
     def _stop_when_done(self):

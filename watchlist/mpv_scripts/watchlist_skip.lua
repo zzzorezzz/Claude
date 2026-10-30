@@ -60,3 +60,11 @@ mp.add_key_binding("S", "watchlist-toggle-skip", function()
     enabled = not enabled
     mp.osd_message(enabled and "Skipping openings and endings" or "Not skipping openings and endings", 2)
 end)
+
+-- Where the episode playing is from (your own site and its page), so a wrong one is easy
+-- to tell. The app sets it as each episode opens.
+mp.register_script_message("show-source", function()
+    local src = mp.get_property("user-data/watchlist/source", "")
+    if src == "" then src = mp.get_property("path", "") end
+    mp.osd_message("Playing from " .. src .. "\nThe wrong episode? Right-click it in Watch Anything → Relink", 8)
+end)

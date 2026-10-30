@@ -387,7 +387,8 @@ def catch_video(url, timeout=30, click=None):
 
     def catch(video, headers):
         u = video.lower()
-        if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u):
+        if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
+                or re.search(r"imdb-video|media-imdb|youtube|googlevideo|ytimg|trailer", u):
             return
         if not any(v == video for v, _, _ in found):
             found.append((video, {k: v for k, v in headers.items() if v}, time.time()))

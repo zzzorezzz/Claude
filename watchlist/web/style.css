@@ -1571,3 +1571,46 @@ body.android #guide { left: 10px; right: 10px; width: auto; bottom: 76px; }
 .scrape-more { max-width: 560px; margin: 10px auto 0; line-height: 1.5; }
 .scrape-more .spin-dot { display: inline-block; vertical-align: middle; }
 .vsite-note { flex: 2; align-self: center; }
+
+/* ---------- Settings: sections as cards, a list of them on the side ---------- */
+.settings-modal { width: min(980px, 100%); }
+.set-form { padding-bottom: 0; }
+.set-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.set-top h2 { margin: 0 auto 0 0; }
+.seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 999px; padding: 2px; background: rgba(255, 255, 255, .03); }
+.seg button { border: 0; background: none; color: var(--muted); padding: 6px 14px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 13px; }
+.seg button.on { background: rgba(var(--accent-rgb), .3); color: var(--text); }
+.set-layout { display: grid; grid-template-columns: 170px 1fr; gap: 20px; align-items: start; }
+.set-nav { position: sticky; top: 0; display: flex; flex-direction: column; gap: 2px; }
+.set-nav a { color: var(--muted); text-decoration: none; padding: 7px 10px; border-radius: 8px; font-size: 14px; }
+.set-nav a:hover { background: rgba(255, 255, 255, .05); color: var(--text); }
+.set-cards { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.set-card { border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, .02); padding: 16px 18px; scroll-margin-top: 10px; }
+.settings-modal .set-card h4 { margin: 0 0 12px; }
+.set-card .field:last-child { margin-bottom: 0; }
+.set-save { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 0 18px;
+  background: linear-gradient(to top, var(--panel) 75%, transparent); margin-top: 10px; }
+.unsaved-note { margin-left: auto; font-size: 13px; color: var(--text); background: rgba(var(--accent-rgb), .18);
+  border: 1px solid rgba(var(--accent-rgb), .5); border-radius: 999px; padding: 6px 12px; animation: fadeIn .2s; }
+.sound-row { margin-top: 12px; font-size: 18px; }
+@media (max-width: 760px) { .set-layout { grid-template-columns: 1fr; } .set-nav { display: none; } }
+
+/* ---------- A title's links to your own sites ---------- */
+.ol-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.ol-field { display: flex; align-items: center; gap: 8px; }
+.ol-field span { color: var(--muted); font-size: 13px; }
+.ol-status { margin-top: 8px; }
+.check-line { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.btn.danger, .btn-ghost.danger { color: #ff8a9a; }
+.tag.tag-link { background: rgba(var(--accent-2-rgb), .14); color: var(--accent-2); }
+.pick-title button.on { border-color: var(--accent); background: rgba(var(--accent-rgb), .18); }
+.party-what-note { margin: 8px 0 0; }
+.about-show { display: block; margin: 30px auto 10px; }
+.card.drag-over-card { outline: 2px dashed var(--accent); outline-offset: 3px; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* The simple version: downloads and torrents out of sight. */
+body.simple .full-only, body.simple #btn-torrents, body.simple .tag-pc, body.simple .tag-stream, body.simple .tag-missing,
+body.simple .ep-file { display: none !important; }
+/* Menus opened from inside a window (an episode's right-click menu) show over it. */
+.menu.ctx { position: fixed; z-index: 400; }

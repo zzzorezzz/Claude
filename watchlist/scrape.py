@@ -59,9 +59,10 @@ VIDEO_FOR = 3 * 3600   # a video's address is reused this long (found again if t
 class ScrapeError(Exception):
     """Nothing playable was found. `page`: the page to open in a browser instead, if any."""
 
-    def __init__(self, message, page=""):
+    def __init__(self, message, page="", choices=None):
         super().__init__(message)
         self.page = page
+        self.choices = choices or []
 
 
 # ---- Settings
@@ -391,6 +392,34 @@ def wanted_of(item, season=None):
     return {"names": names[:6], "season": want, "kind": kind, "year": item.get("year"), "part": part}
 
 
+def name_variants(names, limit=8):
+    """What to search a site for: each name, then shorter forms of it ("Chainsaw Man -
+    The Movie: Reze Arc" -> "Chainsaw Man the Movie: Reze Arc", "Chainsaw Man", "Reze Arc"...).
+    Sites name things their own way; the results are scored against the full names."""
+    out = []
+
+    def add(text):
+        text = re.sub(r"\s*[-–:]\s*(?=[-–:])", "", text or "")              # ("X - : Y" once "The Movie" is gone)
+        text = re.sub(r"\s+", " ", text).strip(" -:,.")
+        if len(text) >= 2 and text.lower() not in {x.lower() for x in out}:
+            out.append(text)
+
+    for name in names:
+        add(name)
+    for name in names:
+        plain = re.sub(r"\s*[\(\[][^)\]]*[\)\]]", " ", name)          # (2019), [TV]
+        add(plain)
+        add(re.sub(r"\s+-\s+", " ", plain))                              # "X - The Movie: Y" -> "X The Movie: Y"
+        for sep in (":", " - ", " – "):
+            if sep in plain:
+                head, tail = plain.split(sep, 1)
+                add(head)
+                add(tail)
+        add(re.sub(r"(?i)\b(?:the\s+)?movie\b|\ba\s+.+\s+movie\b", " ", plain))  # "El Camino: A Breaking Bad Movie"
+        add(re.sub(r"[^\w\s]", " ", plain))
+    return out[:limit]
+
+
 def score(text, wanted):
     """0-100: how well a result's name fits the title."""
     if not text:
@@ -450,6 +479,7 @@ def _same_site(a, b):
 
 _NAV = re.compile(r"^(home|login|log in|sign in|sign up|register|contact|dmca|faq|privacy|terms|next|prev|previous|"
                   r"more|menu|search|genres?|a-z list|az list|top|popular|trending|random|schedule|news|filter|"
+                  r"settings|discover|explore|movies|series|tv|tv shows|anime|categories|watch parties|watch history|"
                   r"\d{1,3}|»|«|>|<|›|‹)$", re.I)
 
 
@@ -476,7 +506,10 @@ def candidates(page, search_page):
         slug = re.sub(r"[-_]+", " ", re.sub(r"\.\w{2,5}$", "", slug))
         slug = re.sub(r"\b[0-9a-f]{6,}\b|\b\d{4,}\b", " ", slug)      # ids in the address
         names = list(dict.fromkeys(e["names"] + ([slug] if slug.strip() else [])))
-        out.append({"url": e["url"], "name": max(e["names"], key=len), "names": names})
+        years = re.findall(r"\b(19[2-9]\d|20[0-4]\d)\b", " ".join(e["names"]) + " " + e["url"])
+        # The name with the most letters ("Death Note", not "37 37 37 TV" from a card's numbers).
+        name = max(e["names"] or names, key=lambda n: (len(re.findall(r"[^\W\d_]", n)), len(n)))
+        out.append({"url": e["url"], "name": name, "names": names, "year": years[0] if years else None})
     return out
 
 
@@ -507,9 +540,12 @@ _EP_TEXT = [re.compile(r"\b(?:episode|ep|eps|e)\.?\s*[-#:]?\s*(\d{1,4})\b", re.I
 _EP_HREF = [re.compile(r"(?:episode|ep|eps)[-_/=]?(\d{1,4})(?:\b|_|$)", re.I),
             re.compile(r"[?&](?:ep|episode|e)=(\d{1,4})\b", re.I)]
 _SE = [re.compile(r"\bs(\d{1,2})[ ._-]*e(\d{1,4})\b", re.I),
+       re.compile(r"/\d{2,}/(\d{1,2})/(\d{1,4})/?(?:[?#]|$)"),
+       re.compile(r"[?&]s(?:eason)?=(\d{1,2})&(?:amp;)?e(?:pisode)?=(\d{1,4})\b", re.I),
        re.compile(r"\bseason[ ._-]*(\d{1,2})[ ._/-]*(?:episode|ep)[ ._-]*(\d{1,4})\b", re.I),
        re.compile(r"\b(\d{1,2})x(\d{1,3})\b")]
 _WATCH = re.compile(r"\b(watch( now| online| episodes?)?|episodes|play( now)?|all episodes|stream)\b", re.I)
+_NOT_WATCH = re.compile(r"\b(parties|party|history|list|later|together|trailer)\b", re.I)
 
 
 def _shape(url):
@@ -612,9 +648,23 @@ def pick_episode(eps, season, episode, absolute=None):
     return None
 
 
-def derive_episode(eps, episode):
+def derive_episode(eps, episode, season=None):
     """An episode's address from the pattern of the ones listed (.../p-3-sub with 1-50
-    shown makes .../p-120-sub), or None."""
+    shown makes .../p-120-sub; .../1396/1/3 makes .../1396/4/4 for another season), or None."""
+    if season is not None and any(s is not None for s, _ in eps):
+        pattern = None
+        for (s2, number), url in eps.items():
+            if s2 is None:
+                continue
+            m = re.search(r"(?<![0-9])" + str(s2) + r"([/&=?_-]+(?:e(?:pisode)?=)?)" + str(number) + r"(?![0-9])", url, re.I)
+            if not m:
+                continue
+            shape = (url[:m.start()], m.group(1), url[m.end():])
+            if pattern is None:
+                pattern = shape
+            elif pattern != shape:
+                return None
+        return f"{pattern[0]}{season}{pattern[1]}{episode}{pattern[2]}" if pattern else None
     pattern = None
     for (season, number), url in eps.items():
         if season is not None:
@@ -645,6 +695,30 @@ def _exists(url, referer=""):
     except ScrapeError as e:
         return not re.search(r"\b(404|410)\b", str(e))
     return True
+
+
+def tmdb_id(item):
+    """("tv" / "movie", TMDB's id) of a title from TMDB, else (None, None)."""
+    m = re.fullmatch(r"(tv|movie)/(\d+)", str(item.get("source_id") or "")) if item.get("source") == "tmdb" else None
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def _tmdb_watch(title_url, item, season=None, episode=None):
+    """A title page addressed by TMDB's id (/title/tv/1399, /tv/1399) whose "Play" isn't a link:
+    the site's watch page for the same id (/watch/1399/4/4, /watch/559969), else None."""
+    kind, tid = tmdb_id(item)
+    parts = urllib.parse.urlsplit(title_url)
+    if not tid or "/watch" in parts.path or not re.search(r"/(?:title/)?(?:tv|movie|series|show)s?/" + tid + r"(?![0-9])", parts.path):
+        return None
+    origin = f"{parts.scheme}://{parts.netloc}"
+    return f"{origin}/watch/{tid}/{season}/{episode}" if season is not None and episode is not None else f"{origin}/watch/{tid}"
+
+
+def _with_se(url, season, episode):
+    """The address with ?s= and ?e= set (sites keyed by TMDB's ids: /watch/1396?s=1&e=3)."""
+    parts = urllib.parse.urlsplit(url)
+    query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if k not in ("s", "e", "ep")]
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode([("s", str(season)), ("e", str(episode))] + query)))
 
 
 def _with_ep(url, episode):
@@ -713,14 +787,15 @@ def watch_links(page, base):
     """The page's "Watch" / "Episodes" links (followed when a title's page lists no episodes)."""
     out = []
     for link in page.links:
-        if _WATCH.search(link["text"] or "") and _same_site(link["href"], base) and link["href"] not in out:
+        if (_WATCH.search(link["text"] or "") and not _NOT_WATCH.search(link["text"] or "")
+                and _same_site(link["href"], base) and link["href"] not in out):
             out.append(link["href"])
     return out[:2]
 
 
 # ---- step 4: the video on an episode's page
 
-_VIDEO_URL = re.compile(r"https?:(?:\\?/){2}[^\s\"'<>()\\]+?\.(?:m3u8|mp4|webm|mkv|mov|m4v|mpd)(?:\?[^\s\"'<>\\]*)?",
+_VIDEO_URL = re.compile(r"https?:(?:\\?/){2}[^\s\"'<>()\\]+?\.(?:m3u8|mp4|webm|mkv|mov|m4v|mpd)(?:[?&][^\s\"'<>\\]*)?",
                         re.I)
 _JSON_SRC = re.compile(r"[\"']?(?:file|src|source|url|hls|video_url|videoUrl|stream|playlist)[\"']?\s*[:=]\s*"
                        r"[\"'](https?:[^\"']+)[\"']", re.I)
@@ -933,6 +1008,30 @@ def qualities(url, headers=None):
             seen.add(q["label"])
             unique.append(q)
     return unique if len(unique) > 1 else []
+
+
+def pick_subtitle(urls, headers=None):
+    """The real subtitles among the caption files a player loaded ("" if none): not its
+    preview thumbnails ("sprite.jpg#xywh=0,0,160,90", which read as numbers and codes),
+    English first."""
+    good = []
+    for url in urls[:6]:
+        req = urllib.request.Request(url, headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
+                                                   **{k: v for k, v in (headers or {}).items() if k in ("Referer", "Origin") and v}})
+        try:
+            with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
+                head = r.read(6000).decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError, ValueError):
+            continue
+        if re.search(r"#xywh=|\.(?:jpe?g|png|webp)\b", head, re.I):
+            continue                          # (preview thumbnails)
+        cues = re.findall(r"\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3}\s*-->", head)
+        words = re.findall(r"[^\W\d_]{2,}", re.sub(r"^.*-->.*$|^WEBVTT.*$|^X-TIMESTAMP.*$", "", head, flags=re.M))
+        if not cues or not words:
+            continue
+        english = bool(re.search(r"(?:^|[/_.\-=])(?:en|eng|english)(?:[/_.\-&]|$)", url.lower()))
+        good.append((0 if english else 1, url))
+    return min(good)[1] if good else ""
 
 
 BOM = bytes([0xEF, 0xBB, 0xBF])
@@ -1260,9 +1359,15 @@ class Scraper:
     def remembered(self, item_id, site):
         """What was found for a title on a site. Nothing once the site's link has
         changed in Settings (it's then another site, even with the same name)."""
-        mem = (self.memory.get(item_id) or {}).get(site["id"])
+        mine = self.memory.get(item_id) or {}
+        mem = mine.get(site["id"])
         if mem and mem.get("link") != site["url"]:
             return None
+        if mem is None:
+            # Added again (a new id, the same address): what was linked before still holds.
+            old = next((k for k, v in mine.items() if isinstance(v, dict) and v.get("link") == site["url"]), None)
+            if old:
+                mem = mine[site["id"]] = mine.pop(old)
         return mem
 
     def unlink(self, item_id, site):
@@ -1287,7 +1392,7 @@ class Scraper:
             self._note(f"Searched {site['name']} (JSON API) for {', '.join(wanted['names'][:3])}: {len(ranked)} results"
                        + (" - best: " + "; ".join(f"{c['name']} ({c['score']}%)" for c in ranked[:3]) if ranked else ""))
             return ranked
-        queries = list(dict.fromkeys(n for n in wanted["names"][:3]))
+        queries = name_variants(wanted["names"])
         if wanted["season"] > 1 and item.get("source") == "tmdb":
             queries.insert(1, f"{wanted['names'][0]} season {wanted['season']}")
 
@@ -1315,17 +1420,30 @@ class Scraper:
                             errors.pop()
             return found
 
-        found, seen = [], set()
-        with ThreadPoolExecutor(4) as pool:
-            for rows in pool.map(one, queries[:4]):
-                for r in rows:
-                    if r["url"] not in seen:
-                        seen.add(r["url"])
-                        found.append(r)
-        if not found and errors and len(errors) == len(queries[:4]):
+        found, seen, asked = [], set(), []
+        with ThreadPoolExecutor(2) as pool:
+            for at in range(0, len(queries), 2):
+                batch = queries[at:at + 2]
+                asked += batch
+                for rows in pool.map(one, batch):
+                    for r in rows:
+                        if r["url"] not in seen:
+                            seen.add(r["url"])
+                            found.append(r)
+                ranked = best_entry(found, wanted)
+                if ranked and ranked[0]["score"] >= 85:
+                    break                       # (a clear match: the shorter names aren't needed)
+        if not found and errors and len(errors) == len(asked):
             raise ScrapeError(f"{site['name']}: {errors[0]}")
         ranked = best_entry(found, wanted)
-        self._note(f"Searched {site['name']} for {', '.join(queries[:4])}: {len(ranked)} results"
+        kind, tid = tmdb_id(item)
+        if tid:
+            same = re.compile(r"(?<![0-9])/" + tid + r"(?![0-9])")
+            hits = [dict(c, score=100) for c in ranked if same.search(urllib.parse.urlsplit(c["url"]).path)
+                    and not re.search(r"/(movie|film)s?/" if kind == "tv" else r"/(tv|series|show)s?/", c["url"], re.I)]
+            if hits:
+                ranked = hits + [c for c in ranked if c["url"] not in {h["url"] for h in hits}]
+        self._note(f"Searched {site['name']} for {', '.join(asked)}: {len(ranked)} results"
                    + (" - best: " + "; ".join(f"{c['name']} ({c['score']}%)" for c in ranked[:3]) if ranked else ""))
         return ranked
 
@@ -1346,16 +1464,28 @@ class Scraper:
         if got and (got.get("pinned") or time.time() - got.get("at", 0) < ENTRY_DAYS * 86400):
             return got, mem.get("others") or []
         ranked = self.search(site, item, season)
+        kind, tid = tmdb_id(item)
+        if tid and (not ranked or ranked[0]["score"] < 60):
+            # A site whose search isn't links (ShuttleTV): its usual address for TMDB's id.
+            origin = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(site["url"]))
+            ranked = [{"url": f"{origin}/watch/{tid}", "name": item["title"], "score": 60, "names": [item["title"]]}] + ranked
+            self._note(f"Nothing clear in the search: trying {origin}/watch/{tid} (the title's TMDB id)")
+        others = [{"url": c["url"], "name": c["name"], "score": c["score"]} for c in ranked[:8]]
         if not ranked or ranked[0]["score"] < 25:
+            self._remember(item["id"], site, others=others)
             raise ScrapeError(f"{site['name']} has nothing that looks like {item['title']}"
-                              + (f" (closest: {ranked[0]['name']})" if ranked else ""))
+                              + (f" (closest: {ranked[0]['name']})" if ranked else ""), choices=others)
         best = ranked[0]
+        if (best["score"] < 75 and len(ranked) > 1 and ranked[1]["score"] >= best["score"] - 6
+                and library.norm(ranked[1]["name"]) != library.norm(best["name"])):
+            # Too close to call: you pick (and it's remembered).
+            self._remember(item["id"], site, others=others)
+            raise ScrapeError(f"which of these on {site['name']} is {item['title']}?", choices=others)
         got = {"url": best["url"], "name": best["name"], "score": best["score"], "at": time.time()}
         if best.get("id"):
             got["id"] = best["id"]
         self._note(f"Opened {best['name']} ({best['score']}% match): {best['url']}")
         entries[key] = got
-        others = [{"url": c["url"], "name": c["name"], "score": c["score"]} for c in ranked[:8]]
         self._remember(item["id"], site, entries=entries, others=others, episodes={})
         return got, others
 
@@ -1365,7 +1495,7 @@ class Scraper:
             mem = sites.get(site["id"])
             if not mem or mem.get("link") != site["url"]:
                 mem = sites[site["id"]] = {"link": site["url"]}      # a new link: start afresh
-            mem.update(patch)
+            mem.update(patch, name=site["name"])
         self._save()
 
     def _episodes(self, entry_url, fresh=False):
@@ -1400,43 +1530,139 @@ class Scraper:
         self._note(f"{final}: {len(eps)} episode link{'s' if len(eps) != 1 else ''}")
         return eps, final, page, text
 
+    def _episode_index(self, site, item, entry, tv_season, fresh=False):
+        """A title's episodes on a site, read once and kept a while (so linking every
+        episode reads the title's page once): {"eps": {(season, n): url}, "final", "itself"}
+        where "itself" says the title's page plays its episodes itself (?ep=)."""
+        mem = self.remembered(item["id"], site) or {}
+        lists = dict(mem.get("eplists") or {})
+        k = str(tv_season or "")
+        got = lists.get(k)
+        if got and got.get("entry") == entry["url"] and not fresh and time.time() - got.get("at", 0) < EPISODES_FOR:
+            eps = {}
+            for key, url in (got.get("eps") or {}).items():
+                a, _, b = key.partition(":")
+                eps[(int(a) if a else None, int(b))] = url
+            return {"eps": eps, "final": got.get("final") or entry["url"], "itself": got.get("itself"), "cached": True}
+        eps, final, page, text = self._episodes(entry["url"])
+        if eps and len(eps) < 5 and min(n for _, n in eps) > 3:
+            eps = {}            # a few numbered links (related films, "Movie 2"...) aren't an episode list
+        itself = not eps and bool(re.search(r"(?:^|&)ep=", urllib.parse.urlsplit(final).query)
+                                  or re.search(r"\bepisodes?\b", text[:400000], re.I) or videos_in(page, text))
+        lists[k] = {"at": time.time(), "entry": entry["url"], "final": final, "itself": itself,
+                    "eps": {f"{'' if a is None else a}:{b}": url for (a, b), url in eps.items()}}
+        self._remember(item["id"], site, eplists=lists)
+        return {"eps": eps, "final": final, "itself": itself, "cached": False}
+
     def episode_page(self, site, item, season, episode, pin=""):
         """(page url of the episode or film, entry, others)."""
         movie = item.get("format") == "movie" or library.item_kind(item) == "movie"
         tv_season = season if item.get("source") == "tmdb" and item.get("format") == "series" else None
         entry, others = self._entry(site, item, tv_season, pin)
         if movie:
-            return entry["url"], entry, others
+            return self._movie_page(site, item, entry), entry, others
         mem = self.remembered(item["id"], site) or {}
         cached = (mem.get("episodes") or {})
         key = f"{tv_season or ''}:{season}:{episode}"
         if key in cached:
             return cached[key], entry, others
-        eps, final, page, text = self._episodes(entry["url"])
         absolute = None
         if item.get("seasons") and season and season > 1:
             absolute = sum(s.get("episodes") or 0 for s in item["seasons"] if 0 < s["number"] < season) + episode
         want_season = season if tv_season else None
-        url = pick_episode(eps, want_season, episode, absolute) or pick_episode(eps, None, episode, absolute)
-        if not url and eps:
-            url = derive_episode(eps, episode)      # a list that shows only some (1-50 of 500)
-            if url and not _exists(url, final):
-                url = None
-        if not url and eps and len(eps) < 5 and min(n for _, n in eps) > 3:
-            eps = {}            # a few numbered links (related films, "Movie 2"...) aren't an episode list
-        if not url:
-            if not eps and (episode == 1 or re.search(r"(?:^|&)ep=", urllib.parse.urlsplit(final).query)
-                            or re.search(r"\bepisodes?\b", text[:400000], re.I)):
-                # The title's page plays its episodes itself, chosen by ?ep= (Miruro, ani.pm).
-                url = _with_ep(final, episode)
+        url = None
+        for fresh in (False, True):
+            idx = self._episode_index(site, item, entry, tv_season, fresh=fresh)
+            eps, final = idx["eps"], idx["final"]
+            url = pick_episode(eps, want_season, episode, absolute) or pick_episode(eps, None, episode, absolute)
+            if not url and eps:
+                url = derive_episode(eps, episode)      # a list that shows only some (1-50 of 500)
+                if url and not _exists(url, final):
+                    url = None
+            if not url and eps and tv_season is not None:
+                url = derive_episode(eps, episode, season)  # (another season, from the one shown)
+                if url and not _exists(url, final):
+                    url = None
+            if not url and not eps and (episode == 1 or idx["itself"] or tv_season is not None):
+                # The title's page plays its episodes itself, chosen by ?ep= (Miruro, ani.pm),
+                # or by ?s= and ?e= (TV shows on a site keyed by TMDB's ids).
+                url = _with_se(final, season, episode) if tv_season is not None else _with_ep(final, episode)
+                watch = _tmdb_watch(entry["url"], item, season, episode)
+                if watch:
+                    url = watch          # (a title page by TMDB id: its watch page by the same id)
                 self._note(f"No episode links on the page: trying {url}")
-            else:
-                raise ScrapeError(f"episode {episode} wasn't found on {site['name']}'s page for {entry['name']}"
-                                  + (f" (it lists {len(eps)} episodes)" if eps else ""), page=final)
+            if url or not idx.get("cached"):
+                break                                   # (else read again: a new episode may be out)
+        if not url:
+            raise ScrapeError(f"episode {episode} wasn't found on {site['name']}'s page for {entry['name']}"
+                              + (f" (it lists {len(eps)} episodes)" if eps else ""), page=final)
         cached = dict(cached)
         cached[key] = url
         self._remember(item["id"], site, episodes=cached)
         return url, entry, others
+
+    def pin_entry(self, item, site, url):
+        """The title on a site, chosen by you (its episodes are matched again)."""
+        mem = self.remembered(item["id"], site) or {}
+        name = next((c["name"] for c in mem.get("others") or [] if c["url"] == url), url)
+        entries = {k: dict(v, url=url, name=name, pinned=True, at=time.time()) for k, v in (mem.get("entries") or {}).items()}
+        entries = entries or {"": {"url": url, "name": name, "pinned": True, "at": time.time()}}
+        self._remember(item["id"], site, entries=entries, episodes={}, eplists={}, videos={})
+
+    def set_episode(self, item, site, season, episode, url):
+        """An episode's page, given by you."""
+        mem = self.remembered(item["id"], site) or {}
+        tv_season = season if item.get("source") == "tmdb" and item.get("format") == "series" else None
+        cached = dict(mem.get("episodes") or {})
+        cached[f"{tv_season or ''}:{season}:{episode}"] = url
+        self._remember(item["id"], site, episodes=cached)
+
+    def _movie_page(self, site, item, entry):
+        """A film's page to play: the title's own "Watch" / "Play" page (or one with its TMDB
+        id and /watch/ in it) when it has one, else the title's page."""
+        mem = self.remembered(item["id"], site) or {}
+        got = (mem.get("movie_page") or {})
+        if got.get("entry") == entry["url"]:
+            return got["url"]
+        url = entry["url"]
+        if "/watch" not in urllib.parse.urlsplit(url).path:
+            _, tid = tmdb_id(item)
+            try:
+                text, final = self._read(url, lambda p: bool(watch_links(p, url)))
+            except ScrapeError:
+                text, final = "", url
+            page = parse(text, final)
+            mine = [x["href"] for x in page.links if _same_site(x["href"], final) and "/watch" in x["href"]
+                    and (not tid or tid in x["href"]) and not _NOT_WATCH.search(x["text"] or "")]
+            pick = (mine or watch_links(page, final) or [_tmdb_watch(url, item)])[0]
+            if pick:
+                self._note(f"The film's own watch page: {pick}")
+                url = pick
+        self._remember(item["id"], site, movie_page={"entry": entry["url"], "url": url})
+        return url
+
+    def unlink_episode(self, item_id, site, season, episode):
+        """Forget one episode's page on a site (it's matched again the next time)."""
+        mem = self.remembered(item_id, site)
+        if not mem:
+            return
+        tail = f":{season}:{episode}"
+        gone = [k for k in (mem.get("episodes") or {}) if k.endswith(tail)]
+        pages = {mem["episodes"][k] for k in gone}
+        for k in gone:
+            del mem["episodes"][k]
+        mem["videos"] = {k: v for k, v in (mem.get("videos") or {}).items() if k.split("|")[0] not in pages}
+        self._save()
+
+    def linked_episodes(self, item_id, site):
+        """{"season:episode": page} matched on a site so far."""
+        mem = self.remembered(item_id, site) or {}
+        out = {}
+        for k, url in (mem.get("episodes") or {}).items():
+            parts = k.split(":")
+            if len(parts) == 3:
+                out[f"{parts[1]}:{parts[2]}"] = url
+        return out
 
     def resolve(self, site, item, season=None, episode=None, pin="", stream="", quality="", skip=(),
                 track="", fresh=False):
@@ -1669,7 +1895,7 @@ class Scraper:
             return None
         return {"url": caught["url"], "referer": headers.get("Referer") or page_url,
                 "headers": {k: v for k, v in headers.items() if k != "Referer"},
-                "subtitle": (caught.get("subs") or [""])[0]}
+                "subtitle": pick_subtitle(caught.get("subs") or [], headers)}
 
     def diagnose(self, site, item, season=None, episode=None):
         """The site's Test: everything again from scratch (nothing remembered is

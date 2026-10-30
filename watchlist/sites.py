@@ -22,6 +22,7 @@ what's searched). Nothing else is built in: no site comes with the app.
 import base64
 import binascii
 import html.parser
+import json
 import math
 import re
 import threading
@@ -88,9 +89,38 @@ def sites_for(settings, item_type):
     return [s for s in settings.get("torrent_sites") or [] if s["on"] and item_type in (s.get("types") or ["anime"])]
 
 
+TPB_HOSTS = ("thepiratebay.org", "thepiratebay10.org", "thepiratebay0.org", "piratebay.live", "tpb.party")
+# The trackers The Pirate Bay's own page adds to its magnets (apibay gives only the hash).
+TPB_TRACKERS = ("udp://tracker.opentrackr.org:1337", "udp://open.stealth.si:80/announce",
+                "udp://tracker.torrent.eu.org:451/announce", "udp://tracker.bittor.pw:1337/announce",
+                "udp://public.popcorn-tracker.org:6969/announce", "udp://tracker.dler.org:6969/announce",
+                "udp://exodus.desync.com:6969", "udp://open.demonii.com:1337/announce")
+
+
 def search_url(site, query):
     q = urllib.parse.quote_plus(query)
+    host = (urllib.parse.urlsplit(site["url"]).hostname or "").lower().removeprefix("www.")
+    if host in TPB_HOSTS:
+        return f"https://apibay.org/q.php?q={q}&cat="
     return site["url"].replace("{title}", q).replace("{query}", q)
+
+
+def results_json(data):
+    """apibay.org's answer (The Pirate Bay): its rows, as results(); [] if it isn't that."""
+    try:
+        rows = json.loads(_text(data))
+    except ValueError:
+        return []
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        h = str((r or {}).get("info_hash") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", h) or not h.strip("0"):
+            continue                         # ("No results returned")
+        name = str(r.get("name") or "")
+        out.append({"name": name, "page": "", "magnet": make_magnet(h, name, TPB_TRACKERS), "hash": h, "torrent": "",
+                    "size": int(r.get("size") or 0), "seeders": _number(str(r.get("seeders"))),
+                    "leechers": _number(str(r.get("leechers")))})
+    return out
 
 
 # ---- reading pages
@@ -144,6 +174,12 @@ class _Page(html.parser.HTMLParser):
             self._cell = {"text": [], "links": [], "head": tag == "th",
                           "hint": " ".join(filter(None, [a.get("title"), a.get("class"), a.get("data-title")]))}
             self._row["cells"].append(self._cell)
+            try:
+                span = max(1, min(8, int(a.get("colspan") or 1)))
+            except ValueError:
+                span = 1
+            # (a cell over two columns: the columns after it stay under their headings)
+            self._row["cells"] += [{"text": [], "links": [], "head": tag == "th", "hint": ""} for _ in range(span - 1)]
         elif tag == "a":
             self._link = {"href": a.get("href") or "", "text": [], "title": a.get("title") or ""}
             self.links.append(self._link)
@@ -255,6 +291,8 @@ def _number(text):
 def results(data, base_url):
     """The results on a search page: [{"name", "page", "magnet", "hash",
     "torrent", "size", "seeders", "leechers"}]."""
+    if data[:1] == b"[" or "apibay.org" in (base_url or ""):
+        return results_json(data)
     page = parse_page(data)
     out = []
     headers = []
@@ -852,6 +890,13 @@ class Finder:
     def use(self, r):
         view = r if "key" in r else self._view(r)
         t = self.app.torrents.add(self.item["id"], view["magnet"])
+        try:
+            keep = self.app.store.get(self.item["id"]).get("keep_magnet")
+        except KeyError:
+            keep = False
+        if not keep:
+            # One torrent per title: the one it had goes (unless "Keep magnet connected").
+            self.app.torrents.replace_for(self.item["id"], t["hash"])
         return {"hash": t["hash"], "name": view["name"]}
 
 

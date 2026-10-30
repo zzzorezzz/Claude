@@ -61,6 +61,9 @@ jobs:
           Copy-Item -Recurse uosc-dl/x/scripts/uosc watchlist/mpv_config/scripts/
           # Its helper programs (for downloading subtitles) aren't used: keeps the app small.
           Remove-Item -Recurse -Force watchlist/mpv_config/scripts/uosc/bin -ErrorAction SilentlyContinue
+          # No "Remove" on subtitle and audio tracks the app added: they're turned off, not lost.
+          $menus = "watchlist/mpv_config/scripts/uosc/lib/menus.lua"
+          (Get-Content $menus -Raw).Replace("table.insert(track_external_actions, {name = 'remove', icon = 'delete', label = t('Remove') .. ' (del)'})", "") | Set-Content $menus -NoNewline
           Get-ChildItem -Recurse watchlist/mpv_config | Measure-Object -Property Length -Sum | Format-List Count, Sum
 
       - name: Build Watch Anything.exe

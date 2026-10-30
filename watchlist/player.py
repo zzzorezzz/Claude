@@ -190,13 +190,16 @@ class Session:
     """
 
     def __init__(self, mpv, item_id, entries, start=0, extra_args=(), on_progress=None,
-                 on_finished=None, on_exit=None, audio_langs=""):
+                 on_finished=None, on_exit=None, audio_langs="", first=0, playlist=False):
+        """`playlist`: every entry goes to mpv as one playlist (a whole season, each found
+        when it opens), starting at entries[first]; titles and subtitles are set as each opens."""
         self.mpv, self.item_id, self.entries = mpv, item_id, entries
+        self.playlist, self._seek_to = playlist, (start if playlist and start else 0)
         self.start_at, self.extra_args, self.audio_langs = start, list(extra_args), audio_langs
         self.on_progress = on_progress or (lambda *a: None)
         self.on_finished = on_finished or (lambda *a: None)
         self.on_exit = on_exit or (lambda *a: None)
-        self.index, self.pos, self.dur, self.paused = 0, None, None, False
+        self.index, self.pos, self.dur, self.paused = (first if playlist else 0), None, None, False
         self.pos_at = 0.0            # when pos was last reported (time.monotonic())
         self.listeners = []          # called with every message from mpv (watch parties)
         self._pending_sub = None
@@ -218,6 +221,13 @@ class Session:
         if self.audio_langs:
             cmd.append(f"--alang={self.audio_langs}")
         cmd += self.extra_args
+        if self.playlist:
+            listing = Path(tempfile.gettempdir()) / f"watchanything-{self.address[-10:]}.m3u"
+            lines = ["#EXTM3U"]
+            for entry in self.entries:
+                lines += [f"#EXTINF:-1,{(entry.get('label') or '').replace(chr(10), ' ')}", entry["path"]]
+            listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return cmd + [f"--playlist={listing}", f"--playlist-start={self.index}"]
         for i, entry in enumerate(self.entries):
             cmd.append("--{")
             if entry.get("label"):
@@ -346,7 +356,10 @@ class Session:
         if self._pending_sub:
             cmds.append(["sub-add", self._pending_sub, "select"])
             self._pending_sub = None
-        if entry and entry.get("appended"):
+        if self._seek_to:
+            cmds.append(["seek", int(self._seek_to), "absolute"])        # (where you stopped, the first one only)
+            self._seek_to = 0
+        if entry and (entry.get("appended") or self.playlist):
             if entry.get("label"):
                 cmds.append(["set_property", "force-media-title", entry["label"]])
             if entry.get("sub"):
@@ -400,8 +413,8 @@ class Session:
 def _track_command(track):
     """mpv's command adding an audio or subtitle track from another file, not chosen
     (you switch to it in the player)."""
-    return ["audio-add" if track["kind"] == "audio" else "sub-add", track["url"], "auto",
-            track.get("title") or "", track.get("lang") or ""]
+    return ["audio-add" if track["kind"] == "audio" else "sub-add", track["url"],
+            "select" if track.get("select") else "auto", track.get("title") or "", track.get("lang") or ""]
 
 
 class Player:

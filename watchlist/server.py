@@ -31,7 +31,20 @@ REFRESH_AFTER = 7 * 24 * 3600
 RELATED_TTL = 3 * 24 * 3600
 # "Play this with" on a title's page: "" is "Use anything" (a file on your computer,
 # else the torrent, else it asks between your video sites and watching online).
-PLAY_WITH = ("", "file", "torrent", "scraped", "online")
+PLAY_WITH = ("", "file", "torrent", "scraped", "scraped-browser", "online")
+
+
+# Public Syncplay servers, tried in order by "Find a working server".
+PARTY_SERVERS = ("syncplay.pl:8999", "syncplay.pl:8998", "syncplay.pl:8997", "syncplay.pl:8996", "syncplay.pl:8995")
+
+
+class OnlineError(Exception):
+    """No video site played an episode: why, the titles to pick from (when the match was
+    unclear: {"site", "site_name", "choices", "question"}), and a page to open instead."""
+
+    def __init__(self, message, choices=None, page=""):
+        super().__init__(message)
+        self.choices, self.page = choices, page
 
 
 class ApiError(Exception):
@@ -80,6 +93,9 @@ class App:
         self.site_jobs = sites.Jobs(self)
         self.scraper = scrape.Scraper(self.data_dir)                       # your video sites
         self.scraper.render, self.scraper.catch = self._render_page, self._catch_video
+        # Your own sites: videos found ({(item, "s:e"): (site, found, when)}), the background
+        # matching of a title's episodes (the latest run per title goes on) and how far it is.
+        self._online_found, self._link_runs, self._link_progress = {}, {}, {}
         self.scraper.can_render, self.scraper.can_catch = webtools.can_render, webtools.can_catch
         self._connected_jobs = {}           # Everything connected being looked for: how far along
         self._filler = ThreadPoolExecutor(4, thread_name_prefix="fill")   # titles added straight away
@@ -144,6 +160,7 @@ class App:
                 "torrent_sites": {t: len(sites.sites_for(s, t)) for t in TYPES},
                 "video_sites": {t: [{"id": x["id"], "name": x["name"]} for x in scrape.sites_for(s, t)] for t in TYPES},
                 "sounds": s["sounds"], "setup_prompt": s["setup_prompt"], "adblock": s["adblock"],
+                "mode": s["mode"], "ask_guide": s["ask_guide"],
                 "catch_videos": webtools.can_catch(), "ytdlp": scrape.has_ytdlp(),
                 "windows": launcher.can_open_windows(), "theme": s["theme"]}
 
@@ -510,6 +527,8 @@ class App:
         except torrents_mod.TorrentError:
             if h not in self.torrents.records:
                 raise                        # (already there for another title: used as it is)
+        # The host's magnet replaces a different one attached to this title here.
+        self.torrents.replace_for(item["id"], h)
         if meta.get("peer"):
             self.torrents.add_peer(h, meta["peer"])
         path, _size = self.torrents.file_in(h, index)
@@ -1308,12 +1327,13 @@ class App:
         return {"ok": True, "player": "vlc", "file": Path(path).name, "queued": len(entries) - 1,
                 "resumed_at": start, "note": note}
 
-    def _session(self, mpv, item, entries, start=0, extra=()):
+    def _session(self, mpv, item, entries, start=0, extra=(), first=0, playlist=False):
         web = next((e for e in entries if e.get("web")), None)
         if web:
             # A video from your own site: sent as if from its page (some sites check).
             headers = web.get("headers") or {}
-            extra = [f"--log-file={player.web_log()}", "--network-timeout=60", "--cache=yes", "--demuxer-max-bytes=150MiB",
+            # (an episode of the playlist is found when it opens: a minute or two, at worst)
+            extra = [f"--log-file={player.web_log()}", "--network-timeout=150", "--cache=yes", "--demuxer-max-bytes=150MiB",
                      "--demuxer-readahead-secs=60", f"--user-agent={headers.get('User-Agent') or scrape.UA}"] + (
                 [f"--referrer={web['referer']}"] if web.get("referer") else []) + [
                 f"--http-header-fields-append={k}: {v}" for k, v in headers.items()
@@ -1326,7 +1346,7 @@ class App:
             mpv, item["id"], entries, start=start,
             extra_args=player.script_args(self.settings.get()["skip_intro"], self.settings.get()["theme"]) + list(extra),
             audio_langs="jpn,ja,japanese,eng,en" if item["type"] == "anime" else "",
-            on_progress=self._save_position, on_finished=self._finished_entry)
+            on_progress=self._save_position, on_finished=self._finished_entry, first=first, playlist=playlist)
 
     def _entries(self, item, path, subtitle, season=None, episode=None, queue=True):
         """What to play: the file, then (with `queue`) the episodes after it."""
@@ -1466,43 +1486,117 @@ class App:
 
     # ---- your own video sites ("Play online (my sites)")
 
+    # ---- your own video sites: which one, the links found, the player's playlist
+
+    def _video_sites(self, item):
+        return scrape.sites_for(self.settings.get(), item["type"])
+
+    def _online_order(self, item, key, prefer=""):
+        """The sites to try for an episode, in order: the one asked for, the one chosen for
+        this episode (right-click), the one chosen for the title, the one it's linked to
+        (first, when "keep connected" is ticked), then Settings' order."""
+        sites = self._video_sites(item)
+        linked = (item.get("online_links") or {}).get(key, "")
+        ids = [prefer, (item.get("online_site_eps") or {}).get(key, ""), item.get("online_site") or ""]
+        ids = ([linked] + ids) if item.get("keep_site") else (ids + [linked])
+        order = []
+        for sid in ids:
+            site = next((x for x in sites if x["id"] == sid), None)
+            if site and site not in order:
+                order.append(site)
+        return order + [x for x in sites if x not in order]
+
+    def _online_find(self, item, season, episode, track="", prefer="", pin="", fresh=False, skip=()):
+        """(site, found) from the first site that has the episode; OnlineError if none does."""
+        key = f"{season}:{episode}" if item["format"] == "series" else "movie"
+        errors, choices, page = [], None, ""
+        sites = [x for x in self._online_order(item, key, prefer) if x["id"] not in skip]
+        if pin:
+            sites = sites[:1]                 # (a title you picked on that site: only there)
+        for site in sites:
+            try:
+                found = self.scraper.resolve(site, item, season, episode, pin=pin, track=track, fresh=fresh)
+            except scrape.ScrapeError as e:
+                errors.append(f"{site['name']}: {e}")
+                page = page or e.page
+                if e.choices and choices is None:
+                    choices = {"site": site["id"], "site_name": site["name"], "choices": e.choices, "question": str(e)}
+                continue
+            self._online_linked(item, key, site)
+            return site, found
+        raise OnlineError("; ".join(errors) or "no video site in Settings has it", choices, page)
+
+    def _online_linked(self, item, key, site):
+        """One link per episode: the site that played it. A link to another site goes."""
+        links = dict(item.get("online_links") or {})
+        old = links.get(key)
+        if old == site["id"]:
+            return
+        if old:
+            gone = next((x for x in self.settings.get().get("video_sites") or [] if x["id"] == old), None)
+            season, episode = self._key_numbers(key)
+            if gone and episode is not None:
+                self.scraper.unlink_episode(item["id"], gone, season, episode)
+        links[key] = site["id"]
+        try:
+            self.store.update(item["id"], {"online_links": links})
+        except KeyError:
+            pass
+
+    def _episode_keys(self, item, around=None):
+        """Every episode of a series, in order ("season:episode"), as far as it's known."""
+        keys = []
+        for s in sorted(item.get("seasons") or [], key=lambda x: x.get("number") or 0):
+            if (s.get("number") or 0) > 0:
+                keys += [f"{s['number']}:{e}" for e in range(1, (s.get("episodes") or 0) + 1)]
+        if not keys:
+            total = item.get("episodes_total") or 0
+            last = max(total, (around[1] + 12) if around else 12)
+            keys = [f"{(around or (1, 1))[0]}:{e}" for e in range(1, last + 1)]
+        if around and f"{around[0]}:{around[1]}" not in keys:
+            keys.append(f"{around[0]}:{around[1]}")
+            keys.sort(key=lambda k: tuple(int(x) for x in k.split(":")))
+        return keys
+
+    def _online_url(self, item, key, site, track):
+        season, episode = self._key_numbers(key)
+        return (f"http://127.0.0.1:{self.torrents.port}/online/{self.torrents.token}/{item['id']}/{season}/{episode}"
+                f"?{urllib.parse.urlencode({'site': site['id'], 'track': track or ''})}")
+
     def play_scraped(self, item, body):
-        """Find the episode (or film) on your video site and play it: in the
-        player, streamed (nothing is downloaded first), or its page in the
-        browser when that's how the site is set up or its video can't be read."""
-        s = self.settings.get()
-        mine = scrape.sites_for(s, item["type"])
-        if not mine:
+        """Find the episode (or film) on your video sites and play it: the first site
+        that has it, in the player (with the season around it as its playlist, each
+        episode found as it opens) or its page in the browser."""
+        if not self._video_sites(item):
             raise ApiError(f"add your own video site for {KIND_WORDS.get(item['type'], 'this')} in Settings first")
-        site = next((x for x in mine if x["id"] == body.get("site")), None) or mine[0]
         series = item["format"] == "series"
         season = max(0, int(body.get("season") or item["progress"]["season"] or 1)) if series else None
         episode = max(1, int(body.get("episode") or item["progress"]["episode"] or 1)) if series else None
+        key = f"{season}:{episode}" if series else "movie"
         run = str(body.get("run") or "")
         with self._lock:
             self._scrape_runs[item["id"]] = run
+        track = str(body.get("track") or "")
+        if not track and body.get("stream"):
+            track = (str(body["stream"]).split(":") + ["", ""])[1]
         try:
-            found = self.scraper.resolve(site, item, season, episode, pin=str(body.get("entry") or ""),
-                                         stream=str(body.get("stream") or ""), quality=str(body.get("quality") or ""))
-            with self._lock:
-                if run and self._scrape_runs.get(item["id"]) != run:
-                    # You moved on to another site meanwhile: this one doesn't start playing over it.
-                    return {"ok": False, "superseded": True, "site": site["name"], "error": "skipped"}
-        except scrape.ScrapeError as e:
+            site, found = self._online_find(item, season, episode, track=track, prefer=str(body.get("site") or ""),
+                                            pin=str(body.get("entry") or ""))
+        except OnlineError as e:
             if body.get("open_page") and e.page:
                 self.open_link(e.page)
-                return {"ok": True, "player": "browser", "page": e.page, "site": site["name"], "note": str(e)}
-            return {"ok": False, "error": str(e), "page": e.page, "site": site["name"],
-                    "others": (self.scraper.remembered(item["id"], site) or {}).get("others") or []}
-        key = f"{season}:{episode}" if series else "movie"
-        result = {"ok": True, "site": site["name"], "entry": found["entry"], "others": found["others"],
-                  "page": found["page"], "streams": found.get("streams") or [], "stream": found.get("stream"),
-                  "qualities": [{"label": q["label"], "height": q["height"]} for q in found.get("qualities") or []],
-                  "quality": found.get("quality") or "", "tried": []}
+                return {"ok": True, "player": "browser", "page": e.page, "note": str(e)}
+            return {"ok": False, "error": str(e), "choices": e.choices, "page": e.page, "key": key}
+        with self._lock:
+            if run and self._scrape_runs.get(item["id"]) != run:
+                return {"ok": False, "superseded": True, "site": site["name"], "error": "skipped"}
+        result = {"ok": True, "site": site["name"], "site_id": site["id"], "entry": found["entry"], "page": found["page"],
+                  "key": key, "track": (found.get("stream") or {}).get("kind") or "sub", "stream": found.get("stream")}
         patch = {"last_played": time.time()}
         if series:
             patch["progress"] = {"season": max(1, season), "episode": episode}
-        if not found["url"]:
+        browser = body.get("open") == "browser" or site.get("open") == "browser"
+        if not found["url"] or browser:
             self.open_link(found["page"])
             self.store.update(item["id"], patch)
             return dict(result, player="browser")
@@ -1523,123 +1617,281 @@ class App:
             return dict(result, **session.launch(), player="android", resumed_at=start)
         mpv = player.find_mpv()
         if not mpv:
-            # No built-in player: the page in your browser.
             self.open_link(found["page"])
             self.store.update(item["id"], patch)
             return dict(result, player="browser")
-        tried, refreshed = [], False
+        tried, refreshed, skip, streams = [], False, [], []
         while True:
-            session = self.player.play(self._session(mpv, item, [entry], start, ["--pause"] if hold else ()))
+            entries, first = self._online_playlist(item, site, entry)
+            session = self.player.play(self._session(mpv, item, entries, start, ["--pause"] if hold else (),
+                                                     first=first, playlist=series))
+            self._online_found[(item["id"], key)] = (site, found, time.time())
             started, why = self._web_started(session)
             if started:
                 break
+            got = None
             if found.get("cached") and not refreshed:
-                # A video found earlier, whose address has run out: found again, same stream.
-                refreshed = True
+                refreshed = True             # a video found earlier whose address ran out: found again
                 try:
-                    found = self.scraper.resolve(site, item, season, episode, fresh=True)
-                except scrape.ScrapeError as e:
-                    return dict(result, ok=False, error=str(e), tried=tried, others=found["others"])
-                entry = self._web_entry(item, site, key, found)
-                continue
-            # The player closed without playing (the stream refused it): the next stream, like
-            # trying the next server by hand.
-            label = (found.get("stream") or {}).get("label") or "the video"
-            tried.append(f"{label}: {why}")
-            skip = [t for t in [*(body.get("skip") or []), *(x.get("id") for x in [found.get("stream")] if x)] if t]
-            body = dict(body, skip=skip)
-            with self._lock:
-                if run and self._scrape_runs.get(item["id"]) != run:
-                    return {"ok": False, "superseded": True, "site": site["name"], "error": "skipped"}
-            if len(tried) >= 3 or not found.get("stream"):
-                return dict(result, ok=False, error="the player couldn't play it - " + "; ".join(tried),
-                            tried=tried, others=found["others"])
-            try:
-                found = self.scraper.resolve(site, item, season, episode, skip=tuple(skip))
-            except scrape.ScrapeError as e:
-                return dict(result, ok=False, error="; ".join(tried + [str(e)]), tried=tried, others=found["others"])
+                    got = self.scraper.resolve(site, item, season, episode, track=track, fresh=True)
+                except scrape.ScrapeError:
+                    pass
+            else:
+                label = (found.get("stream") or {}).get("label") or site["name"]
+                tried.append(f"{label}: {why}")
+                if len(tried) >= 4:
+                    return dict(result, ok=False, error="the player couldn't play it - " + "; ".join(tried), tried=tried)
+                if found.get("stream"):
+                    # The site's next server first (like trying it by hand)...
+                    streams.append(found["stream"]["id"])
+                    try:
+                        got = self.scraper.resolve(site, item, season, episode, track=track, skip=tuple(streams))
+                    except scrape.ScrapeError:
+                        pass
+            if got:
+                found = got
+            else:
+                # ...then the next site.
+                skip.append(site["id"])
+                streams = []
+                try:
+                    site, found = self._online_find(item, season, episode, track=track, skip=skip)
+                except OnlineError as e:
+                    return dict(result, ok=False, error="; ".join(tried + [str(e)]), tried=tried, choices=e.choices)
             entry = self._web_entry(item, site, key, found)
-            result.update(stream=found.get("stream"), quality=found.get("quality") or "",
-                          qualities=[{"label": q["label"], "height": q["height"]} for q in found.get("qualities") or []])
+            result.update(site=site["name"], site_id=site["id"], entry=found["entry"], page=found["page"],
+                          stream=found.get("stream"))
         if hosting:
             hosting.attach(session, hold=hold)
             self._party_now(hosting, entry)
         self.store.update(item["id"], patch)
-        # Meanwhile: the episode's other version (dub / sub) as tracks of the open player,
-        # and the next episodes queued in it.
-        threading.Thread(target=self._online_more, args=(session, site, item, entry), daemon=True).start()
-        return dict(result, player="mpv", resumed_at=start, file=entry["name"], tried=tried,
-                    track=entry["track"], loading_more=True)
+        session.listeners.append(lambda sess, msg: self._online_event(sess, item["id"], msg))
+        self._online_extras(session, item["id"], entry)
+        if series:
+            self._link_around(item["id"], site, key, session)
+        return dict(result, player="mpv", resumed_at=start, file=entry["name"], tried=tried)
 
-    def _web_entry(self, item, site, key, found):
-        """A player entry for a video found on a site: its subtitles, and what a watch party needs."""
-        track = (found.get("stream") or {}).get("kind") or "sub"
-        entry = {"path": found["url"], "sub": self._web_sub(found), "key": key, "web": True, "referer": found["referer"],
-                 "headers": found.get("headers") or {}, "track": track,
-                 "label": self._label(item, key), "name": f"{item['title']} ({site['name']})"}
-        if found.get("subtitle") and not entry["sub"]:
-            # A dub's subtitles: there to switch on, not shown over it.
-            entry["extras"] = [{"kind": "sub", "url": found["subtitle"], "title": "English (subtitles)", "lang": "en"}]
-        shared = {k: v for k, v in (found.get("headers") or {}).items() if k in ("Origin", "User-Agent")}  # (never cookies)
-        entry["party"] = dict(self._party_meta(item, key), url=found["url"], referer=found["referer"],
-                              headers=shared, sub=found.get("subtitle") or "", track=track,
-                              site={"name": site["name"], "url": site["url"]},
-                              entry=(found.get("entry") or {}).get("url") or "")
-        return entry
+    def _online_playlist(self, item, site, entry):
+        """The player's playlist: every episode of the series, the one found first and the
+        others as this app's links (each found when it opens, or found already)."""
+        if item["format"] != "series":
+            return [entry], 0
+        season, episode = self._key_numbers(entry["key"])
+        keys = self._episode_keys(item, (season, episode))
+        out = []
+        for k in keys:
+            if k == entry["key"]:
+                out.append(entry)
+            else:
+                out.append({"path": self._online_url(item, k, site, entry.get("track")), "key": k, "web": True,
+                            "online": True, "label": self._label(item, k), "referer": entry["referer"],
+                            "headers": entry["headers"], "track": entry.get("track"), "site": site["id"]})
+        return out, keys.index(entry["key"])
 
-    def _online_more(self, session, site, item, entry):
-        """Fill the player while the first episode plays: the other version of each episode
-        (switched in the player), and the next episode, found as the last one starts."""
-        busy = threading.Lock()
+    def online_video(self, item_id, season, episode, site_id, track):
+        """The address of an episode's video, for the player's playlist (found now, or
+        found a moment ago in the background). Raises OnlineError / KeyError."""
+        item = self.store.get(item_id)
+        key = f"{season}:{episode}"
+        site, found = self._online_find(item, season, episode, track=track, prefer=site_id)
+        self._online_found[(item_id, key)] = (site, found, time.time())
+        threading.Thread(target=self._link_around, args=(item_id, site, key, self.player.session), daemon=True).start()
+        return found["url"]
 
-        def other_version(e):
-            season, episode = self._key_numbers(e["key"])
-            other = "dub" if e.get("track") == "sub" else "sub"
-            if session.ended:
-                return
-            try:
-                got = self.scraper.resolve(site, item, season, episode, track=other)
-            except scrape.ScrapeError:
-                return
-            if not got.get("url") or got["url"] == e["path"] or ((got.get("stream") or {}).get("kind") or "sub") != other:
-                return
-            tracks = [{"kind": "audio", "url": got["url"], "lang": "en" if other == "dub" else "ja",
-                       "title": "English dub" if other == "dub" else "Original (Japanese)"}]
-            if got.get("subtitle") and not e.get("sub"):
-                tracks.append({"kind": "sub", "url": got["subtitle"], "title": "English (subtitles)", "lang": "en"})
-            session.add_tracks(e, tracks)
+    def _online_event(self, session, item_id, msg):
+        """The player opened another episode: its subtitles, where it's from, its other version."""
+        if msg.get("event") != "file-loaded":
+            return
+        entry = session.current()
+        if entry and entry.get("online"):
+            self._online_extras(session, item_id, entry)
 
-        def queue_next():
-            if not busy.acquire(blocking=False):
-                return
-            try:
-                last = session.entries[-1]
-                season, episode = self._key_numbers(last["key"])
-                total = item.get("episodes_total") or 0
-                if episode is None or session.ended or (total and episode >= total):
+    def _online_extras(self, session, item_id, entry):
+        got = self._online_found.get((item_id, entry["key"]))
+        if not got:
+            return
+        site, found, _ = got
+        session.send(["set_property", "user-data/watchlist/source", f"{site['name']}: {found.get('page') or ''}"])
+        if entry.get("online") and found.get("subtitle") and not entry.get("added_sub"):
+            entry["added_sub"] = True
+            dub = (found.get("stream") or {}).get("kind") == "dub"
+            session.add_tracks(entry, [{"kind": "sub", "url": found["subtitle"], "title": "English (subtitles)",
+                                        "lang": "en", "select": not dub}])
+        threading.Thread(target=self._other_version, args=(session, item_id, site, entry, found), daemon=True).start()
+
+    def _other_version(self, session, item_id, site, entry, found):
+        """The episode's dub (or sub): its audio and subtitles added as tracks of the open file."""
+        if entry.get("versions_added"):
+            return
+        entry["versions_added"] = True
+        item = self.store.get(item_id)
+        season, episode = self._key_numbers(entry["key"])
+        playing = (found.get("stream") or {}).get("kind") or "sub"
+        other = "sub" if playing == "dub" else "dub"
+        try:
+            got = self.scraper.resolve(site, item, season, episode, track=other)
+        except scrape.ScrapeError:
+            return
+        if (not got.get("url") or got["url"] == found["url"] or session.ended
+                or ((got.get("stream") or {}).get("kind") or "sub") != other):
+            return                          # (no other version there)
+        tracks = [{"kind": "audio", "url": got["url"], "lang": "en" if other == "dub" else "ja",
+                   "title": "English (dub)" if other == "dub" else "Original (Japanese)"}]
+        if got.get("subtitle") and not found.get("subtitle"):
+            tracks.append({"kind": "sub", "url": got["subtitle"], "title": "English (subtitles)", "lang": "en"})
+        session.add_tracks(entry, tracks)
+
+    def _link_around(self, item_id, site, key, session=None):
+        """Match the title's episodes on the site in the background, from the one playing:
+        the next one, the one before it, then on to the end, then back to the start. The
+        next and previous videos themselves are found too (ready when you skip to them).
+        Only the latest run for a title goes on."""
+        with self._lock:
+            gen = self._link_runs[item_id] = self._link_runs.get(item_id, 0) + 1
+        try:
+            item = self.store.get(item_id)
+        except KeyError:
+            return
+        if item["format"] != "series":
+            return
+        keys = self._episode_keys(item, self._key_numbers(key) if ":" in key else None)
+        i = keys.index(key) if key in keys else 0
+        order = [k for k in [keys[i + 1] if i + 1 < len(keys) else None, keys[i - 1] if i > 0 else None] if k]
+        order += [k for k in keys[i + 2:]] + [k for k in reversed(keys[:max(0, i - 1)])]
+        progress = self._link_progress[item_id] = {"done": 0, "total": len(order), "running": True, "site": site["name"]}
+        misses = 0
+        try:
+            for n, k in enumerate(order):
+                if self._link_runs.get(item_id) != gen:
                     return
+                season, episode = self._key_numbers(k)
+                track = (session.current() or {}).get("track") if session else ""
                 try:
-                    got = self.scraper.resolve(site, item, season, episode + 1, track=last.get("track") or "")
+                    if n < 2 and session and not session.ended:
+                        if (item_id, k) not in self._online_found:
+                            s2, found = self._online_find(item, season, episode, track=track or "", prefer=site["id"])
+                            self._online_found[(item_id, k)] = (s2, found, time.time())
+                    else:
+                        self.scraper.episode_page(site, item, season, episode)
+                        self._online_linked(item, k, site)
+                    misses = 0
+                except (scrape.ScrapeError, OnlineError):
+                    misses += 1
+                    if misses >= 4 and n >= 2:
+                        # (past the last episode out, going forward): on to the earlier ones
+                        before = [x for x in order[n + 1:] if keys.index(x) < i]
+                        if not before:
+                            return
+                except KeyError:
+                    return
+                progress["done"] = n + 1
+        finally:
+            progress["running"] = False
+
+    def link_all(self, item, body):
+        """Match every episode on a site now (without watching), in the background."""
+        sites = self._video_sites(item)
+        if not sites:
+            raise ApiError("add your own video site in Settings first")
+        site = next((x for x in sites if x["id"] == body.get("site")), None) or self._online_order(item, "")[0]
+        if body.get("entry"):
+            self.scraper.pin_entry(item, site, str(body["entry"]))
+        if body.get("fresh"):
+            self.scraper.unlink(item["id"], site)
+            self.store.update(item["id"], {"online_links": {}})
+        if item["format"] != "series":
+            def one():
+                try:
+                    self.scraper.episode_page(site, item, None, None)
+                    self._online_linked(item, "movie", site)
                 except scrape.ScrapeError:
-                    return
-                if not got.get("url") or session.ended:
-                    return
-                added = session.append(self._web_entry(item, site, f"{season}:{episode + 1}", got))
-                if added:
-                    other_version(added)
-            finally:
-                busy.release()
+                    pass
+            threading.Thread(target=one, daemon=True).start()
+            return {"ok": True, "site": site["name"]}
+        start = f"{item['progress']['season'] or 1}:{max(1, (item['progress']['episode'] or 1))}"
+        threading.Thread(target=self._link_around_first, args=(item, site, start), daemon=True).start()
+        return {"ok": True, "site": site["name"]}
 
-        def moved(sess, msg):
-            # The last episode queued started playing: find the one after it.
-            if (msg.get("event") == "property-change" and msg.get("name") == "playlist-pos"
-                    and msg.get("data") == len(sess.entries) - 1):
-                threading.Thread(target=queue_next, daemon=True).start()
+    def _link_around_first(self, item, site, start):
+        season, episode = self._key_numbers(start)
+        try:
+            self.scraper.episode_page(site, item, season, episode)
+            self._online_linked(item, start, site)
+        except scrape.ScrapeError as e:
+            self._link_progress[item["id"]] = {"done": 0, "total": 0, "running": False, "site": site["name"],
+                                              "error": str(e), "choices": e.choices}
+            return
+        self._link_around(item["id"], site, start)
 
-        other_version(entry)
+    def online_links(self, item):
+        """What each episode is linked to, for the title's page."""
+        sites = {x["id"]: x for x in self._video_sites(item)}
+        eps = {}
+        for sid, site in sites.items():
+            for k, page in self.scraper.linked_episodes(item["id"], site).items():
+                if (item.get("online_links") or {}).get(k, sid) == sid:
+                    eps[k] = {"site": sid, "site_name": site["name"], "page": page}
+        mem_titles = {sid: (self.scraper.remembered(item["id"], site) or {}) for sid, site in sites.items()}
+        return {"sites": [{"id": x["id"], "name": x["name"], "open": x.get("open") or "player"} for x in sites.values()],
+                "preferred": item.get("online_site") or "", "keep": bool(item.get("keep_site")),
+                "per_episode": item.get("online_site_eps") or {}, "episodes": eps,
+                "titles": {sid: {"entries": m.get("entries") or {}, "others": m.get("others") or []}
+                           for sid, m in mem_titles.items() if m},
+                "linking": self._link_progress.get(item["id"]) or {}}
+
+    def relink_episode(self, item, body):
+        """A wrong episode: matched again on a site (or set to the page you give)."""
+        season, episode = int(body.get("season") or 1), int(body.get("episode") or 1)
+        key = f"{season}:{episode}" if item["format"] == "series" else "movie"
+        sites = self._video_sites(item)
+        sid = body.get("site") or (item.get("online_links") or {}).get(key) or (self._online_order(item, key)[0]["id"] if sites else "")
+        site = next((x for x in sites if x["id"] == sid), None)
+        if not site:
+            raise ApiError("that video site isn't in Settings any more")
+        if body.get("entry"):
+            self.scraper.pin_entry(item, site, str(body["entry"]))
         if item["format"] == "series":
-            session.listeners.append(moved)
-            queue_next()
+            self.scraper.unlink_episode(item["id"], site, season, episode)
+        self._online_found.pop((item["id"], key), None)
+        if body.get("page"):
+            page = str(body["page"]).strip()
+            if not page.lower().startswith(("http://", "https://")):
+                raise ApiError("paste the episode's page link (it starts with https://)")
+            self.scraper.set_episode(item, site, season, episode, page)
+        else:
+            try:
+                page = self.scraper.episode_page(site, item, season if item["format"] == "series" else None,
+                                                 episode if item["format"] == "series" else None)[0]
+            except scrape.ScrapeError as e:
+                return {"ok": False, "error": str(e), "choices": e.choices}
+        self._online_linked(item, key, site)
+        return {"ok": True, "site": site["name"], "page": page}
+
+    def set_online_prefs(self, item, body):
+        """The title's preferred site, one episode's site, keep connected, or forget every link."""
+        patch = {}
+        sites = {x["id"] for x in self._video_sites(item)}
+        if "preferred" in body:
+            sid = str(body["preferred"] or "")
+            if sid and sid not in sites:
+                raise ApiError("that video site isn't in Settings any more")
+            patch["online_site"] = sid
+        if "episode" in body:
+            per = dict(item.get("online_site_eps") or {})
+            k = str(body["episode"])
+            if body.get("site"):
+                per[k] = str(body["site"])
+            else:
+                per.pop(k, None)
+            patch["online_site_eps"] = per
+        if "keep" in body:
+            patch["keep_site"] = bool(body["keep"])
+        if body.get("forget"):
+            self.scraper.forget(item["id"])
+            patch.update(online_links={}, online_site_eps={})
+            for k in [k for k in self._online_found if k[0] == item["id"]]:
+                self._online_found.pop(k, None)
+        return self.store.update(item["id"], patch) if patch else item
 
     @staticmethod
     def _key_numbers(key):
@@ -1678,11 +1930,21 @@ class App:
             time.sleep(0.25)
         return True, ""
 
-    def _prefetch_episode(self, site, item, season, episode):
-        try:
-            self.scraper.episode_page(site, item, season, episode)
-        except Exception:  # noqa: BLE001 - only a head start: it's looked for again when played
-            pass
+    def _web_entry(self, item, site, key, found):
+        """A player entry for a video found on a site: its subtitles, and what a watch party needs."""
+        track = (found.get("stream") or {}).get("kind") or "sub"
+        entry = {"path": found["url"], "sub": self._web_sub(found), "key": key, "web": True, "referer": found["referer"],
+                 "headers": found.get("headers") or {}, "track": track,
+                 "label": self._label(item, key), "name": f"{item['title']} ({site['name']})"}
+        if found.get("subtitle") and not entry["sub"]:
+            # A dub's subtitles: there to switch on, not shown over it.
+            entry["extras"] = [{"kind": "sub", "url": found["subtitle"], "title": "English (subtitles)", "lang": "en"}]
+        shared = {k: v for k, v in (found.get("headers") or {}).items() if k in ("Origin", "User-Agent")}  # (never cookies)
+        entry["party"] = dict(self._party_meta(item, key), url=found["url"], referer=found["referer"],
+                              headers=shared, sub=found.get("subtitle") or "", track=track,
+                              site={"name": site["name"], "url": site["url"]},
+                              entry=(found.get("entry") or {}).get("url") or "")
+        return entry
 
     def _render_page(self, url):
         webtools.ADBLOCK = self.settings.get()["adblock"]
@@ -1914,6 +2176,11 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/video-sites/diagnose", "diagnose_video_site"),
         ("POST", r"/api/items/(\w+)/scraped", "play_scraped"),
         ("POST", r"/api/items/(\w+)/scraped/unlink", "scraped_unlink"),
+        ("GET", r"/api/items/(\w+)/online/links", "online_links"),
+        ("POST", r"/api/party-server/find", "find_party_server"),
+        ("POST", r"/api/items/(\w+)/online/link-all", "link_all"),
+        ("POST", r"/api/items/(\w+)/online/relink", "relink_episode"),
+        ("POST", r"/api/items/(\w+)/online/prefs", "online_prefs"),
         ("POST", r"/api/torrents/(\w+)/plan", "torrent_plan_group"),
         ("POST", r"/api/torrents/(\w+)/plan/redo", "torrent_plan_redo"),
         ("POST", r"/api/torrents/(\w+)/plan/add", "torrent_plan_add"),
@@ -1985,6 +2252,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         if url.path.startswith("/stream/") and method in ("GET", "HEAD"):
             return self._stream(url.path)
+        if url.path.startswith("/online/") and method in ("GET", "HEAD"):
+            return self._online(url)
         if not url.path.startswith("/api/"):
             if method in ("GET", "HEAD"):
                 return self._static(url.path)
@@ -2010,6 +2279,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": f"unexpected error: {e}"},
                                       HTTPStatus.INTERNAL_SERVER_ERROR)
         return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def _online(self, url):
+        """An episode of the player's playlist from your own site: sent on to its video."""
+        m = re.fullmatch(r"/online/([\w-]+)/(\w+)/(\d+)/(\d+)", url.path)
+        if not m or m.group(1) != self.app.torrents.token:
+            return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+        q = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
+        try:
+            video = self.app.online_video(m.group(2), int(m.group(3)), int(m.group(4)), q.get("site", ""), q.get("track", ""))
+        except (OnlineError, KeyError) as e:
+            return self._send(HTTPStatus.NOT_FOUND, str(e).encode("utf-8", "replace"), "text/plain")
+        return self._send(HTTPStatus.FOUND, b"", "text/plain", {"Location": video})
 
     STREAM_TYPES = {".mkv": "video/x-matroska", ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
                     ".avi": "video/x-msvideo", ".mov": "video/quicktime", ".ts": "video/mp2t"}
@@ -2516,6 +2797,10 @@ class Handler(BaseHTTPRequestHandler):
             if body["play_with"] not in PLAY_WITH:
                 raise ApiError("unknown way to play")
             patch["play_with"] = body["play_with"]
+        if "online_service" in body:
+            patch["online_service"] = str(body["online_service"] or "")[:40]
+        if "keep_magnet" in body:
+            patch["keep_magnet"] = bool(body["keep_magnet"])
         if "local_broken" in body:
             patch["local_broken"] = bool(body["local_broken"])
         elif "local_folder" in patch or "local_file" in patch:
@@ -2553,7 +2838,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_add_torrent(self, body, item_id):
         self.app.item(item_id)
-        return self.app.torrents.add(item_id, str(body.get("magnet") or ""))
+        got = self.app.torrents.add(item_id, str(body.get("magnet") or ""))
+        if body.get("replace"):
+            # One magnet per title: the one attached before goes (its downloads too).
+            self.app.torrents.replace_for(item_id, got.get("hash") if isinstance(got, dict) else "")
+        return got
 
     def api_torrent_keep(self, body, item_id):
         self.app.item(item_id)
@@ -2655,13 +2944,23 @@ class Handler(BaseHTTPRequestHandler):
         if not site:
             raise ApiError("add the site's search link first")
         query = str(body.get("query") or "").strip()
-        if not query:
-            mine = [i for i in self.app.store.list() if i["type"] in site["types"]]
-            query = mine[0]["title"] if mine else "Frieren"
+        mine = [i for i in self.app.store.list() if i["type"] in site["types"]]
+        item = next((i for i in mine if not query or i["title"] == query), None)
+        if site.get("kind") in ("archive", "json_api"):
+            try:
+                return scrape.test_site(site, query or (item["title"] if item else "Frieren"))
+            except scrape.ScrapeError as e:
+                raise ApiError(str(e)) from e
+        # As a real search goes: every form of the name (all the titles it has, shorter ones),
+        # and the page after its scripts have run when it needs them.
+        item = dict(item) if item else {"id": "test", "title": query or "Frieren", "type": site["types"][0],
+                                        "format": "movie" if site["types"][0] == "movie" else "series"}
         try:
-            return scrape.test_site(site, query)
+            found = self.app.scraper.search(site, item)
         except scrape.ScrapeError as e:
             raise ApiError(str(e)) from e
+        return {"url": scrape.search_url(site, item["title"]), "query": item["title"], "count": len(found),
+                "examples": [{"name": c["name"], "score": c["score"]} for c in found[:5]]}
 
     def api_diagnose_video_site(self, body):
         """A video site's "Test with an episode": every step, from scratch."""
@@ -2681,6 +2980,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_scraped_unlink(self, body, item_id):
         return self.app.scraped_unlink(self.app.item(item_id), body)
+
+    def api_find_party_server(self, body):
+        """A watch-party server that answers now (Settings: Find a working server)."""
+        import socket
+        for addr in PARTY_SERVERS:
+            host, port = addr.rsplit(":", 1)
+            try:
+                with socket.create_connection((host, int(port)), timeout=4):
+                    return {"server": addr}
+            except OSError:
+                continue
+        raise ApiError("none of the public watch-party servers answered - check your internet connection")
+
+    def api_online_links(self, body, item_id):
+        return self.app.online_links(self.app.item(item_id))
+
+    def api_link_all(self, body, item_id):
+        return self.app.link_all(self.app.item(item_id), body)
+
+    def api_relink_episode(self, body, item_id):
+        return self.app.relink_episode(self.app.item(item_id), body)
+
+    def api_online_prefs(self, body, item_id):
+        return self.app.set_online_prefs(self.app.item(item_id), body)
 
     def api_torrent_plan(self, body, h):
         return self.app.torrents.plan_view(h)
