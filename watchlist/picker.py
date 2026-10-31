@@ -103,22 +103,30 @@ class Job:
 
 
 def _describe(entry):
-    """How long and how good a playlist is (an ad is short, the episode isn't)."""
-    if entry["kind"] != "playlist" or ".m3u8" not in entry["url"].lower():
-        return
+    """How long and how good a video is (an ad is short, the episode isn't), looked at
+    inside: a playlist's length and best quality, a file's size."""
     headers = {k: v for k, v in entry["headers"].items() if k in ("Referer", "Origin", "User-Agent", "Cookie")}
     headers.setdefault("User-Agent", "Mozilla/5.0")
 
-    def get(u):
-        with urllib.request.urlopen(urllib.request.Request(u, headers=headers), timeout=15) as r:
-            return r.read(2_000_000).decode("utf-8", "replace")
+    def get(u, limit=2_000_000):
+        req = urllib.request.Request(u, headers=dict(headers, Range=f"bytes=0-{limit - 1}"))
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.read(limit), r.headers
     try:
-        text = get(entry["url"])
+        body, info = get(entry["url"])
+        if not body.lstrip()[:7] == b"#EXTM3U":
+            size = re.search(r"/(\d+)$", info.get("Content-Range") or "") or None
+            total = int(size.group(1)) if size else int(info.get("Content-Length") or 0)
+            if total:
+                entry["quality"] = f"{total / 1e9:.1f} GB" if total >= 1e9 else f"{total / 1e6:.0f} MB"
+            return
+        entry["kind"] = "playlist"
+        text = body.decode("utf-8", "replace")
         heights = [int(h) for h in re.findall(r"RESOLUTION=\d+x(\d+)", text)]
         if heights:
             entry["quality"] = f"{max(heights)}p"
             first = next((x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")), "")
-            text = get(urllib.parse.urljoin(entry["url"], first)) if first else ""
+            text = get(urllib.parse.urljoin(entry["url"], first))[0].decode("utf-8", "replace") if first else ""
         total = sum(float(x) for x in re.findall(r"#EXTINF:([\d.]+)", text))
         if total:
             entry["length"] = round(total)

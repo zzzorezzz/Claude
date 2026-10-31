@@ -830,13 +830,14 @@ function dragOver(x, y) {
   if (!grid || !under || under.closest('.grid, .row-track') !== grid) return;
   const over = under.closest('.card');
   if (!over || over === drag.card) return;
-  if (over.getAnimations().some((a) => !(a instanceof CSSAnimation))) return;   // (still gliding)
+  if (over.getAnimations().some((a) => !(a instanceof CSSAnimation) && !(a instanceof CSSTransition))) return;   // (still gliding)
   const r = over.getBoundingClientRect();
   const after = x > r.left + r.width / 2;
   if ((after ? over.nextElementSibling : over.previousElementSibling) === drag.card) return;
   slideCards(grid, () => over.insertAdjacentElement(after ? 'afterend' : 'beforebegin', drag.card));
 }
 function dragEnd(x, y, cancel) {
+  if (!cancel && x !== null) dragOver(x, y);          // (where it was let go counts, however fast it came)
   const card = drag.card;
   const float = drag.float;
   const grid = drag.grid;
@@ -850,7 +851,7 @@ function dragEnd(x, y, cancel) {
   setTimeout(() => { drag.moved = false; }, 50);
   const finish = () => {
     float.remove();
-    card.classList.remove('drag-place');
+    $$('.drag-place').forEach((c) => c.classList.remove('drag-place'));
   };
   if (chip) {
     finish();
