@@ -369,8 +369,8 @@ jobs:
           disable-animations: true
           script: |
             adb start-server
-            bash android/smoke-test.sh
             bash android/live-test.sh || true
+            bash android/smoke-test.sh
 
       - uses: actions/upload-artifact@v4
         if: always()

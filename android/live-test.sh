@@ -5,6 +5,7 @@
 # $1: site names (empty: all).
 set -u
 only="${1:-all}"
+adb install -r WatchAnything.apk
 adb shell am force-stop app.watchanything
 adb shell am start -n app.watchanything/.MainActivity --es live "$only"
 quiet=0
@@ -17,7 +18,7 @@ for i in $(seq 700); do
   if [ "$now" = "$last" ]; then quiet=$((quiet + 4)); else quiet=0; last="$now"; fi
   # (nothing new for 8 minutes: something's stuck - stop and show why)
   if [ "$quiet" -ge 480 ]; then echo "LIVE TEST: no progress for 8 minutes"; break; fi
-  if [ $((i % 30)) = 0 ]; then timeout 20 adb exec-out screencap -p > "android-live-$i.png"; python3 -c 'import json; r=json.load(open("live-report-android.json")); print(len(r["rows"]), "done so far")' 2>/dev/null; fi
+  if [ $((i % 30)) = 0 ]; then python3 -c 'import json; r=json.load(open("live-report-android.json")); print(len(r["rows"]), "done so far")' 2>/dev/null; fi
 done
 [ -s live-report-android.json ] || echo '{"rows": [], "done": false}' > live-report-android.json
 python3 - <<'PY'
