@@ -200,6 +200,21 @@ final class Pages {
                 } catch (Exception ignored) {
                 }
             }
+
+            // The page's renderer crashed (a heavy site, little memory): that page is gone - not
+            // the whole app, which is what Android does when nobody handles it.
+            @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                for (Map.Entry<String, Hidden> e : pages.entrySet()) {
+                    if (e.getValue().web == view) {
+                        pages.remove(e.getKey());
+                        break;
+                    }
+                }
+                root.removeView(view);
+                view.destroy();
+                return true;
+            }
         });
         // Behind the app's own screen (full size, so its player lays out and plays as it would).
         web.setVisibility(View.VISIBLE);

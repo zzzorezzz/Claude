@@ -42,18 +42,23 @@ public class MainActivity extends Activity {
     private View fullscreen;
     private ValueCallback<Uri[]> pickCallback;
     private WebChromeClient chrome;
-    private Pages pages;
+    // (the window drawn now: the engine's bridge, made once, always reaches it - also after the
+    // window is made again, a crashed screen redrawn)
+    private static Pages pages;
+    private static MainActivity current;
     static int port = 0;
 
     /** What the app's engine calls to open a link (Python → Java). */
     public class Bridge {
         public void openUrl(String url) {
-            runOnUiThread(() -> openLink(url));
+            MainActivity now = current;
+            now.runOnUiThread(() -> now.openLink(url));
         }
 
         /** A watch party opening the player (a guest following the host, or the host starting one). */
         public void openPlayer(String json) {
-            runOnUiThread(() -> startPlayer(json));
+            MainActivity now = current;
+            now.runOnUiThread(() -> now.startPlayer(json));
         }
 
         /** A watch party telling the open player what to do. */
@@ -132,6 +137,7 @@ public class MainActivity extends Activity {
         root.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
         pages = new Pages(this, root);
+        current = this;
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -149,6 +155,13 @@ public class MainActivity extends Activity {
                 Uri uri = request.getUrl();
                 if ("127.0.0.1".equals(uri.getHost()) || "localhost".equals(uri.getHost())) return false;
                 openLink(uri.toString());        // anything else: its own app or the browser
+                return true;
+            }
+
+            // The screen's renderer crashed: the screen is drawn again (the app's engine carries on).
+            @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                recreate();
                 return true;
             }
         });
