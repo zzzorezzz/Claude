@@ -105,7 +105,7 @@ def main(argv):
         cdp.shutdown()
     except Exception:  # noqa: BLE001
         pass
-    return 0 if ok == len(rows) else 1
+    return 0 if rows and ok == len(rows) else 1
 
 
 if __name__ == "__main__":
