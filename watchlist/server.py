@@ -43,7 +43,6 @@ def _english(path):
 
 
 # Public Syncplay servers, tried in order by "Find a working server".
-PARTY_SERVERS = ("syncplay.pl:8999", "syncplay.pl:8998", "syncplay.pl:8997", "syncplay.pl:8996", "syncplay.pl:8995")
 
 
 class OnlineError(Exception):
@@ -427,13 +426,30 @@ class App:
             party = current                  # already hosting: just play this in it
         else:
             room = syncplay.new_room()
-            party = party_mod.Party(self._party_server(), room, self._party_name(), "host",
-                                    context=metadata.ssl_context(), on_end=self._party_ended,
-                                    avatar=self.settings.get()["party_avatar"])
-            try:
-                party.connect()
-            except party_mod.PartyError as e:
-                raise ApiError(str(e)) from e
+            chosen = self._party_server()
+            # Your server first; a public one that doesn't work right now: the next public one
+            # (and that one is kept in Settings for next time).
+            servers = [chosen] + ([x for x in syncplay.PUBLIC_SERVERS if x != chosen]
+                                  if chosen in syncplay.PUBLIC_SERVERS else [])
+            party, problem = None, None
+            for server in servers:
+                attempt = party_mod.Party(server, room, self._party_name(), "host",
+                                          context=metadata.ssl_context(), on_end=self._party_ended,
+                                          avatar=self.settings.get()["party_avatar"])
+                try:
+                    attempt.connect()
+                except party_mod.PartyError as e:
+                    problem = problem or e
+                    continue
+                party = attempt
+                break
+            if party is None:
+                raise ApiError(f"{problem} - press Find a working server", HTTPStatus.BAD_GATEWAY)
+            if party.server != chosen:
+                try:
+                    self.settings.update({"party_server": party.server})
+                except ValueError:
+                    pass
             party.invite = syncplay.short_invite(party.server, room) or syncplay.make_invite(party.server, room, host=party.me)
             self._start_party(party)
         out = {"ok": True, "code": party.invite, "room": party.room, "server": party.server, "file": ""}
@@ -3721,14 +3737,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_find_party_server(self, body):
         """A watch-party server that answers now (Settings: Find a working server)."""
-        import socket
-        for addr in PARTY_SERVERS:
-            host, port = addr.rsplit(":", 1)
-            try:
-                with socket.create_connection((host, int(port)), timeout=4):
-                    return {"server": addr}
-            except OSError:
-                continue
+        for addr in syncplay.PUBLIC_SERVERS:
+            if syncplay.answers(addr):
+                if body.get("save"):
+                    self.app.settings.update({"party_server": addr})
+                return {"server": addr}
         raise ApiError("none of the public watch-party servers answered - check your internet connection")
 
     def api_pick_start(self, body, item_id):

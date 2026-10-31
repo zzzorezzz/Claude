@@ -216,6 +216,16 @@ jobs:
             --add-data "watchlist/web:watchlist/web" \
             --add-data "watchlist/mpv_scripts:watchlist/mpv_scripts" \
             --add-data "watchlist/mpv_config:watchlist/mpv_config"
+          # What macOS shows and searches (the Apps view, Spotlight): its name, version and kind.
+          version=$(python -c "import watchlist; print(watchlist.__version__)")
+          info="$APP/Contents/Info.plist"
+          for kv in "CFBundleName:Watch Anything" "CFBundleDisplayName:Watch Anything" \
+                    "CFBundleShortVersionString:$version" "CFBundleVersion:$version" \
+                    "LSApplicationCategoryType:public.app-category.entertainment"; do
+            key="${kv%%:*}"; value="${kv#*:}"
+            /usr/libexec/PlistBuddy -c "Set :$key $value" "$info" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :$key string $value" "$info"
+          done
+          /usr/libexec/PlistBuddy -c "Print" "$info"
           # The built-in player goes inside the app, then the whole app is signed again.
           ditto packaging/mpv.app "$APP/Contents/Resources/mpv.app"
           # mpv's own app says it opens every kind of video, which lets macOS make it

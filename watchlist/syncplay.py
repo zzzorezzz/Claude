@@ -14,6 +14,24 @@ import re
 import secrets
 
 DEFAULT_SERVER = "syncplay.pl:8999"
+# Syncplay's free public servers (some ports are sometimes down: the next one is used).
+PUBLIC_SERVERS = ("syncplay.pl:8999", "syncplay.pl:8998", "syncplay.pl:8996", "syncplay.pl:8995", "syncplay.pl:8997")
+
+
+def answers(server, timeout=6):
+    """Whether a watch-party server really works now: not only that it takes the connection
+    (syncplay.pl:8999 sometimes takes it and cuts it off at once), but that it answers the
+    first thing a Syncplay app says to it."""
+    import socket
+    host, _, port = server.partition(":")
+    try:
+        with socket.create_connection((host, int(port or 8999)), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(json.dumps({"TLS": {"startTLS": "send"}}).encode() + b"\r\n")
+            reply = sock.recv(512)
+        return b"TLS" in reply
+    except (OSError, ValueError):
+        return False
 PREFIX = "WLP1."
 
 
@@ -35,7 +53,7 @@ def new_room():
 # A party's invite: "WA-" and the room's own 8 letters ("WA-K7QD-2M9X"), plus "@server" for a
 # server of your own. It stays the same for the whole party: what's playing (a file, a magnet,
 # your site) reaches whoever joins from the room itself, so anyone can join with it at any time.
-SHORT = re.compile(r"\bWA-([A-Z2-7]{4})-?([A-Z2-7]{4})(?:@([A-Za-z0-9.-]+(?::\d{1,5})?))?", re.I)
+SHORT = re.compile(r"\bWA-([A-Z2-7]{4})-?([A-Z2-7]{4})(?:-([5-8])\b)?(?:@([A-Za-z0-9.-]+(?::\d{1,5})?))?", re.I)
 
 
 def short_invite(server, room):
@@ -45,6 +63,9 @@ def short_invite(server, room):
         return ""
     letters = base64.b32encode(bytes.fromhex(m.group(1))).decode("ascii")
     code = f"WA-{letters[:4]}-{letters[4:]}"
+    m = re.fullmatch(r"syncplay\.pl:899([5-8])", server)
+    if m:
+        return f"{code}-{m.group(1)}"          # (another public port: one more digit)
     return code if server == DEFAULT_SERVER else f"{code}@{server}"
 
 
@@ -88,7 +109,8 @@ def read_invite(code):
             room = "watchanything-" + base64.b32decode((short.group(1) + short.group(2)).upper()).hex()
         except (binascii.Error, ValueError):
             raise ValueError("that watch-party code isn't right - check it letter by letter") from None
-        return {"server": short.group(3) or DEFAULT_SERVER, "room": room, "title": "", "year": None, "type": "",
+        server = short.group(4) or (f"syncplay.pl:899{short.group(3)}" if short.group(3) else DEFAULT_SERVER)
+        return {"server": server, "room": room, "title": "", "year": None, "type": "",
                 "source": "", "source_id": "", "host": None}
     m = re.search(r"WLP1\.([A-Za-z0-9_-]+)", code)
     if not m:

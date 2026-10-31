@@ -1670,3 +1670,5 @@ body.pick-window #nav, body.pick-window #view, body.pick-window #party-dock { di
   border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); }
 .xf-name { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 700px) { .xf-row { flex-direction: column; align-items: stretch; } }
+
+.ok-box { padding: 10px 12px; border-radius: 8px; background: rgba(74, 222, 128, .12); border: 1px solid rgba(74, 222, 128, .4); }

@@ -2639,7 +2639,18 @@ async function openStartParty(item = null) {
       $('[data-p="copy"]', out).addEventListener('click', () => { navigator.clipboard?.writeText(r.code); toast('Invite copied'); });
       $('[data-p="done"]', out).addEventListener('click', () => closeModal(wrap));
     } catch (err) {
-      out.innerHTML = `<div class="warn">${esc(err.message)}</div>`;
+      const server = /watch-party server/.test(err.message || '');
+      out.innerHTML = `<div class="warn">${esc(err.message)}
+        ${server ? '<div class="btns"><button class="btn btn-white btn-sm" data-p="find-server">Find a working server</button></div>' : ''}</div>`;
+      $('[data-p="find-server"]', out)?.addEventListener('click', async (ev) => {
+        ev.target.disabled = true;
+        ev.target.textContent = 'Looking…';
+        try {
+          const r = await api('POST', '/api/party-server/find', { save: true });
+          S.settings && (S.settings.party_server = r.server);
+          out.innerHTML = `<div class="ok-box">${esc(r.server)} works - it's in Settings now. Press <b>Start the watch party</b> again.</div>`;
+        } catch (er) { ev.target.disabled = false; ev.target.textContent = 'Find a working server'; fail(er); }
+      });
     } finally { if (e.target.isConnected) { e.target.disabled = false; e.target.textContent = 'Start the watch party'; } }
   });
   const box = $('.party-paste', wrap);

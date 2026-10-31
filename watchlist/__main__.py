@@ -3,7 +3,9 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -136,6 +138,33 @@ def _player_test(path):
     return 0
 
 
+def _register_on_mac(data_dir):
+    """The Mac app, once per version: told to macOS's list of apps and to Spotlight, which the
+    Apps view's search uses. An app copied from a downloaded disk image and first opened from
+    there can be missing from the search while it's in the list of all apps."""
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        return
+    bundle = Path(sys.executable).resolve().parents[2]
+    if bundle.suffix != ".app" or str(bundle).startswith("/Volumes/"):
+        return                               # (not installed yet: still on the disk image)
+    from . import __version__
+    mark = data_dir / f".registered-{__version__}"
+    if mark.exists():
+        return
+    lsregister = ("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework"
+                  "/Support/lsregister")
+    for cmd in ([lsregister, "-f", str(bundle)], ["/usr/bin/mdimport", str(bundle)]):
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        mark.write_text(str(bundle))
+    except OSError:
+        pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="watchlist", description=__doc__)
     ap.add_argument("--port", type=int, default=8765)
@@ -161,6 +190,7 @@ def main(argv=None):
             launcher.open_app_window(url, browser, storage=data_dir / "browser-data")
         return 0
 
+    threading.Thread(target=_register_on_mac, args=(data_dir,), daemon=True).start()
     app = App(data_dir)
     try:
         server = make_server(app, args.port)
