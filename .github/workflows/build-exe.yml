@@ -197,6 +197,12 @@ jobs:
           cp -R uosc-dl/x/fonts watchlist/mpv_config/
           cp -R uosc-dl/x/scripts/uosc watchlist/mpv_config/scripts/
           rm -rf watchlist/mpv_config/scripts/uosc/bin
+          # No "Remove" on subtitle and audio tracks the app added: they're turned off, not lost.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("watchlist/mpv_config/scripts/uosc/lib/menus.lua")
+          p.write_text(p.read_text().replace("table.insert(track_external_actions, {name = 'remove', icon = 'delete', label = t('Remove') .. ' (del)'})", ""))
+          PY
           du -sh watchlist/mpv_config
 
       - name: Build Watch Anything.app
