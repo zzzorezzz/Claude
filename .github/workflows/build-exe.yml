@@ -367,8 +367,9 @@ jobs:
           disk-size: 4096M
           disable-animations: true
           script: |
-            timeout 1200 bash android/smoke-test.sh
-            timeout 3000 bash android/live-test.sh || true
+            adb start-server
+            bash android/smoke-test.sh
+            bash android/live-test.sh || true
 
       - uses: actions/upload-artifact@v4
         if: always()
