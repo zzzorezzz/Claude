@@ -362,9 +362,10 @@ jobs:
           api-level: 34
           target: default
           arch: x86_64
-          cores: 4
-          ram-size: 4096M
           disk-size: 4096M
+          # (the phone draws its screen itself: the build server's graphics emulation falls over
+          # once the app's screen starts drawing)
+          emulator-options: -no-window -gpu guest -noaudio -no-boot-anim -no-snapshot -camera-back none
           disable-animations: true
           script: |
             adb start-server
