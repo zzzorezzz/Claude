@@ -151,3 +151,68 @@ end)
 mp.register_event("file-loaded", loading_stop)
 mp.register_event("end-file", loading_stop)
 mp.observe_property("playback-time", "number", function(_, t) if t and loading.timer then loading_stop() end end)
+
+-- A video from a site that's stuck loading for 5 seconds (it never starts, or stops to
+-- load and doesn't come back): a small box at the side offering another source. T (or a
+-- click on the box) asks the app, which plays the episode from the site's next server.
+local stuck = { overlay = mp.create_osd_overlay("ass-events"), since = nil, shown = false, quiet_until = 0, last = nil }
+local function from_site()
+    local path = mp.get_property("path") or ""
+    return path:find("^https?://") ~= nil
+end
+local function stuck_hide()
+    if stuck.shown then
+        stuck.overlay:remove()
+        mp.remove_key_binding("watchlist-other-source-key")
+        mp.remove_key_binding("watchlist-other-source-click")
+    end
+    stuck.shown = false
+end
+local function stuck_ask()
+    stuck_hide()
+    stuck.since, stuck.quiet_until = nil, mp.get_time() + 20
+    mp.commandv("script-message", "watchlist-other-source")
+end
+local function stuck_box()
+    local w, h = mp.get_osd_size()
+    if not w or w == 0 then w, h = 1280, 720 end
+    stuck.overlay.res_x, stuck.overlay.res_y = w, h
+    local bw, bh = 300, 74
+    local x0, y0 = w - bw - 28, h / 2 - bh / 2
+    stuck.box = { x0, y0, x0 + bw, y0 + bh }
+    stuck.overlay.data = string.format([[{\an7\pos(%d,%d)\bord0\shad0\1c&H3A1B22&\1a&H20&\p1}m 0 0 l %d 0 l %d %d l 0 %d{\p0}]],
+            x0, y0, bw, bw, bh, bh) .. "\n" ..
+        string.format([[{\an7\pos(%d,%d)\fs20\bord0\shad0\1c&HF2E9E6&\b1}Not working?{\b0}\N{\fs17\1c&HCFC2BE&}Press T to try another source]],
+            x0 + 16, y0 + 12)
+    stuck.overlay:update()
+    if not stuck.shown then
+        mp.msg.info("offered another source")
+        mp.add_forced_key_binding("t", "watchlist-other-source-key", stuck_ask)
+        mp.add_forced_key_binding("MBTN_LEFT", "watchlist-other-source-click", function()
+            local mx, my = mp.get_mouse_pos()
+            local b = stuck.box
+            if b and mx >= b[1] and mx <= b[3] and my >= b[2] and my <= b[4] then
+                stuck_ask()
+            else
+                mp.command("cycle pause")            -- (a click anywhere else does what it always does)
+            end
+        end)
+    end
+    stuck.shown = true
+end
+mp.add_periodic_timer(1, function()
+    local t = mp.get_property_number("playback-time")
+    local waiting = mp.get_property_bool("paused-for-cache") or (mp.get_property_bool("idle-active") == false and t == nil)
+    local moving = t ~= nil and stuck.last ~= nil and math.abs(t - stuck.last) > 0.2
+    stuck.last = t
+    if not from_site() or mp.get_property_bool("pause") and not mp.get_property_bool("paused-for-cache")
+            or moving or not waiting or mp.get_time() < stuck.quiet_until then
+        stuck.since = nil
+        stuck_hide()
+        return
+    end
+    stuck.since = stuck.since or mp.get_time()
+    if mp.get_time() - stuck.since >= 5 then stuck_box() end
+end)
+mp.register_event("start-file", function() stuck.since, stuck.last = nil, nil; stuck_hide() end)
+mp.register_event("end-file", stuck_hide)

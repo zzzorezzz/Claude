@@ -476,15 +476,23 @@ class Party:
             self.missing = ""
             self.mine = {"status": "idle", "label": entry.get("label") or ""}
             session = self.session
+            jump = None
             if session and not session.ended:
                 current = session.current()
-                if current and current.get("path") == entry["path"]:
+                if current and (current.get("path") == entry["path"]
+                                or (entry.get("key") and current.get("key") == entry.get("key"))):
                     return
+                # (the season is in this player already: that episode of it)
+                jump = next((i for i, e in enumerate(getattr(session, "entries", None) or [])
+                             if entry.get("key") and e.get("key") == entry["key"]), None)
                 self._init_pending = True
                 self._announced = False
                 self._file_key = None
         if session and not session.ended:
-            session.replace(entry)
+            if jump is not None and hasattr(session, "jump"):
+                session.jump(jump)
+            else:
+                session.replace(entry)
             self.osd(f"Now playing {entry.get('label') or ''}".strip())
         elif self.open_player:
             self.open_player(self, entry)

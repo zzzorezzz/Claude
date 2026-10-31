@@ -61,6 +61,19 @@ class LibraryTest(unittest.TestCase):
         return next(q for q in self.lib.state()["questions"]
                     if q["kind"] == kind and any(contains in f for f in q["files"]))
 
+    def test_files_taken_out_or_ignored_are_listed_with_why(self):
+        bb1 = "Breaking Bad (2008)/Season 1/Breaking.Bad.S01E01.720p.mkv"
+        self.lib.route(bb1, "unsorted")
+        self.lib.route("Inception.2010.1080p.BluRay.x264/Inception.2010.1080p.BluRay.x264.mkv", "ignore")
+        extra = {f["rel"]: f["why"] for f in self.lib.extra_files()}
+        self.assertEqual(extra[bb1], "you took it out of Breaking Bad")
+        self.assertEqual(extra["Inception.2010.1080p.BluRay.x264/Inception.2010.1080p.BluRay.x264.mkv"],
+                         "you told the app to ignore it")
+        self.assertNotIn("[SubsPlease] Sousou no Frieren - 01 (1080p) [AB12CD34].mkv", extra, "a file a title uses isn't extra")
+        # Linked again by hand: no longer extra.
+        self.lib.route(bb1, self.bb["id"], 1, 1, "episode")
+        self.assertNotIn(bb1, {f["rel"] for f in self.lib.extra_files()})
+
     def test_files_are_connected_to_the_right_titles(self):
         self.assertEqual(self.files_of(self.frieren), sorted([
             "[SubsPlease] Sousou no Frieren [1080p].mkv",
@@ -350,3 +363,4 @@ class SortOnDemandTest(unittest.TestCase):
         self.lib.answer({"kind": "title", "key": group["key"], "item": self.frieren["id"]})   # on purpose
         self.app.sorter.run_now()
         self.assertIn("Breaking.Bad.S01E01.mkv", self.names(self.frieren))
+

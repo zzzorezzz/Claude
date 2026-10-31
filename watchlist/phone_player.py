@@ -158,6 +158,24 @@ class PhoneSession:
         if not self.ended and _bridge is not None:
             _bridge.playerCommand(self.id, json.dumps([{"do": "replace", "launch": self.launch()}]))
 
+    def jump(self, index):
+        """Play another entry of the playlist (a watch party's host moved to it)."""
+        if not self.ended and _bridge is not None:
+            _bridge.playerCommand(self.id, json.dumps([{"do": "index", "to": int(index)}]))
+
+    def swap(self, entry, pos=0.0):
+        """The episode playing, from somewhere else (another source), from where it was;
+        the rest of the playlist stays."""
+        entry = dict(entry)
+        entry.pop("mime", None)
+        if 0 <= self.index < len(self.entries):
+            self.entries[self.index] = entry
+        else:
+            self.entries, self.index = [entry], 0
+        self.start_at, self.pos, self.dur = float(pos or 0), None, None
+        if not self.ended and _bridge is not None:
+            _bridge.playerCommand(self.id, json.dumps([{"do": "replace", "launch": self.launch()}]))
+
     def stop(self):
         if not self.ended and _bridge is not None:
             _bridge.playerCommand(self.id, json.dumps([{"do": "close"}]))

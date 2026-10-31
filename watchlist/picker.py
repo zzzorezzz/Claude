@@ -86,7 +86,11 @@ class Job:
             self.clicks.append((time.time(), label))
 
     def closed(self):
+        """The browser window was closed: its list goes too."""
         self.open = False
+        from . import launcher
+        if not launcher.ANDROID:
+            launcher.close_window("picker-list")
 
     def view(self):
         return {"id": self.id, "open": self.open, "error": self.error, "page": self.page, "url": self.url,
@@ -125,6 +129,7 @@ def _describe(entry):
         heights = [int(h) for h in re.findall(r"RESOLUTION=\d+x(\d+)", text)]
         if heights:
             entry["quality"] = f"{max(heights)}p"
+            entry["master"] = len(heights) > 1          # (every quality in one: the player picks)
             first = next((x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")), "")
             text = get(urllib.parse.urljoin(entry["url"], first))[0].decode("utf-8", "replace") if first else ""
         total = sum(float(x) for x in re.findall(r"#EXTINF:([\d.]+)", text))
@@ -134,21 +139,53 @@ def _describe(entry):
         pass
 
 
-def start(item_id, season, episode, site_id, url):
-    """Open `url` in a watched browser window. The job, or an error message."""
+LIST_WIDTH = 400
+
+
+def layout():
+    """Where the two windows go: the site's page on the left, the videos it loads on the
+    right beside it (x, y, width, height each), filling the screen."""
+    try:
+        import webview
+        screen = webview.screens[0]
+        w, h = int(screen.width), int(screen.height)
+    except Exception:  # noqa: BLE001
+        w, h = 1440, 900
+    top, gap, side = 30, 12, 20
+    height = max(500, h - top - 90)
+    browser_w = max(640, w - LIST_WIDTH - gap - side * 2)
+    return (side, top, browser_w, height), (side + browser_w + gap, top, LIST_WIDTH, height)
+
+
+def start(item_id, season, episode, site_id, url, list_url=""):
+    """Open `url` in a watched browser window, and (on a computer) the list of the videos it
+    loads in a small window fixed beside it. The job, or an error message."""
     from . import cdp, droidweb, launcher, webtools
     job = Job(item_id, season, episode, site_id, url)
+    page_at, list_at = layout()
     try:
         if launcher.ANDROID and droidweb.available():
             job.closer = droidweb.watch(url, job)
         elif webtools._chromium():
-            job.closer = cdp.watch(url, job)
+            job.closer = cdp.watch(url, job, page_at)
         elif launcher.can_open_windows():
-            job.closer = webtools.watch_window(url, job)
+            job.closer = webtools.watch_window(url, job, page_at)
         else:
             raise RuntimeError("this needs the app's own window (it's running in a browser)")
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"couldn't open the browser: {e}") from e
+    if list_url and launcher.can_open_windows() and not launcher.ANDROID:
+        x, y, w, h = list_at
+        launcher.open_window(f"{list_url}#pick={job.id}", "Videos found - Watch Anything", width=w, height=h,
+                             kind="picker-list", on_top=True, x=x, y=y)
+        page_closer = job.closer
+
+        def close_both():
+            try:
+                page_closer()
+            finally:
+                launcher.close_window("picker-list")
+        job.closer = close_both
     with _lock:
         for old in [k for k, j in _jobs.items() if not j.open and time.time() - j.started > 3600]:
             del _jobs[old]
@@ -158,6 +195,47 @@ def start(item_id, season, episode, site_id, url):
 
 def get(job_id):
     return _jobs.get(job_id)
+
+
+def versions(job, entry):
+    """The versions of the video you picked that the page loaded (the same player's): the
+    one listing every quality first, then the one you picked, then the others, best first."""
+    same = [v for v in job.videos if v["frame"] == entry["frame"] and v["kind"] == entry["kind"]
+            and abs(v["at"] - entry["at"]) < 180]
+    if entry not in same:
+        same.append(entry)
+
+    def height(v):
+        m = re.match(r"(\d+)p", v.get("quality") or "")
+        return int(m.group(1)) if m else 0
+    return sorted(same, key=lambda v: (0 if v.get("master") else 1 if v is entry else 2, -height(v), -v["at"]))
+
+
+def plays(entry, timeout=12):
+    """Whether a video really comes from it: its playlist read (the first quality of one that
+    lists several), and the start of its first piece fetched."""
+    headers = {k: v for k, v in entry["headers"].items() if k in ("Referer", "Origin", "User-Agent", "Cookie")}
+    headers.setdefault("User-Agent", "Mozilla/5.0")
+    if headers.get("Referer") and not headers.get("Origin"):
+        headers["Origin"] = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(headers["Referer"]))
+
+    def get(u, limit):
+        req = urllib.request.Request(u, headers=dict(headers, Range=f"bytes=0-{limit - 1}"))
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(limit), (r.headers.get("Content-Type") or "").lower()
+    try:
+        url = entry["url"]
+        for _ in range(3):
+            body, kind = get(url, 1_000_000)
+            if not body.lstrip()[:7] == b"#EXTM3U":
+                return len(body) > 0 and "text/html" not in kind
+            lines = [x.strip() for x in body.decode("utf-8", "replace").splitlines() if x.strip() and not x.startswith("#")]
+            if not lines:
+                return False
+            url = urllib.parse.urljoin(url, lines[0])     # (a quality's playlist, then its first piece)
+        return False
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def recipe(job, entry):

@@ -383,7 +383,7 @@ def can_open_windows():
     return _webview is not None
 
 
-def open_window(url, title, width=1100, height=800, kind="", on_top=False):
+def open_window(url, title, width=1100, height=800, kind="", on_top=False, x=None, y=None):
     """Another window of the app's own (the watch party, the built-in browser).
     False when there's no app window to do it with (running in a browser).
     A window of a `kind` that's already open is brought back instead of opened twice."""
@@ -402,7 +402,7 @@ def open_window(url, title, width=1100, height=800, kind="", on_top=False):
     webtools.patch()                     # ads and pop-ups blocked in its pages (when that's on)
     try:
         win = _webview.create_window(title, url, width=width, height=height, background_color="#0d0f1a",
-                                     text_select=True, on_top=on_top)
+                                     text_select=True, on_top=on_top, x=x, y=y)
     except Exception:  # noqa: BLE001 - the window couldn't be made
         return False
     webtools.page_script(win)

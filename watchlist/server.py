@@ -105,6 +105,7 @@ class App:
         # matching of a title's episodes (the latest run per title goes on) and how far it is.
         self._online_found, self._link_runs, self._link_progress = {}, {}, {}
         self._finding = {}               # (title, episode) -> being found now (an Event)
+        self._tried_sources = {}         # (title, episode) -> sources that didn't play there
         # What you showed the app on each site, finding a video yourself (picker.py).
         self._learned_path = self.data_dir / "learned-sites.json"
         webtools.LEARNED.update(read_json(self._learned_path, {}))
@@ -555,18 +556,38 @@ class App:
         self.torrents.prepare(h, index)
         return self.torrents.stream_url(h, index, path)
 
+    def _party_playlist(self, item, entry):
+        """A guest's playlist, as the host's: the whole season around the episode (from the
+        same site, the same torrent or your own files), so Next and Previous play straight away."""
+        if item["format"] != "series":
+            return [entry], 0
+        if entry.get("web"):
+            site = next((x for x in self._video_sites(item) if x["id"] == entry.get("site")), None)
+            return self._online_playlist(item, site, entry) if site else ([entry], 0)
+        season, episode = self._key_numbers(entry.get("key"))
+        if season is None:
+            return [entry], 0
+        try:
+            entries, patch = self._entries(item, entry["path"], entry.get("sub"), season, episode, True, around=True)
+        except Exception:  # noqa: BLE001 - the episode on its own, then
+            return [entry], 0
+        first = patch.get("first", 0)
+        entries[first] = entry
+        return entries, first
+
     def _party_open(self, party, entry):
         """A guest's player, opened for what the host plays (paused until it's in step)."""
         item = self.store.get(entry["item_id"])
+        entries, first = self._party_playlist(item, entry)
         if launcher.ANDROID:
-            session = phone_player.PhoneSession(item["id"], [entry], 0, paused=True, keep_open=True,
-                                                anime=item["type"] == "anime")
+            session = phone_player.PhoneSession(item["id"], entries, 0, paused=True, keep_open=True,
+                                                anime=item["type"] == "anime", index=first)
             session.party = True
             party.attach(session)
             session.open()
             return
-        session = self.player.play(self._session(self._need_mpv(), item, [entry], 0,
-                                                 ["--pause", "--keep-open=yes"]))
+        session = self.player.play(self._session(self._need_mpv(), item, entries, 0,
+                                                 ["--pause", "--keep-open=yes"], first=first, playlist=len(entries) > 1))
         party.attach(session)
         if entry.get("web"):
             # From a video site: as for your own (its subtitles, where it's from, Sub / Dub).
@@ -1293,8 +1314,10 @@ class App:
             except torrents_mod.TorrentError as e:
                 raise ApiError(str(e)) from e
         entries, patch = self._entries(item, path, subtitle, body.get("season"), body.get("episode"),
-                                       s["queue_next_episodes"])
-        start = 0 if body.get("from_start") else player.resume_point(item["positions"].get(entries[0]["key"]))
+                                       s["queue_next_episodes"], around=bool(s["queue_next_episodes"]))
+        first = patch.pop("first", 0)
+        this = entries[first]
+        start = 0 if body.get("from_start") else player.resume_point(item["positions"].get(this["key"]))
         if launcher.ANDROID:
             # On a phone: the phone app's own player plays the list, and reports back
             # where you are (/api/android/progress). In a party you host, it plays for
@@ -1303,14 +1326,14 @@ class App:
                 hosting = self.party if self.party and self.party.active and self.party.role == "host" else None
             hold = bool(hosting and any(p != hosting.me for p in hosting.people))
             session = phone_player.PhoneSession(item["id"], entries, start, paused=bool(body.get("paused") or hold),
-                                                anime=item["type"] == "anime")
+                                                anime=item["type"] == "anime", index=first)
             if hosting:
                 session.party = True
                 hosting.attach(session, hold=hold and not body.get("paused"))
-                self._party_now(hosting, entries[0])
+                self._party_now(hosting, this)
             self.store.update(item["id"], patch)
-            return dict(session.launch(), ok=True, player="android", file=entries[0].get("name") or Path(path).name,
-                        queued=len(entries) - 1, resumed_at=start, stream=bool(found))
+            return dict(session.launch(), ok=True, player="android", file=this.get("name") or Path(path).name,
+                        queued=len(entries) - 1 - first, resumed_at=start, stream=bool(found))
         wanted = body.get("player") or s["player"]
         note = ""
         with self._party_lock:
@@ -1324,29 +1347,30 @@ class App:
                 # everyone at once when they're all ready.
                 hold = bool(hosting and any(p != hosting.me for p in hosting.people))
                 session = self.player.play(self._session(mpv, item, entries, start,
-                                                         ["--pause"] if body.get("paused") or hold else ()))
+                                                         ["--pause"] if body.get("paused") or hold else (),
+                                                         first=first, playlist=first > 0))
                 with self._party_lock:
                     party = self.party
                 if party and party.active and party.role == "host":
                     party.attach(session, hold=hold and not body.get("paused"))   # whatever the host plays, the party follows
-                    self._party_now(party, entries[0])
+                    self._party_now(party, this)
                 self.store.update(item["id"], patch)
-                return {"ok": True, "player": "mpv", "file": entries[0].get("name") or Path(path).name,
-                        "queued": len(entries) - 1, "resumed_at": start, "stream": bool(found),
-                        "subtitle": Path(entries[0]["sub"]).name if entries[0].get("sub") else ""}
+                return {"ok": True, "player": "mpv", "file": this.get("name") or Path(path).name,
+                        "queued": len(entries) - 1 - first, "resumed_at": start, "stream": bool(found),
+                        "subtitle": Path(this["sub"]).name if this.get("sub") else ""}
             note = "The built-in player is missing, so VLC was used."
         if wanted == "custom" and s["custom_player_path"]:
             # Your own player: the file (or its stream link) is handed to it; it keeps its own place.
             try:
-                launcher.play_in_player(s["custom_player_path"], entries[0]["path"])
+                launcher.play_in_player(s["custom_player_path"], this["path"])
             except launcher.LaunchError as e:
                 raise ApiError(str(e)) from e
             self.store.update(item["id"], patch)
             return {"ok": True, "player": "custom", "file": Path(path).name, "queued": 0, "resumed_at": 0,
                     "player_name": Path(s["custom_player_path"]).stem}
-        self._play_vlc(entries, start)
+        self._play_vlc(entries[first:], start)
         self.store.update(item["id"], patch)
-        return {"ok": True, "player": "vlc", "file": Path(path).name, "queued": len(entries) - 1,
+        return {"ok": True, "player": "vlc", "file": Path(path).name, "queued": len(entries) - 1 - first,
                 "resumed_at": start, "note": note}
 
     def _session(self, mpv, item, entries, start=0, extra=(), first=0, playlist=False):
@@ -1375,8 +1399,10 @@ class App:
         session.listeners.append(self._player_message)
         return session
 
-    def _entries(self, item, path, subtitle, season=None, episode=None, queue=True):
-        """What to play: the file, then (with `queue`) the episodes after it."""
+    def _entries(self, item, path, subtitle, season=None, episode=None, queue=True, around=False):
+        """What to play: the file, then (with `queue`) the episodes after it. With `around`,
+        the episodes before it come first too (Previous works), and patch["first"] says
+        which entry is the file asked for."""
         series = item["format"] == "series"
         if series and season is not None and episode is not None:
             first_key = f"{max(0, int(season))}:{max(1, int(episode))}"
@@ -1398,8 +1424,11 @@ class App:
                 # a torrent's episodes mixed, one copy of each).
                 ordered = list(dict.fromkeys(v["path"] for _, v in sorted(scanner.episode_map(item, videos).items())))
                 by_path = {v["path"]: v for v in videos}
-                after = ordered[ordered.index(path) + 1:] if path in ordered else []
-                for p in after[:50]:
+                here = ordered.index(path) if path in ordered else -1
+                after = ordered[here + 1:] if here >= 0 else []
+                before = ordered[max(0, here - 50):here] if around and here > 0 else []
+
+                def queued(p):
                     v = by_path[p]
                     subs = subtitles(v)
                     # Keep using the same kind of subtitle (none / auto) for the queue.
@@ -1407,7 +1436,11 @@ class App:
                     entry = {"path": v["path"], "sub": sub, "key": keys.get(v["path"], v["path"])}
                     if v.get("torrent"):
                         entry["torrent"] = v["torrent"]
-                    entries.append(entry)
+                    return entry
+                entries += [queued(p) for p in after[:50]]
+                if before:
+                    entries[:0] = [queued(p) for p in before]
+                    patch["first"] = len(before)
             if first_key:
                 patch["progress"] = {"season": int(first_key.split(":")[0]),
                                      "episode": int(first_key.split(":")[1])}
@@ -1745,6 +1778,8 @@ class App:
             threading.Thread(target=self._load_own_sub, args=(session,), daemon=True).start()
         elif args[0] == "watchlist-switch-version":
             threading.Thread(target=self._switch_version, args=(session,), daemon=True).start()
+        elif args[0] == "watchlist-other-source":
+            threading.Thread(target=self._other_source, args=(session,), daemon=True).start()
 
     def _load_own_sub(self, session):
         path = dialogs.choose("file", "Choose a subtitle file", "", "subtitle")
@@ -1757,6 +1792,56 @@ class App:
                 self._save_sub(session.item_id, entry["key"], path)
             except KeyError:
                 pass
+
+    def _other_source(self, session):
+        """The video won't load: the episode's next source on the same site (the same sub or
+        dub), else on your next site, swapped in where you are. The one that works is the
+        site's choice from then on, and the episodes found ahead are found again with it."""
+        entry = session.current()
+        got = self._online_found.get((session.item_id, (entry or {}).get("key")))
+        if not entry or not entry.get("web") or not got:
+            session.send(["show-text", "Another source: only for videos from your own sites", 3000])
+            return
+        key = entry["key"]
+        item = self.store.get(session.item_id)
+        site, found = got[0], got[1]
+        stream = found.get("stream") or {}
+        track = stream.get("kind") or entry.get("track") or "sub"
+        tried = self._tried_sources.setdefault((item["id"], key), set())
+        tried.update({stream.get("id") or "auto", f"url:{found['url']}"})
+        session.send(["show-text", "Trying another source…", 60000])
+        season, episode = self._key_numbers(key)
+        new, where = None, site
+        sites = [site] + [x for x in self._online_order(item, key) if x["id"] != site["id"]]
+        for n, candidate in enumerate(sites):
+            try:
+                new = self.scraper.resolve(candidate, item, season, episode, track=track if track == "dub" else "",
+                                           skip=tuple(tried) if n == 0 else (), fresh=True)
+            except scrape.ScrapeError:
+                continue
+            if new.get("url") and f"url:{new['url']}" not in tried:
+                where = candidate
+                break
+            new = None
+        if not new:
+            session.send(["show-text", "No other source found for this one", 4000])
+            return
+        picked = new.get("stream") or {}
+        if where is site and picked.get("label"):
+            self.scraper.prefer_stream(site, picked["label"], picked.get("kind") or track)
+        # The episodes found ahead (with the source that didn't work) are found again.
+        for k in [k for k in self._online_found if k[0] == item["id"] and k[1] != key]:
+            self._online_found.pop(k, None)
+        self._online_found[(item["id"], key)] = (where, new, time.time())
+        fresh = dict(self._web_entry(item, where, key, new), online=True)
+        sub = self.saved_sub(item, key)
+        if sub:
+            fresh["sub"] = sub
+        session.swap(fresh, session.position() or 0)
+        name = picked.get("label") or where["name"]
+        session.send(["show-text", f"Playing from {name}" + ("" if where is site else f" on {where['name']}"), 3000])
+        if item["format"] == "series":
+            threading.Thread(target=self._link_around, args=(item["id"], where, key, session), daemon=True).start()
 
     def _switch_version(self, session):
         """Sub to dub (or back) for the episode playing, from where it is; the episodes after
@@ -1835,8 +1920,10 @@ class App:
         slot = (item["id"], key)
         for _ in range(2):
             got = self._online_found.get(slot)
-            if got and not pin and time.time() - got[2] < self.FOUND_FOR and got[0]["id"] not in skip \
-                    and (not prefer or got[0]["id"] == prefer or prefer not in {x["id"] for x in self._video_sites(item)}) \
+            # (only from the site that comes first for it now: the one asked for, the one you
+            # chose for this episode or the title - not one found on another site before)
+            order = [x["id"] for x in self._online_order(self.store.get(item["id"]), key, prefer) if x["id"] not in skip]
+            if got and not pin and time.time() - got[2] < self.FOUND_FOR and order and got[0]["id"] == order[0] \
                     and (not track or ((got[1].get("stream") or {}).get("kind") or "sub") == track):
                 return got[0], got[1]
             with self._lock:
@@ -1866,6 +1953,10 @@ class App:
         sites = [x for x in self._online_order(item, key, prefer) if x["id"] not in skip]
         if pin:
             sites = sites[:1]                 # (a title you picked on that site: only there)
+        chosen = prefer or (item.get("online_site_eps") or {}).get(key) or item.get("online_site") \
+            or (item.get("keep_site") and (item.get("online_links") or {}).get(key))
+        if len(sites) > 1 and not chosen and not pin:
+            return self._online_race(item, key, season, episode, track, sites, fresh)
         for site in sites:
             try:
                 found = self.scraper.resolve(site, item, season, episode, pin=pin, track=track, fresh=fresh)
@@ -1878,6 +1969,58 @@ class App:
             self._online_linked(item, key, site)
             return site, found
         raise OnlineError("; ".join(errors) or "no video site in Settings has it", choices, page)
+
+    RACE_WAIT = 5        # seconds the first site gets, once another has the video
+
+    def _online_race(self, item, key, season, episode, track, sites, fresh=False):
+        """No site chosen for it: every site searched at once. The first in order is played if
+        it has the video; another that has it already is played if the first takes more than
+        RACE_WAIT seconds longer (or doesn't have it). Only one is ever played."""
+        results, cond = {}, threading.Condition()
+
+        def search(site):
+            try:
+                got = ("ok", self.scraper.resolve(site, item, season, episode, track=track, fresh=fresh))
+            except scrape.ScrapeError as e:
+                got = ("error", e)
+            except Exception as e:  # noqa: BLE001 - one site's trouble isn't the others'
+                got = ("error", scrape.ScrapeError(str(e)))
+            with cond:
+                results[site["id"]] = got
+                cond.notify_all()
+        for site in sites:
+            threading.Thread(target=search, args=(site,), daemon=True).start()
+        first, other_since, deadline = sites[0]["id"], None, time.time() + 240
+        winner = None
+        with cond:
+            while winner is None and time.time() < deadline:
+                head = results.get(first)
+                found = [x for x in sites if (results.get(x["id"]) or ("",))[0] == "ok"]
+                if head and head[0] == "ok":
+                    winner = sites[0]
+                elif found and (head is not None or (other_since and time.time() - other_since >= self.RACE_WAIT)):
+                    winner = found[0]
+                elif len(results) == len(sites):
+                    break
+                else:
+                    if found and other_since is None:
+                        other_since = time.time()
+                    cond.wait(0.25)
+        if winner is not None:
+            got = results[winner["id"]][1]
+            self._online_linked(item, key, winner)
+            return winner, got
+        errors, choices, page = [], None, ""
+        for site in sites:
+            got = results.get(site["id"])
+            if not got or got[0] != "error":
+                continue
+            e = got[1]
+            errors.append(f"{site['name']}: {e}")
+            page = page or getattr(e, "page", "")
+            if getattr(e, "choices", None) and choices is None:
+                choices = {"site": site["id"], "site_name": site["name"], "choices": e.choices, "question": str(e)}
+        raise OnlineError("; ".join(errors) or "none of your sites had it in time", choices, page)
 
     def _online_linked(self, item, key, site):
         """One link per episode: the site that played it. A link to another site goes."""
@@ -2251,6 +2394,7 @@ class App:
             else:
                 per.pop(k, None)
             patch["online_site_eps"] = per
+            self._online_found.pop((item["id"], k), None)     # (found on the other site: found again)
         if "keep" in body:
             patch["keep_site"] = bool(body["keep"])
         if body.get("forget"):
@@ -2300,7 +2444,8 @@ class App:
             url = scrape.search_url(site, item["title"]) if site.get("kind") not in ("archive", "json_api") else site["url"]
         webtools.ADBLOCK = self.settings.get()["adblock"]
         try:
-            job = picker.start(item["id"], season, episode, site["id"], url)
+            job = picker.start(item["id"], season, episode, site["id"], url,
+                               list_url=f"http://127.0.0.1:{self.torrents.port}/")
         except RuntimeError as e:
             raise ApiError(str(e)) from e
         job.track = track
@@ -2329,6 +2474,9 @@ class App:
         track = getattr(job, "track", "") or ""
         series = item["format"] == "series"
         key = f"{job.season}:{job.episode}" if series else "movie"
+        # Every version of it the page loaded: the one that really plays is used (the one listing
+        # every quality first, so the player can choose), else the one you picked.
+        entry = next((v for v in picker.versions(job, entry) if picker.plays(v)), entry)
         headers = entry["headers"]
         page = entry["page"] or job.page
         found = {"url": entry["url"], "referer": headers.get("Referer") or page,
@@ -2366,7 +2514,9 @@ class App:
         if series:
             # The other episodes, connected the same way (in the background).
             threading.Thread(target=self._link_around_first, args=(item, site, key), daemon=True).start()
-        return {"ok": True, "picked": picked, "site": site["name"]}
+        job.close()                       # (found: the browser and its list close)
+        return {"ok": True, "picked": picked, "site": site["name"], "used": entry["n"],
+                "quality": entry.get("quality") or ""}
 
     def pick_close(self, job_id):
         job = picker.get(job_id)
@@ -2462,7 +2612,7 @@ class App:
         if track:
             self._online_track[item["id"]] = track
         report("preparing", 0.9, None, label)
-        entry = dict(self._web_entry(item, site, key, found), online=True)
+        entry = dict(self._web_entry(item, site, key, found), online=True, site=site["id"])
         entry["item_id"] = item["id"]
         if series:
             # The next episode found now (ready when the host moves on), the others linked.
@@ -2648,6 +2798,9 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/library/undo", "library_undo"),
         ("POST", r"/api/library/sort", "library_sort"),
         ("POST", r"/api/library/route", "library_route"),
+        ("GET", r"/api/library/extra", "library_extra"),
+        ("POST", r"/api/library/extra/ai", "library_extra_ai"),
+        ("POST", r"/api/open-place", "open_place"),
         ("GET", r"/api/items/(\w+)/connected", "connected"),
         ("GET", r"/api/items/(\w+)/similar", "similar"),
         ("POST", r"/api/items/(\w+)/connected", "find_connected"),
@@ -2967,6 +3120,36 @@ class Handler(BaseHTTPRequestHandler):
             self.app.sorter.now = {"running": True, "last": self.app.sorter.now.get("last")}
             threading.Thread(target=self.app.sorter.run_now, args=(bool(body.get("ai")),), daemon=True).start()
         return self.app.library.state()
+
+    def api_library_extra(self, body):
+        return {"files": self.app.library.extra_files(), "ai": bool(ai.available(self.app.settings.get()))
+                if hasattr(ai, "available") else True}
+
+    def api_library_extra_ai(self, body):
+        """Extra files matched again by the app (with your AI helper): each back in Sort your
+        downloads, then sorted now."""
+        rels = [str(r) for r in body.get("rels") or []]
+        if not rels:
+            raise ApiError("choose the files first")
+        for rel in rels:
+            try:
+                self.app.library.route(rel, "unsorted")
+            except ValueError:
+                pass
+        return self.api_library_sort({"ai": True})
+
+    def api_open_place(self, body):
+        """Open one of the app's folders: your downloads, its own data (keys, settings), the sync folder."""
+        s = self.app.settings.get()
+        place = {"downloads": s.get("downloads_folder") or "", "data": str(self.app.data_dir),
+                 "sync": s.get("sync_folder") or ""}.get(str(body.get("which") or ""), "")
+        if not place:
+            raise ApiError("that folder isn't set")
+        try:
+            launcher.reveal(place)
+        except launcher.LaunchError as e:
+            raise ApiError(str(e)) from e
+        return {"ok": True, "path": place}
 
     def api_library_route(self, body):
         """Move one file: to a title and episode, out of its title, or ignore it."""

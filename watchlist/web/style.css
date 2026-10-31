@@ -1654,3 +1654,19 @@ body.dragging .card:hover, body.dragging .card:focus-visible { transform: none; 
   border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); }
 .picker-video .tag { margin-left: 6px; }
 .picker-status { padding: 2px 2px 6px; }
+
+/* Finding a video yourself: the list's own window beside the browser */
+body.pick-window { background: var(--bg); }
+body.pick-window #nav, body.pick-window #view, body.pick-window #party-dock { display: none !important; }
+.pick-window-box { padding: 18px 16px; }
+.pick-window-box h2 { margin: 0 0 6px; font-size: 20px; }
+.pick-window-box .picker-list { max-height: none; }
+.pick-window-box .picker-video { align-items: flex-start; flex-direction: column; }
+
+/* Settings → Downloads: its folders; the Extra files window */
+.folder-btns { margin-top: 6px; flex-wrap: wrap; }
+.xf-list { display: grid; gap: 8px; margin-top: 14px; max-height: 60vh; overflow: auto; }
+.xf-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px;
+  border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); }
+.xf-name { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .xf-row { flex-direction: column; align-items: stretch; } }

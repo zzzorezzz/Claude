@@ -441,6 +441,10 @@ class Session:
         return self.send(["loadfile", entry["path"], "insert-next-play", -1, f"start={max(0, int(at))}"],
                          ["playlist-remove", i])
 
+    def jump(self, index):
+        """Play another entry of the playlist (a watch party's host moved to it)."""
+        self.send(["playlist-play-index", int(index)])
+
     def replace(self, entry):
         """Play a different file in the same window (a watch party moving on)."""
         self._wrap_up_current()

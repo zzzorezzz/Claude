@@ -836,9 +836,9 @@ class Torrents:
                 self._save_soon()
 
     def _prefetch_next(self):
-        """While an episode streams, the two before and the two after it download too:
+        """While an episode streams, the three before and the three after it download too:
         quietly while it's still coming, then faster once it's all here (the next one
-        first of all)."""
+        first of all). Moving to another episode moves the window with it."""
         now = time.time()
         for (h, index), at in list(self.reading.items()):
             if now - at > 30:
@@ -859,7 +859,9 @@ class Torrents:
             done = eps[here]["complete"]
             s, e = (int(x) for x in here.split(":"))
             nxt = eps.get(f"{s}:{e + 1}") or eps.get(f"{s + 1}:1")
-            around = [nxt, eps.get(f"{s}:{e + 2}"), eps.get(f"{s}:{e - 1}"), eps.get(f"{s}:{e - 2}")]
+            # The three after it and the three before it (the next one first).
+            around = [nxt, eps.get(f"{s}:{e + 2}"), eps.get(f"{s}:{e + 3}"),
+                      eps.get(f"{s}:{e - 1}"), eps.get(f"{s}:{e - 2}"), eps.get(f"{s}:{e - 3}")]
             for n, ep in enumerate(around):
                 if not ep or ep["complete"]:
                     continue
@@ -870,6 +872,7 @@ class Torrents:
                 if other is not None and handle is not None and int(other["priorities"].get(str(ep["index"]), 0)) < want:
                     other["priorities"][str(ep["index"])] = want
                     handle.file_priority(ep["index"], want)
+                    self._wake(ep["hash"], other)          # (a torrent stopped as done: going again)
                     self._save_soon()
 
     def _stop_when_done(self):

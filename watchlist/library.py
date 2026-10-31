@@ -661,6 +661,31 @@ class Library:
                     "sort_now": dict(getattr(getattr(self.app, "sorter", None), "now", None) or {}),
                     "videos": len(self.videos), "scanned_at": self._walked_at}
 
+    def extra_files(self):
+        """Videos in your downloads that no title uses, and why: you ignored them, took them out
+        of a title, or the app couldn't tell what they are (the "Extra files" window)."""
+        with self._lock:
+            self._match_if_needed()
+            titles = {i["id"]: i["title"] for i in self.app.store.list()}
+            out = []
+            for v in self.videos:
+                if (v.get("item") and v.get("how") != "ignored") or v.get("how") == "waiting":
+                    continue                 # (used, or waiting in Sort your downloads already)
+                answer = self.answers["files"].get(v["rel"]) or {}
+                if answer.get("item") == "ignore":
+                    why = "you told the app to ignore it" if answer.get("by") == "you" else "ignored"
+                elif answer.get("item") == "unsorted":
+                    was = titles.get(answer.get("was") or "")
+                    why = f"you took it out of {was}" if was else "you took it out of its title"
+                elif v.get("how") == "ignored":
+                    why = "ignored"
+                else:
+                    why = "not matched to any title"
+                out.append({"rel": v["rel"], "name": Path(v["rel"]).name, "path": v.get("path") or "",
+                            "size": v.get("size") or 0, "why": why, "kind": v.get("kind") or "",
+                            "episodes": v.get("episodes") or []})
+            return sorted(out, key=lambda x: x["rel"].lower())
+
     def videos_for(self, item_id):
         with self._lock:
             return [dict(v) for v in self.by_item.get(item_id, [])]

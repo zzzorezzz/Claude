@@ -2949,6 +2949,10 @@ function drawTitle(wrap) {
   drawOnlineLinks(wrap).then(() => { if (series && wrap.isConnected) drawEpisodes(wrap); });
   drawSubsBar(wrap);
   if (series) drawEpisodes(wrap);
+  // Drawn again (connections deleted, a folder chosen...): its downloads and torrent too
+  // (Get magnet stays there).
+  if (wrap.st.titleDrawn) loadLocal(wrap);
+  wrap.st.titleDrawn = true;
   modal.onclick = (e) => titleClick(wrap, e);
   modal.onchange = (e) => {
     if (e.target.matches('[data-play-with]')) setPlayWith(findItem(item.id), e.target.value);
@@ -3022,7 +3026,7 @@ async function setPlayWith(item, value) {
    works the whole title out from scratch. */
 const SOURCE_NAME = { download: 'Downloads', torrent: 'Torrent', folder: 'Own folder' };
 
-async function openConnections(item, titleWrap) {
+async function openConnections(item, titleWrap, opts = {}) {
   const series = isSeries(item);
   const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>${series ? 'How the episodes are connected' : 'Which file plays'}</h2>
@@ -3031,7 +3035,12 @@ async function openConnections(item, titleWrap) {
       <label class="check-row small"><input type="checkbox" class="cx-missing"> Only episodes without a file</label>
       <span class="spacer"></span><button class="btn btn-ghost btn-sm" data-cx="redo" title="Forget how this title's files were matched and work them out again${(S.status.ai || []).length ? ', with your AI helper' : ''}">↻ Sort again</button></div>
     <div id="cx-body"><div class="spinner"></div></div></div>`, 'cx-modal');
-  m.st = { data: null, open: '' };
+  m.st = { data: null, open: '', pick: opts.key || '' };
+  if (opts.key && series) {
+    // Opened for one episode (right-click → Reconnect): only that one shown, its file to choose.
+    const [s, e] = opts.key.split(':').map(Number);
+    $('.cx-filter', m).value = epLabel({ season: s, episode: e });
+  }
   const draw = () => {
     const d = m.st.data;
     const body = $('#cx-body', m);
@@ -4201,6 +4210,42 @@ function openTitleFiles(item, local) {
 }
 
 // Move one file: to another title or episode, out of its title, or ignore it.
+// Downloads no title uses (you took them out of a title, told the app to ignore them, or it
+// couldn't tell what they are): linked again by the app with your AI helper, or by you.
+async function openExtraFiles() {
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Extra files</h2>
+    <p class="sub">Videos in your downloads folder that no title uses right now. Link them again: let the app${(S.status.ai || []).length ? ' and your AI helper' : ''} work out what they are, or choose yourself.</p>
+    <div class="btns"><button class="btn btn-white btn-sm" data-xf="ai-all">✨ Link all with ${(S.status.ai || []).length ? 'AI' : 'the app'}</button></div>
+    <div class="xf-list"><div class="spinner"></div></div></div>`, 'xf-modal');
+  const list = $('.xf-list', wrap);
+  let files = [];
+  const draw = async () => {
+    try { files = (await api('GET', '/api/library/extra')).files; } catch (e) { fail(e); return; }
+    if (!wrap.isConnected) return;
+    list.innerHTML = files.length ? files.map((f, i) => `<div class="xf-row">
+        <div class="xf-name"><b title="${esc(f.rel)}">${esc(f.name)}</b>
+          <div class="muted small">${esc(f.why)}${f.size ? ` · ${fmtBytes(f.size)}` : ''} · ${esc(f.rel)}</div></div>
+        <div class="btns"><button class="btn btn-ghost btn-sm" data-xf="ai" data-i="${i}">✨ Link with ${(S.status.ai || []).length ? 'AI' : 'the app'}</button>
+          <button class="btn btn-ghost btn-sm" data-xf="choose" data-i="${i}">Choose…</button></div></div>`).join('')
+      : '<p class="muted">Every video in your downloads is used by a title.</p>';
+  };
+  wrap.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-xf]');
+    if (!b) return;
+    const f = files[Number(b.dataset.i)];
+    try {
+      if (b.dataset.xf === 'choose') { openMoveFile(null, f, draw); return; }
+      const rels = b.dataset.xf === 'ai-all' ? files.map((x) => x.rel) : [f.rel];
+      if (!rels.length) return;
+      S.library = await api('POST', '/api/library/extra/ai', { rels });
+      toast(`Linking ${rels.length} file${rels.length === 1 ? '' : 's'} - what's still unclear waits in Sort your downloads`);
+      setTimeout(draw, 2500);
+    } catch (err) { fail(err); }
+  });
+  draw();
+}
+
 function openMoveFile(item, file, done) {
   const titles = [...S.items].sort((a, b) => a.title.localeCompare(b.title));
   const ep = file.episodes?.[0] || '';
@@ -4868,6 +4913,7 @@ function openPicker(item, opts = {}) {
     const it = findItem(item.id);
     if (it) it.picked = d.picked;
     item.picked = d.picked;
+    drawTracks();
     const used = new Set(list._used || []);
     const videos = d.videos.slice().reverse();
     list.innerHTML = `<div class="picker-status muted small">${d.open ? '<span class="spin-dot"></span> Watching the browser window' : 'The browser window was closed'}
@@ -4910,7 +4956,7 @@ function openPicker(item, opts = {}) {
         const it = findItem(item.id);
         if (it) it.picked = r.picked;
         item.picked = r.picked;
-        list._used = [...(list._used || []), Number(el.dataset.n)];
+        list._used = [...(list._used || []), Number(r.used || el.dataset.n)];
         drawTracks();
         el.textContent = '✓ Connected';
         toast(`${anime ? (st.track === 'dub' ? 'Dub' : 'Sub') : series ? 'Episode' : 'Film'} connected on ${r.site}${series ? ' - the other episodes are connecting the same way' : ''}`);
@@ -5171,6 +5217,10 @@ function openEpisodeMenu(wrap, key, anchor) {
     ${full ? '<button data-e="with-file"><span class="check"></span>Downloaded file</button><button data-e="with-torrent"><span class="check"></span>Torrent (magnet)</button>' : ''}
     ${sites.length ? '<button data-e="with-site"><span class="check"></span>My sites - in the player</button><button data-e="with-site-browser"><span class="check"></span>My sites - in the browser</button>' : ''}
     <button data-e="with-service"><span class="check"></span>Streaming service</button>
+    ${full ? `<hr><div class="menu-label">Its file</div>
+      <button data-e="file-one"><span class="check">🔗</span>Reconnect this episode's file…</button>
+      <button data-e="file-folder"><span class="check">📂</span>Reconnect all from a folder…</button>
+      ${(wrap.st.torrents?.torrents || []).length ? '<button data-e="file-torrent"><span class="check">🧲</span>Reconnect the torrent\'s files…</button>' : ''}` : ''}
     ${sites.length ? `<hr><div class="menu-label">My sites</div>
       ${link ? `<button data-e="open-link" title="${esc(link.page)}"><span class="check">🔗</span>${esc(link.site_name)}: open its page</button>` : '<div class="menu-label muted">Not linked yet</div>'}
       <button data-e="relink"><span class="check">↻</span>Relink…</button>
@@ -5197,6 +5247,9 @@ function openEpisodeMenu(wrap, key, anchor) {
       else if (a === 'with-site') openWatch(item, ep, { how: 'scraped' });
       else if (a === 'with-site-browser') openWatch(item, ep, { how: 'scraped-browser' });
       else if (a === 'with-service') openWatch(item, ep, { how: 'online' });
+      else if (a === 'file-one') openConnections(item, wrap, { key });
+      else if (a === 'file-folder') { if (await chooseFolder(item)) loadLocal(wrap); }
+      else if (a === 'file-torrent') openPlan(wrap.st.torrents.torrents[0].hash, () => loadLocal(wrap));
       else if (a === 'open-link') api('POST', '/api/open', { url: link.page }).catch(fail);
       else if (a === 'relink') openRelink(wrap, item, key);
       else if (a === 'trouble') openTroubleshoot(wrap, item, ep);
@@ -5848,7 +5901,12 @@ async function openSettings(focus = '') {
       <div class="input-row"><input class="input" name="downloads_folder" value="${esc(s.downloads_folder)}" placeholder="The one folder all your downloads go into">
       <button class="btn btn-ghost btn-sm" type="button" data-s="dl-browse">Choose…</button></div>
       <small>${S.library.error ? `<span class="bad">${esc(S.library.error)}</span>`
-        : s.downloads_folder ? `<span class="ok">✓</span> ${S.library.videos || 0} videos found, ${Object.keys(S.library.items || {}).length} titles matched${(S.library.questions || []).length ? `, ${S.library.questions.length} to sort` : ''}.` : ''}</small></label>`)}
+        : s.downloads_folder ? `<span class="ok">✓</span> ${S.library.videos || 0} videos found, ${Object.keys(S.library.items || {}).length} titles matched${(S.library.questions || []).length ? `, ${S.library.questions.length} to sort` : ''}.` : ''}</small></label>
+    <div class="btns folder-btns">
+      ${s.downloads_folder ? '<button class="btn btn-ghost btn-sm" type="button" data-s="dl-extra" title="Downloads no title uses: ones you took out of a title or told it to ignore - link them again">Extra files…</button>' : ''}
+      ${onPhone() ? '' : `${s.downloads_folder ? '<button class="btn btn-ghost btn-sm" type="button" data-s="open-downloads">📂 Open downloads folder</button>' : ''}
+        <button class="btn btn-ghost btn-sm" type="button" data-s="open-data" title="Where the app keeps its own things: your settings and keys, what it remembers">📂 Open app data folder</button>
+        ${s.sync_folder ? '<button class="btn btn-ghost btn-sm" type="button" data-s="open-sync">📂 Open sync folder</button>' : ''}`}</div>`)}
     ${card('ai', 'AI helpers <span class="tag-optional">optional</span>', `
     <div id="ai-list"></div>
     <div class="svc-add"><select class="select" id="ai-preset"><option value="">+ Add your own AI…</option></select></div>`)}
@@ -6045,6 +6103,10 @@ async function openSettings(focus = '') {
         await siteAction(wrap, a, e.target.closest('[data-i]'));
       } else if (a.startsWith('svc-')) {
         serviceAction(wrap, a, e.target.closest(a === 'svc-pick' ? '[data-p]' : '[data-i]'));
+      } else if (a === 'open-downloads' || a === 'open-data' || a === 'open-sync') {
+        await api('POST', '/api/open-place', { which: a.slice(5) });
+      } else if (a === 'dl-extra') {
+        openExtraFiles();
       } else if (a === 'dl-browse') {
         const { path } = await browse({ kind: 'folder', title: 'Choose your downloads folder', initial: form.downloads_folder.value });
         if (path) form.downloads_folder.value = path;
@@ -6317,8 +6379,53 @@ function guideClick(e) {
 
 /* ================================================================ go */
 
+// Finding a video yourself: the list of what the page beside it loads, in a small window
+// of its own fixed next to the browser (newest first). Using one closes both.
+async function pickWindow(job) {
+  document.body.classList.add('pick-window');
+  document.title = 'Videos found - Watch Anything';
+  const box = document.createElement('div');
+  box.className = 'pick-window-box';
+  document.body.append(box);
+  const fmtLen = (sec) => (sec ? `${Math.floor(sec / 3600) ? `${Math.floor(sec / 3600)}:` : ''}${String(Math.floor(sec / 60) % 60).padStart(Math.floor(sec / 3600) ? 2 : 1, '0')}:${String(sec % 60).padStart(2, '0')}` : '');
+  let busy = false;
+  const draw = async () => {
+    let d;
+    try { d = await api('GET', `/api/pick/${job}`); } catch { box.innerHTML = '<p class="muted">This window has finished.</p>'; return; }
+    if (!d.open) { box.innerHTML = '<p class="muted">The browser was closed.</p>'; return; }
+    const what = d.track === 'dub' ? 'the dub' : d.track === 'sub' ? 'the sub' : 'it';
+    const videos = d.videos.slice().reverse();
+    if (!busy) {
+      box.innerHTML = `<h2>Videos found</h2>
+        <p class="muted small">Play ${what} in the browser on the left - every video it loads appears here, newest at the top.
+          Pick the right one: it's connected, and the browser closes.</p>
+        <div class="picker-status muted small"><span class="spin-dot"></span> ${videos.length ? `${videos.length} so far` : 'Nothing yet - press play there'}</div>
+        <div class="picker-list">${videos.map((v) => `<div class="picker-video">
+          <div><b>Video ${v.n}</b>${v.length ? `<span class="tag">${fmtLen(v.length)}</span>` : ''}${v.quality ? `<span class="tag">${esc(v.quality)}</span>` : ''}<span class="tag">${v.kind === 'playlist' ? 'stream' : 'file'}</span>
+            <div class="muted small">from ${esc(v.frame || v.host)}${v.after ? ` · after “${esc(v.after)}”` : ''}</div></div>
+          <button class="btn btn-white btn-sm" data-n="${v.n}">Use this one</button></div>`).join('')}</div>`;
+    }
+    setTimeout(draw, 1200);
+  };
+  box.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-n]');
+    if (!b || busy) return;
+    busy = true;
+    b.disabled = true;
+    b.textContent = 'Checking it plays…';
+    try {
+      const r = await api('POST', `/api/pick/${job}/use`, { n: Number(b.dataset.n) });
+      box.innerHTML = `<h2>Connected ✓</h2><p class="muted">On ${esc(r.site)}${r.quality ? ` (${esc(r.quality)})` : ''}. You can close this window.</p>`;
+    } catch (err) { busy = false; fail(err); }
+  });
+  draw();
+}
+
 // The watch party in a window of its own: only its dock, full size.
-if (location.hash === '#/party-window') {
+const pickJob = (location.hash.match(/^#pick=(\w+)/) || [])[1];
+if (pickJob) {
+  pickWindow(pickJob);
+} else if (location.hash === '#/party-window') {
   document.body.classList.add('party-window');
   document.title = 'Watch party - Watch Anything';
   party.open = true;

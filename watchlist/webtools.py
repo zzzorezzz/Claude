@@ -187,7 +187,7 @@ ADBLOCK = True                 # Settings → Browser → Block ads and pop-ups 
 _pending = {}                  # address -> options, for a window about to open (see _options)
 _by_window = {}                # window uid -> options
 _patched = False
-_lock = threading.Lock()       # one hidden window at a time
+_lock = threading.BoundedSemaphore(3)       # up to three hidden windows at once (several sites searched together)
 
 
 def blocked(url):
@@ -430,7 +430,7 @@ def learned_click(page_url, click):
     return {"label": got["label"], "kind": "", "exact": False} if got and got.get("label") else None
 
 
-def watch_window(url, job):
+def watch_window(url, job, at=None):
     """Windows: `url` in a window of the app's own whose every video goes to `job` (picker.py).
     Returns what closes it."""
     from . import launcher
@@ -439,7 +439,8 @@ def watch_window(url, job):
     opts = {"adblock": ADBLOCK, "watch": job, "subs": job.subs,
             "catch": lambda video, headers: job.video(video, headers)}
     _pending[url] = opts
-    win = wv.create_window("Find the video - Watch Anything", url, width=1200, height=820, background_color="#0d0f1a")
+    x, y, w, h = at or (None, None, 1200, 820)
+    win = wv.create_window("Find the video - Watch Anything", url, width=w, height=h, x=x, y=y, background_color="#0d0f1a")
     try:
         win.events.closed += job.closed
         win.events.loaded += lambda: setattr(job, "page", win.get_current_url() or job.page)

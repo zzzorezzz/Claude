@@ -29,7 +29,8 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML
       "Chrome/130.0.0.0 Safari/537.36")
 CFT = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
 
-_lock = threading.Lock()           # one page at a time (as on Windows)
+_lock = threading.BoundedSemaphore(3)    # up to three pages at once (as on Windows)
+_starting = threading.Lock()      # (one browser, however many ask for it at once)
 _browser = None
 _download = threading.Lock()
 
@@ -125,7 +126,7 @@ def download_full():
         return _downloaded_full()
 
 
-def watch(url, job):
+def watch(url, job, at=None):
     """An ordinary browser window at `url` whose every video goes to `job` (picker.py).
     Returns what closes it."""
     from . import picker, webtools
@@ -157,6 +158,13 @@ def watch(url, job):
             job.subtitle(u)
     scripts = [picker.TRACK_JS] + ([webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
     page = _Page(browser, scripts, on_request, on_response, target=target)
+    if at:
+        try:
+            win = browser.call("Browser.getWindowForTarget", {"targetId": target})["windowId"]
+            browser.call("Browser.setWindowBounds", {"windowId": win, "bounds": {
+                "left": at[0], "top": at[1], "width": at[2], "height": at[3], "windowState": "normal"}})
+        except (CDPError, KeyError):
+            pass
 
     def follow():
         # The page you're on (for linking the episode to it), until the window is closed.
@@ -410,6 +418,11 @@ def _stop_others(profile):
 
 
 def _get_browser():
+    with _starting:
+        return _get_browser_now()
+
+
+def _get_browser_now():
     global _browser
     if _browser and _browser.alive():
         return _browser

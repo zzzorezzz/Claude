@@ -1377,7 +1377,19 @@ class Scraper:
         self.can_render = lambda: True
         self.can_catch = lambda: True
         self.ytdlp = ytdlp_video       # (a stand-in in tests)
+        self._here = threading.local()
         self.log = []                  # what the last search did, step by step (the site's Test)
+
+    # Each search's own steps (several sites are searched at once).
+    @property
+    def log(self):
+        if not hasattr(self._here, "log"):
+            self._here.log = []
+        return self._here.log
+
+    @log.setter
+    def log(self, value):
+        self._here.log = value
 
     def _renderer(self):
         return self.render if self.render and self.can_render() else None
@@ -1408,6 +1420,12 @@ class Scraper:
             return got[0], got[1]
         self._note("The page couldn't be opened in the hidden browser")
         return text, final
+
+    def prefer_stream(self, site, label, kind):
+        """The server that plays on a site (after another didn't): tried first from now on."""
+        prefs = self.memory.setdefault("_sites", {}).setdefault(site["url"], {})
+        prefs["label"], prefs["kind"] = label, kind or prefs.get("kind") or "sub"
+        self._save()
 
     def _save(self):
         with self.lock:
@@ -1770,7 +1788,7 @@ class Scraper:
         # ...but a page that names its sub and dub servers gets the one asked for clicked: what
         # its player starts with is whatever was chosen there last (Dub, after a dub was played).
         labelled = auto_url == page_url and self._labelled_streams(page_url)
-        if self._catcher() and (want == "sub" or auto_url != page_url) and not labelled:
+        if self._catcher() and (want == "sub" or auto_url != page_url) and not labelled and "auto" not in skip:
             # Sub: chosen on the page too when it has a switch for it (a player that remembers
             # the last choice made there would start with the dub after one was played).
             switch = None if auto_url != page_url else {"id": "switch:sub", "label": "Sub", "kind": "sub", "url": "",
@@ -1805,6 +1823,8 @@ class Scraper:
         for x in tries:
             try:
                 got = self._stream_video(site, page_url, entry, prefs, x, text, final)
+                if f"url:{got['url']}" in skip:
+                    raise ScrapeError("the same video as the one that didn't play")
             except ScrapeError as e:
                 errors.append(f"{x['label'] if x else 'the page'}: {e}")
                 self._note(f"  {errors[-1]}")

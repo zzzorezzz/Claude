@@ -30,7 +30,8 @@ def start(bridge, files_dir):
     launcher.ANDROID = True
     launcher.android_bridge = bridge
     phone_player.set_bridge(bridge)
-    app = App(Path(files_dir) / "data")
+    global _app
+    app = _app = App(Path(files_dir) / "data")
     try:
         server = make_server(app, PORT)          # the same port each time: the page's saved choices stay
     except OSError:
@@ -38,6 +39,16 @@ def start(bridge, files_dir):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     start_background_refresh(app)
     return server.server_address[1]
+
+
+_app = None
+
+
+def other_source(session_id):
+    """The phone player: this video won't load - another source for it (as on a computer)."""
+    session = phone_player._sessions.get(session_id)
+    if session and _app is not None:
+        threading.Thread(target=_app._other_source, args=(session,), daemon=True).start()
 
 
 def player_event(session_id, data):

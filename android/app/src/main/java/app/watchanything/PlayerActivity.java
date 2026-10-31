@@ -64,6 +64,10 @@ public class PlayerActivity extends Activity {
     private DefaultHttpDataSource.Factory http;
     private PlayerView view;
     private TextView message;
+    private TextView otherSource;
+    private final Runnable offerOtherSource = () -> {
+        if (otherSource != null && !session.isEmpty()) otherSource.setVisibility(View.VISIBLE);
+    };
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     private final ExecutorService events = Executors.newSingleThreadExecutor();
@@ -127,6 +131,29 @@ public class PlayerActivity extends Activity {
                 Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         at.topMargin = pad * 3;
         root.addView(message, at);
+        // Loading for 5 seconds: a small offer at the side to try the episode's next source.
+        otherSource = new TextView(this);
+        otherSource.setText("Not working?\nTry another source");
+        otherSource.setTextColor(Color.WHITE);
+        otherSource.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        otherSource.setBackgroundColor(0xD9221B3A);
+        otherSource.setPadding(pad * 2, pad, pad * 2, pad);
+        otherSource.setVisibility(View.GONE);
+        otherSource.setOnClickListener(v -> {
+            otherSource.setVisibility(View.GONE);
+            show("Trying another source…", 4000);
+            final String sid = session;
+            new Thread(() -> {
+                try {
+                    Python.getInstance().getModule("watchlist.android").callAttr("other_source", sid);
+                } catch (Throwable ignored) {
+                }
+            }).start();
+        });
+        FrameLayout.LayoutParams side = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.END | Gravity.CENTER_VERTICAL);
+        side.rightMargin = pad * 2;
+        root.addView(otherSource, side);
         setContentView(root);
         hideBars(view);
 
@@ -159,6 +186,9 @@ public class PlayerActivity extends Activity {
 
             @Override
             public void onPlaybackStateChanged(int st) {
+                handler.removeCallbacks(offerOtherSource);
+                if (st == Player.STATE_BUFFERING) handler.postDelayed(offerOtherSource, 5000);
+                else otherSource.setVisibility(View.GONE);
                 if (st == Player.STATE_ENDED) {
                     reportNow(true);
                     if (!keepOpen) finish();
@@ -288,6 +318,9 @@ public class PlayerActivity extends Activity {
                         break;
                     case "replace":
                         load(c.getJSONObject("launch"));
+                        break;
+                    case "index":
+                        if (c.optInt("to", 0) < player.getMediaItemCount()) player.seekTo(c.optInt("to", 0), 0);
                         break;
                     case "close":
                         session = "";            // the app knows already
