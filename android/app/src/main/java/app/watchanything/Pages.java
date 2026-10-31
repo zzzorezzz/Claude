@@ -107,8 +107,14 @@ final class Pages {
 
     String userAgent() {
         if (ua.isEmpty()) {
-            // The phone's own Chrome, as the site sees a browser (not "an app's WebView").
-            ua = WebSettings.getDefaultUserAgent(activity).replace("; wv)", ")").replaceAll("Version/[\\d.]+ ", "");
+            // A computer's Chrome (the same version as the phone's): sites then give the same
+            // player as on a computer, whose video requests the app sees. (A phone's player hands
+            // its video to Android's own playback, which the app isn't told about.)
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("Chrome/([\\d.]+)")
+                    .matcher(WebSettings.getDefaultUserAgent(activity));
+            String version = m.find() ? m.group(1) : "124.0.0.0";
+            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"
+                    + version + " Safari/537.36";
         }
         return ua;
     }
