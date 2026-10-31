@@ -81,9 +81,10 @@ end
 mp.register_script_message("ask-sync", function(text)
     stop_asking()
     asking = mp.create_osd_overlay("ass-events")
-    asking.data = "{\an8\fs30\bord2\1c&HFFFFFF&}Are the subtitles in sync?\N{\fs22}" .. (text or "")
-        .. "\N{\fs24\1c&HFFE07C&}Y{\1c&HFFFFFF&} = yes, use them for every episode     "
-        .. "{\1c&HFFE07C&}N{\1c&HFFFFFF&} = no, try others     {\1c&HFFE07C&}Esc{\1c&HFFFFFF&} = stop"
+    -- (long strings: the ASS tags' backslashes stay as they are)
+    asking.data = [[{\an8\fs30\bord2\1c&HFFFFFF&}Are the subtitles in sync?\N{\fs22}]] .. (text or "")
+        .. [[\N{\fs24\1c&HFFE07C&}Y{\1c&HFFFFFF&} = yes, use them for every episode     ]]
+        .. [[{\1c&HFFE07C&}N{\1c&HFFFFFF&} = no, try others     {\1c&HFFE07C&}Esc{\1c&HFFFFFF&} = stop]]
     asking:update()
     local function answer(a)
         return function()
