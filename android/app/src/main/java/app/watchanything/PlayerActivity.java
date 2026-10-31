@@ -88,7 +88,7 @@ public class PlayerActivity extends Activity {
                 .show();
     }
     private final Runnable offerOtherSource = () -> {
-        if (otherSource != null && !session.isEmpty()) otherSource.setVisibility(View.VISIBLE);
+        if (otherSource != null && !this.session.isEmpty()) otherSource.setVisibility(View.VISIBLE);
     };
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService net = Executors.newSingleThreadExecutor();
