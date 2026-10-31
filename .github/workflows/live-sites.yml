@@ -37,7 +37,12 @@ jobs:
         run: |
           python -c "from pathlib import Path; from watchlist import cdp; cdp.HOME = Path('chromium-home'); print(cdp.download())"
 
+      - name: Diagnosis of a site's chunks ([diag] in the commit message)
+        if: contains(github.event.head_commit.message, '[diag]')
+        run: python -c "from pathlib import Path; from watchlist import cdp; cdp.HOME = Path('chromium-home'); from tests import diag_hls; diag_hls.main()"
+
       - name: Every recommended site, three titles each, played for 5 seconds
+        if: "!contains(github.event.head_commit.message, '[diag]')"
         env:
           WATCHLIST_CHROMIUM_HOME: chromium-home
           SITES: ${{ github.event.inputs.sites }}
