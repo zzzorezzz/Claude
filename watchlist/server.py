@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, cdp, dialogs, discover, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
+from . import ai, cdp, dialogs, discover, hlsfix, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -2018,6 +2018,14 @@ class App:
         self._online_found[(item_id, key)] = (site, found, time.time())
         playing = phone_player.current() if launcher.ANDROID else self.player.session
         threading.Thread(target=self._link_around, args=(item_id, site, key, playing), daemon=True).start()
+        return self._playable(found)
+
+    def _playable(self, found):
+        """The address the player gets for a video found on a site: its own, or this app's
+        when its pieces are dressed up as pictures (hlsfix.py)."""
+        if hlsfix.needs_fix(found["url"], found.get("headers"), found.get("referer")):
+            return hlsfix.local_url(f"http://127.0.0.1:{self.torrents.port}/hls/{self.torrents.token}",
+                                    found["url"], found.get("headers"), found.get("referer"))
         return found["url"]
 
     def _online_event(self, session, item_id, msg):
@@ -2252,7 +2260,7 @@ class App:
     def _web_entry(self, item, site, key, found):
         """A player entry for a video found on a site: its subtitles, and what a watch party needs."""
         track = (found.get("stream") or {}).get("kind") or "sub"
-        entry = {"path": found["url"], "sub": self._web_sub(found), "key": key, "web": True, "referer": found["referer"],
+        entry = {"path": self._playable(found), "sub": self._web_sub(found), "key": key, "web": True, "referer": found["referer"],
                  "headers": found.get("headers") or {}, "track": track,
                  "label": self._label(item, key), "name": f"{item['title']} ({site['name']})"}
         if found.get("subtitle") and not entry["sub"]:
@@ -2580,6 +2588,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._stream(url.path)
         if url.path.startswith("/online/") and method in ("GET", "HEAD"):
             return self._online(url)
+        if url.path.startswith("/hls/") and method in ("GET", "HEAD"):
+            return self._hls(url)
         if not url.path.startswith("/api/"):
             if method in ("GET", "HEAD"):
                 return self._static(url.path)
@@ -2617,6 +2627,21 @@ class Handler(BaseHTTPRequestHandler):
         except (OnlineError, KeyError) as e:
             return self._send(HTTPStatus.NOT_FOUND, str(e).encode("utf-8", "replace"), "text/plain")
         return self._send(HTTPStatus.FOUND, b"", "text/plain", {"Location": video})
+
+    def _hls(self, url):
+        """A video's playlist or piece through the app (hlsfix.py)."""
+        m = re.fullmatch(r"/hls/([\w-]+)/(\w+)/v\.(?:m3u8|ts)", url.path)
+        target = urllib.parse.parse_qs(url.query).get("u", [""])[-1]
+        if not m or m.group(1) != self.app.torrents.token or not target.startswith(("http://", "https://")):
+            return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+        base = f"http://127.0.0.1:{self.server.server_address[1]}/hls/{m.group(1)}"
+        try:
+            got = hlsfix.serve(m.group(2), target, base)
+        except Exception as e:  # noqa: BLE001 - the site's answer, passed on
+            return self._send(HTTPStatus.BAD_GATEWAY, str(e).encode("utf-8", "replace"), "text/plain")
+        if not got:
+            return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+        return self._send(HTTPStatus.OK, got[1], got[0])
 
     STREAM_TYPES = {".mkv": "video/x-matroska", ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
                     ".avi": "video/x-msvideo", ".mov": "video/quicktime", ".ts": "video/mp2t"}

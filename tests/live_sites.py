@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 
-from watchlist import player, scrape, webtools
+from watchlist import hlsfix, player, scrape, webtools
 from watchlist.livecheck import ANIME, SHOWS, SITES, cases
 
 POS_LUA = """local best = 0
@@ -29,7 +29,7 @@ def play5(mpv, found, script):
     ua = (found.get("headers") or {}).get("User-Agent")
     if ua:
         cmd.append(f"--user-agent={ua}")
-    cmd.append(found["url"])
+    cmd.append(hlsfix.playable(found, BASE))      # (as the app gives it to the player)
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     except subprocess.TimeoutExpired:
@@ -39,7 +39,12 @@ def play5(mpv, found, script):
     return (max(pos) if pos else 0.0), ("" if pos and max(pos) >= 4.5 else [x for x in out.strip().splitlines() if "POS" not in x][-12:])
 
 
+BASE = ""
+
+
 def main(argv):
+    global BASE
+    BASE = hlsfix.test_server()
     report = argv[0] if argv and argv[0].endswith(".json") else ""
     only = [a for a in argv if not a.endswith(".json")]
     mpv = os.environ.get("WATCHLIST_MPV") or player.find_mpv() or shutil.which("mpv")

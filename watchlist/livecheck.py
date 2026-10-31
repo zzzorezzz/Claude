@@ -45,7 +45,8 @@ def run_phone(report, only=()):
 
 def _run_phone(report, only):
     import tempfile
-    from . import phone_player, scrape, webtools
+    from . import hlsfix, phone_player, scrape, webtools
+    base = hlsfix.test_server()
     s = scrape.Scraper(tempfile.mkdtemp())
     s.render = lambda url: webtools.render(url)
     s.catch = lambda url, click=None: webtools.catch_video(url, click=click)
@@ -63,7 +64,7 @@ def _run_phone(report, only):
                    "what": f"S{season}E{episode}" if season else (f"E{episode}" if episode else "film")}
             try:
                 found = s.resolve(site, item, season, episode)
-                entry = {"path": found["url"], "key": "check", "label": item["title"], "referer": found.get("referer"),
+                entry = {"path": hlsfix.playable(found, base), "key": "check", "label": item["title"], "referer": found.get("referer"),
                          "headers": found.get("headers") or {}, "sub": None}
                 session = phone_player.PhoneSession(item["id"], [entry], anime=item.get("type") == "anime").open()
                 deadline, best = time.time() + 75, 0.0
