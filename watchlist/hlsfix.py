@@ -159,11 +159,14 @@ def test_server():
                 self.send_response(404)
                 self.end_headers()
                 return
-            self.send_response(200)
-            self.send_header("Content-Type", got[0])
-            self.send_header("Content-Length", str(len(got[1])))
-            self.end_headers()
-            self.wfile.write(got[1])
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", got[0])
+                self.send_header("Content-Length", str(len(got[1])))
+                self.end_headers()
+                self.wfile.write(got[1])
+            except OSError:
+                pass                     # (the player stopped reading: nothing more to send)
 
         def log_message(self, *a):
             pass
