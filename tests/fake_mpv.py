@@ -16,11 +16,12 @@ if os.environ.get("FAKE_MPV_ARGS"):
     with open(os.environ["FAKE_MPV_ARGS"], "w") as fh:
         json.dump(args, fh)
 address = next(a.split("=", 1)[1] for a in args if a.startswith("--input-ipc-server="))
-start = 0
+start, first = 0, 0
 for a in args:
-    if a.startswith("--start="):
+    if a.startswith("--start=") and not start:
         start = int(a.split("=", 1)[1])
-        break
+    if a.startswith("--playlist-start="):
+        first = int(a.split("=", 1)[1])          # (as mpv: the playlist starts at that entry)
 plan = json.loads(os.environ.get("FAKE_MPV_PLAN", "[]"))
 
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -40,7 +41,7 @@ def send(msg):
 
 
 for i, step in enumerate(plan):
-    send({"event": "property-change", "id": 3, "name": "playlist-pos", "data": i})
+    send({"event": "property-change", "id": 3, "name": "playlist-pos", "data": first + i})
     send({"event": "property-change", "id": 2, "name": "duration", "data": step["dur"]})
     pos = start if i == 0 else 0
     while pos < step["to"]:

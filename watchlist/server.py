@@ -678,7 +678,8 @@ class App:
             session.open()
             return
         session = self.player.play(self._session(self._need_mpv(), item, entries, 0,
-                                                 ["--pause", "--keep-open=yes"], first=first, playlist=len(entries) > 1))
+                                                 ["--pause", "--keep-open=yes"], first=first,
+                                                 playlist=any(e.get("online") for e in entries)))
         party.attach(session)
         if entry.get("web"):
             # From a video site: as for your own (its subtitles, where it's from, Sub / Dub).
@@ -1439,7 +1440,7 @@ class App:
                 hold = bool(hosting and any(p != hosting.me for p in hosting.people))
                 session = self.player.play(self._session(mpv, item, entries, start,
                                                          ["--pause"] if body.get("paused") or hold else (),
-                                                         first=first, playlist=first > 0))
+                                                         first=first))
                 with self._party_lock:
                     party = self.party
                 if party and party.active and party.role == "host":

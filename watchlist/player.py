@@ -234,7 +234,7 @@ class Session:
         self.on_progress = on_progress or (lambda *a: None)
         self.on_finished = on_finished or (lambda *a: None)
         self.on_exit = on_exit or (lambda *a: None)
-        self.index, self.pos, self.dur, self.paused = (first if playlist else 0), None, None, False
+        self.index, self.pos, self.dur, self.paused = first, None, None, False
         self.pos_at = 0.0            # when pos was last reported (time.monotonic())
         self.listeners = []          # called with every message from mpv (watch parties)
         self._pending_sub = None
@@ -266,13 +266,15 @@ class Session:
                 lines += [f"#EXTINF:-1,{(entry.get('label') or '').replace(chr(10), ' ')}", entry["path"]]
             listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return cmd + [f"--playlist={listing}", f"--playlist-start={self.index}"]
+        if self.index:
+            cmd.append(f"--playlist-start={self.index}")   # (the episodes before it are there for Previous)
         for i, entry in enumerate(self.entries):
             cmd.append("--{")
             if entry.get("label"):
                 cmd.append(f"--force-media-title={entry['label']}")
             if entry.get("sub"):
                 cmd.append(f"--sub-file={entry['sub']}")
-            if i == 0 and self.start_at:
+            if i == self.index and self.start_at:
                 cmd.append(f"--start={int(self.start_at)}")
             cmd += [entry["path"], "--}"]
         return cmd

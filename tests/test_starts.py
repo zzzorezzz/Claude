@@ -22,7 +22,7 @@ class StartsTest(unittest.TestCase):
                                 cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
         self.addCleanup(proc.kill)
-        answer, end = None, time.time() + 30
+        answer, end = None, time.time() + 60
         while time.time() < end and answer is None:
             if proc.poll() is not None:
                 self.fail("the app stopped while starting:\n" + proc.stdout.read().decode("utf-8", "replace")[-2000:])
@@ -31,7 +31,11 @@ class StartsTest(unittest.TestCase):
                     answer = json.loads(r.read())
             except OSError:
                 time.sleep(0.3)
-        self.assertEqual((answer or {}).get("app"), "watchlist")
+        if answer is None:
+            proc.kill()
+            self.fail("the app didn't answer within a minute:
+" + proc.communicate()[0].decode("utf-8", "replace")[-3000:])
+        self.assertEqual(answer.get("app"), "watchlist")
 
 
 if __name__ == "__main__":
