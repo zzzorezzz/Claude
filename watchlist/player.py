@@ -82,6 +82,19 @@ def script_args(skip_intro, theme="violet"):
     return args
 
 
+_started = []    # every mpv this app started (so quitting the app closes them all)
+
+
+def kill_children():
+    """End every player window this app started that is still open."""
+    for proc in list(_started):
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except OSError:
+            pass
+
+
 def web_log():
     """Where the player writes what happened, for videos from your own sites (so a
     stream that won't play can say why)."""
@@ -245,6 +258,7 @@ class Session:
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         self.proc = subprocess.Popen(self.command(), **kwargs)
+        _started.append(self.proc)
         threading.Thread(target=self._follow, daemon=True).start()
         return self
 
@@ -292,6 +306,11 @@ class Session:
                         self.paused = bool(data)
                         if self.paused:
                             self._save(force=True)
+                    elif name == "playlist-pos" and getattr(self, "_swapping", None) is not None and isinstance(data, int):
+                        # (a file of the same episode coming in: still that episode)
+                        if data == self._swapping:
+                            self._swapping = None
+                        self.pos, self.dur = None, None
                     elif name == "playlist-pos" and isinstance(data, int) and data >= 0 and data != self.index:
                         self._wrap_up_current()
                         self.index, self.pos, self.dur, self.loaded = data, None, None, False
@@ -386,6 +405,16 @@ class Session:
             self.entries.pop()
             return None
         return entry
+
+    def swap(self, entry, at=0):
+        """The episode playing, swapped for another file of it (its dub, say) from where it is."""
+        i = self.index
+        entry = dict(entry, appended=True)
+        self._swapping = i
+        self.entries[i] = entry
+        self.loaded = False
+        return self.send(["loadfile", entry["path"], "insert-next-play", -1, f"start={max(0, int(at))}"],
+                         ["playlist-remove", i])
 
     def replace(self, entry):
         """Play a different file in the same window (a watch party moving on)."""

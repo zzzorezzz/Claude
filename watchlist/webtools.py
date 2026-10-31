@@ -56,6 +56,9 @@ vidoomy.com vdo.ai primis.tech aniview.com spotxchange.com springserve.com
 AD_PATH = re.compile(r"popunder|popads|/pop(?:up)?\.js|/vast(?:\.xml|/|\?)|vpaid|/ads?\.js\b|adsbygoogle|/prebid", re.I)
 VIDEO = re.compile(r"\.(m3u8|mpd|mp4|webm|mkv)(?:[?#]|$)", re.I)
 SUBTITLE = re.compile(r"\.(vtt|srt|ass)(?:[?#]|$)", re.I)    # (a player's captions; not its preview thumbnails)
+# Captions asked for without a file ending (/subs?tmdbId=..., ...?format=srt): what they are
+# is checked by reading them (scrape.pick_subtitle).
+SUBTITLE_ASK = re.compile(r"(?:[/?&_.-])(?:subs?|subtitles?|captions?)(?:[/?&=_.-]|$)|[?&]format=(?:srt|vtt|ass)\b", re.I)
 
 ADBLOCK_JS = r"""(() => {
   if (window.__waAdblock) return; window.__waAdblock = true;
@@ -265,7 +268,8 @@ def _hook(opts, core):
             h = args.Request.Headers
             catch(url, {"Referer": header(h, "Referer"), "Origin": header(h, "Origin"),
                         "User-Agent": header(h, "User-Agent"), "Cookie": header(h, "Cookie")})
-        elif catch and SUBTITLE.search(urllib.parse.urlsplit(url).path) and "thumbnail" not in url.lower():
+        elif catch and (SUBTITLE.search(urllib.parse.urlsplit(url).path) or SUBTITLE_ASK.search(url)) \
+                and not re.search(r"thumbnail|\.(?:js|css|png|jpe?g|webp|svg|woff2?|gif)(?:\?|$)", url, re.I):
             subs = opts.setdefault("subs", [])
             if url not in subs:
                 subs.append(url)
@@ -281,7 +285,7 @@ def _hook(opts, core):
                 h = args.Request.Headers
                 catch(str(args.Request.Uri), {"Referer": header(h, "Referer"), "Origin": header(h, "Origin"),
                                               "User-Agent": header(h, "User-Agent"), "Cookie": header(h, "Cookie")})
-            elif "text/vtt" in kind or "subrip" in kind or "x-ass" in kind:
+            elif "text/vtt" in kind or "subrip" in kind or "x-ass" in kind or "x-ssa" in kind:
                 # Captions at an address that doesn't say so: kept as subtitles, never the video.
                 url = str(args.Request.Uri)
                 subs = opts.setdefault("subs", [])

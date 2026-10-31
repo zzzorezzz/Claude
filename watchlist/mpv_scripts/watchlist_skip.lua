@@ -68,3 +68,41 @@ mp.register_script_message("show-source", function()
     if src == "" then src = mp.get_property("path", "") end
     mp.osd_message("Playing from " .. src .. "\nThe wrong episode? Right-click it in Watch Anything → Relink", 8)
 end)
+
+-- The app's subtitle finder asks whether the subtitles are in sync: Y / N, or Esc to stop.
+-- Only those three keys are taken while it asks - seeking with the keys or the mouse still works.
+local asking = nil
+local function stop_asking()
+    if not asking then return end
+    asking:remove()
+    asking = nil
+    for _, k in ipairs({"y", "Y", "n", "N", "ESC"}) do mp.remove_key_binding("wa-sync-" .. k) end
+end
+mp.register_script_message("ask-sync", function(text)
+    stop_asking()
+    asking = mp.create_osd_overlay("ass-events")
+    asking.data = "{\an8\fs30\bord2\1c&HFFFFFF&}Are the subtitles in sync?\N{\fs22}" .. (text or "")
+        .. "\N{\fs24\1c&HFFE07C&}Y{\1c&HFFFFFF&} = yes, use them for every episode     "
+        .. "{\1c&HFFE07C&}N{\1c&HFFFFFF&} = no, try others     {\1c&HFFE07C&}Esc{\1c&HFFFFFF&} = stop"
+    asking:update()
+    local function answer(a)
+        return function()
+            stop_asking()
+            mp.commandv("script-message", "watchlist-sync", a)
+        end
+    end
+    for _, k in ipairs({"y", "Y"}) do mp.add_forced_key_binding(k, "wa-sync-" .. k, answer("yes")) end
+    for _, k in ipairs({"n", "N"}) do mp.add_forced_key_binding(k, "wa-sync-" .. k, answer("no")) end
+    mp.add_forced_key_binding("ESC", "wa-sync-ESC", answer("stop"))
+end)
+mp.register_script_message("stop-asking", stop_asking)
+
+-- Your own subtitle file (the app opens a window to choose it) and switching sub / dub:
+-- the app does them, so the player only says so.
+mp.register_script_message("load-subtitle", function()
+    mp.osd_message("Choose the subtitle file in the window that opens…", 3)
+    mp.commandv("script-message", "watchlist-load-subtitle")
+end)
+mp.register_script_message("switch-version", function()
+    mp.commandv("script-message", "watchlist-switch-version")
+end)

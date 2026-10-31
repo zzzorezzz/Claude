@@ -1010,27 +1010,75 @@ def qualities(url, headers=None):
     return unique if len(unique) > 1 else []
 
 
+def _sub_language(url, label=""):
+    """0 for English (by its address or label), 1 otherwise."""
+    return 0 if re.search(r"(?:^|[/_.\-=\s])(?:en|eng|english)(?:[/_.\-&\s]|$)", f"{url} {label}".lower()) else 1
+
+
+def _sub_links(data, base):
+    """The subtitle files a JSON list of them names: [(english first, url)]."""
+    out = []
+
+    def walk(x, label=""):
+        if isinstance(x, dict):
+            text = " ".join(str(x.get(k) or "") for k in ("lang", "language", "label", "name", "display", "srclang", "code"))
+            for v in x.values():
+                walk(v, text or label)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, label)
+        elif isinstance(x, str) and re.match(r"(?:https?:)?//|/", x) and (
+                re.search(r"\.(?:vtt|srt|ass)(?:[?#]|$)|format=(?:srt|vtt)|/subs?/|subtitle", x, re.I)):
+            out.append((_sub_language(x, label), urllib.parse.urljoin(base, x)))
+    walk(data)
+    return out
+
+
 def pick_subtitle(urls, headers=None):
     """The real subtitles among the caption files a player loaded ("" if none): not its
     preview thumbnails ("sprite.jpg#xywh=0,0,160,90", which read as numbers and codes),
-    English first."""
-    good = []
-    for url in urls[:6]:
+    nor its chapters ("Chapter A", "Opening"); a JSON list of subtitles is followed to
+    its files. English first."""
+    good, tried = [], set()
+    todo = [(_sub_language(u), u) for u in urls[:10]]
+    while todo and len(tried) < 16:
+        lang, url = todo.pop(0)
+        if url in tried:
+            continue
+        tried.add(url)
         req = urllib.request.Request(url, headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
                                                    **{k: v for k, v in (headers or {}).items() if k in ("Referer", "Origin") and v}})
         try:
             with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
-                head = r.read(6000).decode("utf-8", "replace")
+                head = r.read(400000).decode("utf-8", "replace")
         except (urllib.error.URLError, OSError, ValueError):
             continue
+        if head.lstrip()[:1] in ("{", "["):
+            try:
+                todo += sorted(_sub_links(json.loads(head), url))          # (a list of subtitles: its files)
+                continue
+            except ValueError:
+                pass                          # (not JSON: "[Script Info]" starts an ASS file)
+        full, head = head, head[:20000]
         if re.search(r"#xywh=|\.(?:jpe?g|png|webp)\b", head, re.I):
             continue                          # (preview thumbnails)
-        cues = re.findall(r"\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3}\s*-->", head)
-        words = re.findall(r"[^\W\d_]{2,}", re.sub(r"^.*-->.*$|^WEBVTT.*$|^X-TIMESTAMP.*$", "", head, flags=re.M))
+        if re.search(r"^\[Script Info\]|^Dialogue:", head, re.M):
+            # ASS / SSA (the anime kind): its lines are "Dialogue: ...,the words" (after its styles
+            # and fonts, so the whole file is looked at).
+            lines = [re.sub(r"\{[^}]*\}|\\[Nn]", " ", x.split(",", 9)[-1]).strip()
+                     for x in re.findall(r"^Dialogue:.*$", full, re.M)][:400]
+            cues = lines
+        else:
+            cues = re.findall(r"\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3}\s*-->", head)
+            lines = [x.strip() for x in re.sub(r"^.*-->.*$|^WEBVTT.*$|^X-TIMESTAMP.*$|^\d+$|^NOTE.*$", "", head, flags=re.M).splitlines()
+                     if x.strip()]
+        lines = [x for x in lines if x]
+        words = re.findall(r"[^\W\d_]{2,}", " ".join(lines))
         if not cues or not words:
             continue
-        english = bool(re.search(r"(?:^|[/_.\-=])(?:en|eng|english)(?:[/_.\-&]|$)", url.lower()))
-        good.append((0 if english else 1, url))
+        if len(cues) <= 15 and all(len(x.split()) <= 3 for x in lines):
+            continue                          # (chapters - "Prologue", "Opening", "Part A" - not subtitles)
+        good.append((min(lang, _sub_language(url)), url))
     return min(good)[1] if good else ""
 
 
@@ -1710,7 +1758,10 @@ class Scraper:
         # unless the site's address says which track it plays.
         want = prefs.get("kind") or "sub"
         auto_url = _track_url(page_url, want)
-        if self._catcher() and (want == "sub" or auto_url != page_url):
+        # ...but a page that names its sub and dub servers gets the one asked for clicked: what
+        # its player starts with is whatever was chosen there last (Dub, after a dub was played).
+        labelled = auto_url == page_url and self._labelled_streams(page_url)
+        if self._catcher() and (want == "sub" or auto_url != page_url) and not labelled:
             got = self._catch_stream(auto_url, None)
             if got:
                 out.update(url=got["url"], referer=got["referer"], headers=got.get("headers") or {}, subtitle=got.get("subtitle") or "")
@@ -1877,6 +1928,18 @@ class Scraper:
             raise ScrapeError("its player didn't ask for a video within half a minute")
         prefs["browser"], prefs["way"] = True, "browser"
         return got
+
+    @staticmethod
+    def _labelled_streams(page_url):
+        """Whether the episode's page (as it is, quickly read) has sub and dub server buttons."""
+        try:
+            text, final = fetch(page_url, timeout=8)
+        except ScrapeError:
+            return False
+        if _host(final).endswith("anikototv.to"):
+            text += _anikoto_servers(final, text)
+        kinds = {x["kind"] for x in streams(parse(text, final))}
+        return {"sub", "dub"} <= kinds
 
     def _catch_stream(self, page_url, x):
         """The video a hidden window's player requests, or None."""

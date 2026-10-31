@@ -372,6 +372,7 @@ def _browser_command(browser, url, new_window=False):
 
 
 _webview = None          # pywebview, once the app window is open
+on_quit = lambda: None   # set by the app: what closing its window does (quit everything)
 ANDROID = False          # running in the phone app (android.py)
 android_bridge = None    # the phone app's Java side: openUrl(url)
 _windows = {}            # the app's other windows by kind ("party", "browser")
@@ -474,6 +475,9 @@ def open_app_window(url, browser="", storage=None):
             dialogs.window = webview.create_window(
                 "Watch Anything", url, width=1440, height=900, min_size=(900, 600),
                 background_color="#0d0f1a")
+            # Closing the app's window quits the whole app: its other windows, the player,
+            # torrents and everything else it started (nothing keeps running unseen).
+            dialogs.window.events.closed += lambda: on_quit()
             _webview = webview
             path = _prepare_storage(storage)
             webview.start(private_mode=not path, storage_path=path)

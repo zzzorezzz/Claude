@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -168,6 +169,14 @@ def main(argv=None):
               'Start it with a different port, e.g.: "Watch Anything.exe" --port 8800')
         return 1
     start_background_refresh(app)
+
+    def quit_everything():
+        """The app's window closed: everything it started stops, then the app itself."""
+        try:
+            app.shutdown()
+        finally:
+            os._exit(0)
+    launcher.on_quit = quit_everything
     print(f"Watch Anything is running at {url}")
     print("Keep this window open while you use the app. Close it (or press Ctrl+C) to quit.")
 

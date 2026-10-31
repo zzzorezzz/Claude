@@ -56,6 +56,10 @@ LOCAL_DEFAULTS = {
     "keep_magnet": False,
     # The streaming service this title opens on (Troubleshoot → streaming service).
     "online_service": "",
+    # Your subtitle files, one per episode ({"1:3": path}), and whether ones found online are
+    # kept (else deleted 12 hours after they came).
+    "subs": {},
+    "keep_subs": True,
 }
 
 

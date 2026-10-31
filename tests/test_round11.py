@@ -103,3 +103,61 @@ class ModeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SubtitlesTest(unittest.TestCase):
+    def _opened(self, bodies):
+        def opened(req, **k):
+            r = mock.MagicMock()
+            r.__enter__.return_value.read.return_value = bodies[req.full_url]
+            return r
+        return opened
+
+    def test_chapters_arent_subtitles_and_a_list_of_them_is_followed(self):
+        bodies = {"https://c.test/chapters.vtt": b"WEBVTT\n\n00:00:00.000 --> 00:01:30.000\nChapter A\n\n00:01:30.000 --> 00:22:00.000\nChapter B\n",
+                  "https://c.test/subs?tmdbId=1": json.dumps([{"lang": "fr", "url": "https://c.test/fr.srt"},
+                                                             {"lang": "English", "url": "https://c.test/x.srt"}]).encode(),
+                  "https://c.test/x.srt": b"1\n00:00:03,120 --> 00:00:09,690\nI'm fine, I'm fine.\n",
+                  "https://c.test/fr.srt": b"1\n00:00:03,120 --> 00:00:09,690\nCa va.\n"}
+        with mock.patch("urllib.request.urlopen", side_effect=self._opened(bodies)):
+            self.assertEqual(scrape.pick_subtitle(["https://c.test/chapters.vtt"]), "")
+            self.assertEqual(scrape.pick_subtitle(["https://c.test/chapters.vtt", "https://c.test/subs?tmdbId=1"]), "https://c.test/x.srt")
+
+    def test_a_folder_of_subtitles_is_matched_to_the_episodes(self):
+        from watchlist import server, store
+        with tempfile.TemporaryDirectory() as d:
+            from pathlib import Path
+            app = server.App(Path(d) / "data")
+            item = app.store.add(store.new_item("anime", {"source": "mal", "source_id": "1", "title": "Show", "format": "series",
+                                                          "seasons": [{"number": 1, "episodes": 3}]}))
+            subs = Path(d) / "subs"
+            subs.mkdir()
+            for n in (1, 2, 3):
+                (subs / f"[Group] Show - 0{n} [1080p].ass").write_text("x")
+            (subs / "notes.txt").write_text("x")
+            got = app.subs_from_folder(app.store.get(item["id"]), {"path": str(subs)})
+            self.assertEqual(got["matched"], 3)
+            self.assertTrue(app.store.get(item["id"])["subs"]["1:2"].endswith("- 02 [1080p].ass"))
+
+    def test_sub_to_dub_swaps_the_file_playing_where_it_is(self):
+        from watchlist import player
+        sess = player.Session(["mpv"], "x", [{"path": "a1", "key": "1:1"}, {"path": "a2", "key": "1:2"}], first=0, playlist=True)
+        sent = []
+        sess.send = lambda *cmds: sent.extend(cmds) or True
+        sess.swap({"path": "dub1", "key": "1:1", "label": "E1"}, 61.4)
+        self.assertEqual(sent, [["loadfile", "dub1", "insert-next-play", -1, "start=61"], ["playlist-remove", 0]])
+        self.assertEqual((sess.index, sess.current()["path"]), (0, "dub1"))
+
+
+class AssSubtitlesTest(unittest.TestCase):
+    def test_an_ass_file_is_subtitles_even_with_fonts_before_its_lines(self):
+        ass = ("[Script Info]\r\nTitle: Show 01\r\n\r\n[Fonts]\r\n" + "x" * 30000 + "\r\n[Events]\r\n"
+               + "".join(f"Dialogue: 0,0:00:0{n}.00,0:00:0{n}.90,Default,,0,0,0,,{{\i1}}Line number {n} is spoken here\r\n"
+                         for n in range(1, 9))).encode()
+
+        def opened(req, **k):
+            r = mock.MagicMock()
+            r.__enter__.return_value.read.return_value = ass
+            return r
+        with mock.patch("urllib.request.urlopen", side_effect=opened):
+            self.assertEqual(scrape.pick_subtitle(["https://c.test/subtitles/0_en.ass"]), "https://c.test/subtitles/0_en.ass")

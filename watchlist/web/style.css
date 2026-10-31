@@ -1614,3 +1614,20 @@ body.simple .full-only, body.simple #btn-torrents, body.simple .tag-pc, body.sim
 body.simple .ep-file { display: none !important; }
 /* Menus opened from inside a window (an episode's right-click menu) show over it. */
 .menu.ctx { position: fixed; z-index: 400; }
+.tag.tag-cc { background: rgba(255, 255, 255, .1); color: var(--text); font-weight: 700; letter-spacing: .5px; }
+.subs-modal { width: min(560px, 100%); }
+.subs-job .buf-bar { margin-top: 10px; }
+
+/* Dragging a poster: the others wiggle, the one moved is a faint placeholder where it would land. */
+@keyframes jiggle { 0%, 100% { transform: rotate(-1.2deg); } 50% { transform: rotate(1.2deg); } }
+.grid.jiggle .card:not(.drag-ghost) { animation: jiggle .28s ease-in-out infinite; }
+.grid.jiggle .card:nth-child(2n):not(.drag-ghost) { animation-delay: -.14s; }
+.card.drag-ghost { opacity: .35; outline: 2px dashed var(--accent); outline-offset: 3px; border-radius: 12px; }
+
+/* Settings: Save and Cancel float on their own (nothing behind them covering the settings);
+   the unsaved-changes note pops up just above them. */
+.set-save { position: sticky; bottom: 14px; width: fit-content; background: none; padding: 0; margin: 16px 0 6px;
+  pointer-events: none; }
+.set-save .btn { pointer-events: auto; box-shadow: 0 6px 20px rgba(0, 0, 0, .45); }
+.set-save .unsaved-note { position: absolute; left: 0; bottom: calc(100% + 8px); margin: 0; white-space: nowrap;
+  font-size: 12px; padding: 5px 10px; background: var(--panel-2); box-shadow: 0 6px 20px rgba(0, 0, 0, .45); }

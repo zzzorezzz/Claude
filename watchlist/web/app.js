@@ -741,27 +741,58 @@ $('#view').addEventListener('contextmenu', (e) => {
   if (item) openItemMenu(item, { x: e.clientX, y: e.clientY });
 });
 
-// Drag a poster onto a folder chip to move it into that folder.
+// Drag a poster: the others wiggle and make room as it moves over them (drop it anywhere
+// in the grid for your own order), or drop it onto a folder chip to move it there.
+let dragCard = null;
 $('#view').addEventListener('dragstart', (e) => {
   const card = e.target.closest('.card');
   if (!card) return;
   e.dataTransfer.setData('text/x-watchlist', card.dataset.id);
   e.dataTransfer.effectAllowed = 'move';
   document.body.classList.add('dragging');
+  dragCard = card.closest('.grid') ? card : null;
+  if (dragCard) {
+    setTimeout(() => { dragCard?.classList.add('drag-ghost'); dragCard?.closest('.grid')?.classList.add('jiggle'); }, 0);
+  }
 });
 $('#view').addEventListener('dragend', () => {
   document.body.classList.remove('dragging');
-  $$('.drag-over-card').forEach((el) => el.classList.remove('drag-over-card'));
   $$('.drop-over').forEach((el) => el.classList.remove('drop-over'));
+  if (dragCard) {
+    const grid = dragCard.closest('.grid');
+    dragCard.classList.remove('drag-ghost');
+    grid?.classList.remove('jiggle');
+    if (!dragCard.dataset.dropped) render();          // (let go outside the grid: back where it was)
+    delete dragCard.dataset.dropped;
+  }
+  dragCard = null;
 });
+// The cards slide to their new places (each from where it was to where it is now).
+function slideCards(grid, move) {
+  const cards = $$('.card', grid);
+  const before = new Map(cards.map((c) => [c, c.getBoundingClientRect()]));
+  move();
+  cards.forEach((c) => {
+    const a = before.get(c);
+    const b = c.getBoundingClientRect();
+    const dx = a.left - b.left;
+    const dy = a.top - b.top;
+    if (!dx && !dy) return;
+    c.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }],
+      { duration: 220, easing: 'cubic-bezier(.2, .8, .2, 1)' });
+  });
+}
 $('#view').addEventListener('dragover', (e) => {
-  const onCard = e.target.closest('.grid .card');
-  if (onCard && e.dataTransfer.types.includes('text/x-watchlist')) {
-    // Onto another poster: it goes there (your own order).
+  const grid = dragCard && e.target.closest('.grid');
+  if (grid && grid === dragCard.closest('.grid')) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    $$('.drag-over-card').forEach((el) => el !== onCard && el.classList.remove('drag-over-card'));
-    onCard.classList.add('drag-over-card');
+    const over = e.target.closest('.card');
+    if (!over || over === dragCard || over.getAnimations().some((x) => !(x instanceof CSSAnimation))) return;   // (still sliding)
+    const r = over.getBoundingClientRect();
+    const after = e.clientX > r.left + r.width / 2;
+    if ((after ? over.nextElementSibling : over.previousElementSibling) === dragCard) return;
+    slideCards(grid, () => over.insertAdjacentElement(after ? 'afterend' : 'beforebegin', dragCard));
     return;
   }
   const target = e.target.closest('[data-drop]');
@@ -775,19 +806,15 @@ $('#view').addEventListener('dragleave', (e) => {
   if (target && !target.contains(e.relatedTarget)) target.classList.remove('drop-over');
 });
 $('#view').addEventListener('drop', (e) => {
-  const onCard = e.target.closest('.grid .card');
-  if (onCard) {
+  const grid = dragCard && e.target.closest('.grid');
+  if (grid && grid === dragCard.closest('.grid')) {
     e.preventDefault();
-    $$('.drag-over-card').forEach((el) => el.classList.remove('drag-over-card'));
-    const id = e.dataTransfer.getData('text/x-watchlist');
-    if (!id || id === onCard.dataset.id) return;
-    // The order on screen, with the poster moved before the one it was dropped on.
-    const shown = $$('.grid .card', onCard.closest('.grid')).map((c) => c.dataset.id).filter((x) => x !== id);
-    shown.splice(shown.indexOf(onCard.dataset.id), 0, id);
+    dragCard.dataset.dropped = '1';
+    // The order as it is on screen now.
+    const shown = $$('.card', grid).map((c) => c.dataset.id);
     const rest = cardOrder().filter((x) => !shown.includes(x));
     try { localStorage.setItem('card-order', JSON.stringify([...shown, ...rest])); } catch { /* fine */ }
     if (S.sort !== 'custom') { S.sort = 'custom'; prefSet('sort', 'custom'); toast('Sorted in your own order - change it with the sort button'); }
-    render();
     return;
   }
   const target = e.target.closest('[data-drop]');
@@ -795,6 +822,7 @@ $('#view').addEventListener('drop', (e) => {
   e.preventDefault();
   target.classList.remove('drop-over');
   const id = e.dataTransfer.getData('text/x-watchlist');
+  if (dragCard) dragCard.dataset.dropped = '1';
   if (id) moveToFolder(id, target.dataset.drop === 'none' ? '' : target.dataset.drop);
 });
 
@@ -2847,6 +2875,7 @@ function drawTitle(wrap) {
       <summary><h3>Extra stuff <span class="muted small" id="extra-count"></span><span class="spacer"></span><span class="extra-caret">▾</span></h3></summary>
       <div id="extra-body"></div></details></section>
     <section class="tm-section hidden" id="online-section"><h3>Watch online (my sites)</h3><div id="online-links"></div></section>
+    <section class="tm-section" id="subs-section"><h3>Subtitles</h3><div id="subs-bar"></div></section>
     ${series ? '<section class="tm-section"><h3>Episodes<span class="spacer"></span><span id="ep-picker"></span></h3><div id="ep-summary"></div><div class="episodes" id="ep-list"></div></section>' : ''}
     </div><aside class="tm-related" id="related"></aside></div>`;
 
@@ -2854,10 +2883,12 @@ function drawTitle(wrap) {
   drawRelated(wrap);
   drawExtras(wrap);
   drawOnlineLinks(wrap).then(() => { if (series && wrap.isConnected) drawEpisodes(wrap); });
+  drawSubsBar(wrap);
   if (series) drawEpisodes(wrap);
   modal.onclick = (e) => titleClick(wrap, e);
   modal.onchange = (e) => {
     if (e.target.matches('[data-play-with]')) setPlayWith(findItem(item.id), e.target.value);
+    else if (e.target.closest('[data-sb]')) subsBarChange(wrap, e);
     else onlineLinksChange(wrap, e);
   };
   // Right-click an episode: play it some way, its link to your site, troubleshoot.
@@ -3342,6 +3373,7 @@ async function showRecap(item) {
 async function titleClick(wrap, e) {
   const item = findItem(wrap.dataset.itemId);
   if (e.target.closest('#online-links') && await onlineLinksClick(wrap, e)) return;
+  if (e.target.closest('#subs-bar') && await subsBarClick(wrap, e)) return;
   if (e.target.closest('#review') && await reviewClick(wrap, item, e)) return;
   if (e.target.closest('#related')) { await relatedClick(wrap, e); return; }
   const move = e.target.closest('[data-move]');
@@ -4265,6 +4297,7 @@ async function drawEpisodes(wrap) {
         : streamable.has(key) ? `<span class="tag tag-stream" title="Plays from the torrent while it downloads">STREAM${tf && tf.progress > 0 ? ` · ${Math.round(tf.progress * 100)}%` : ''}</span>`
           : someHere ? '<span class="tag tag-missing">Not downloaded</span>' : '',
       watched ? '<span class="tag tag-done">✓ Watched</span>' : '',
+      st.subs?.saved?.[key] ? `<span class="tag tag-cc" title="Subtitles: ${esc(st.subs.saved[key])}">CC</span>` : '',
       st.links?.episodes?.[key] ? `<span class="tag tag-link" title="Linked: ${esc(st.links.episodes[key].page)} (right-click to change)">🔗 ${esc(st.links.episodes[key].site_name)}</span>` : '',
       current ? '' : '<button class="ep-set" title="Make this the next episode">Set as next</button>',
     ].join('');
@@ -4706,6 +4739,115 @@ function pickSiteTitle(wrap, ch, opts = {}) {
     if (pick) playScraped(wrap, { ...opts, site: ch.site, entry: ch.choices[Number(pick.dataset.pick)].url });
     else if (e.target.closest('[data-x="none"]')) { closeModal(wrap); toast('Right-click the episode → Relink to give its page yourself'); }
   });
+}
+
+/* ---- Subtitles for a title: your own (a folder of them) or found online with your AI helper */
+
+async function drawSubsBar(wrap) {
+  const item = findItem(wrap.dataset.itemId);
+  const box = $('#subs-bar', wrap);
+  if (!box) return;
+  let d;
+  try { d = await api('GET', `/api/items/${item.id}/subs`); } catch { return; }
+  if (!wrap.isConnected) return;
+  wrap.st.subs = d;
+  const n = Object.keys(d.saved).length;
+  box.innerHTML = `<div class="ol-row">
+      <button class="btn btn-grey btn-sm" data-sb="add">CC&nbsp; Add subtitles ▾</button>
+      <label class="check-line" title="Off: subtitles found online are deleted 12 hours after they came"><input type="checkbox" data-sb="keep" ${d.keep ? 'checked' : ''}> Keep subs saved</label>
+      ${n ? `<span class="muted small">${isSeries(item) ? `${n} episode${n === 1 ? '' : 's'} with subtitles` : 'Subtitles added'}</span>
+        <button class="btn btn-ghost btn-sm danger" data-sb="clear">Remove them</button>` : ''}
+      ${d.job?.running ? '<button class="btn btn-ghost btn-sm" data-sb="show">Finding subtitles… show</button>' : ''}</div>`;
+}
+
+async function subsBarClick(wrap, e) {
+  const b = e.target.closest('[data-sb]');
+  if (!b || b.type === 'checkbox') return false;
+  const item = findItem(wrap.dataset.itemId);
+  if (b.dataset.sb === 'add') openSubsMenu(wrap, item, b);
+  else if (b.dataset.sb === 'show') openSubsJob(wrap, item);
+  else if (b.dataset.sb === 'clear') {
+    if (await confirmModal('Remove the subtitles?', `The subtitles added to ${item.title} are taken off (ones the app downloaded are deleted).`, 'Remove')) {
+      await api('POST', `/api/items/${item.id}/subs/clear`).catch(fail);
+      drawSubsBar(wrap); drawEpisodes(wrap);
+    }
+  }
+  return true;
+}
+
+async function subsBarChange(wrap, e) {
+  const c = e.target.closest('[data-sb="keep"]');
+  if (!c) return false;
+  const item = findItem(wrap.dataset.itemId);
+  try { upsert(await api('POST', `/api/items/${item.id}/subs/keep`, { keep: c.checked })); } catch (err) { fail(err); }
+  toast(c.checked ? 'Subtitles are kept' : 'Subtitles found online are deleted 12 hours after they came');
+  return true;
+}
+
+function openSubsMenu(wrap, item, anchor) {
+  closeMenu();
+  const menu = document.createElement('div');
+  menu.className = 'menu ctx';
+  menu.innerHTML = `<button data-s="browse">📁&nbsp; Browse - a folder of subtitle files</button>
+    <button data-s="ai">✨&nbsp; Find with AI - online</button>`;
+  menu.addEventListener('click', async (e) => {
+    const a = e.target.closest('[data-s]')?.dataset.s;
+    if (!a) return;
+    closeMenu();
+    if (a === 'browse') {
+      let path = '';
+      try { ({ path } = await browse({ kind: 'folder', title: `Choose the folder with ${item.title}'s subtitles` })); } catch (err) { fail(err); return; }
+      if (!path) return;
+      try {
+        const r = await api('POST', `/api/items/${item.id}/subs/folder`, { path });
+        toast(r.matched ? `Subtitles added for ${isSeries(item) ? `${r.matched} episode${r.matched === 1 ? '' : 's'}` : item.title}` : `No subtitle file there matched ${isSeries(item) ? 'an episode' : 'it'} (${r.files} found)`, r.matched ? '' : 'error');
+      } catch (err) { fail(err); }
+      drawSubsBar(wrap); drawEpisodes(wrap);
+    } else {
+      let ep = { ...item.progress };
+      if (isSeries(item)) {
+        const got = await promptModal({ title: 'Which episode are you watching?', label: `Subtitles are found for it first and tried in the player with you.`,
+          value: `${ep.episode}`, placeholder: 'Episode number', ok: 'Find subtitles' });
+        if (!got) return;
+        ep = { season: item.progress.season || 1, episode: Math.max(1, Number(got) || 1) };
+      }
+      try { await api('POST', `/api/items/${item.id}/subs/find`, ep); } catch (err) { fail(err); return; }
+      openSubsJob(wrap, item);
+    }
+  });
+  placeMenu(menu, anchor);
+}
+
+// The subtitle search as it goes: a bar, what it's doing, and the in-sync question.
+function openSubsJob(titleWrap, item) {
+  const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad subs-job">
+    <h2>✨ Subtitles for ${esc(item.title)}</h2><div id="sj-body"></div></div>`, 'subs-modal');
+  const body = $('#sj-body', m);
+  const tick = async () => {
+    if (!m.isConnected) return;
+    let d;
+    try { d = await api('GET', `/api/items/${item.id}/subs`); } catch { setTimeout(tick, 1500); return; }
+    const j = d.job || {};
+    const pct = Math.round((j.progress || 0) * 100);
+    body.innerHTML = `<div class="buf-bar"><i style="width:${pct}%"></i></div>
+      <div class="buf-line"><b class="buf-pct">${pct}%</b><span class="muted small">${esc(j.stage || '')}</span></div>
+      ${j.release ? `<p class="muted small">Trying: ${esc(j.release)}</p>` : ''}
+      ${j.total ? `<p class="muted small">${j.done} of ${j.total} other episodes</p>` : ''}
+      ${j.asking ? `<p><b>Are the subtitles in sync?</b> Seek around in the player to check - answer there (Y / N) or here.</p>
+        <div class="btns"><button class="btn btn-white" data-a="yes">Yes, in sync</button><button class="btn btn-ghost" data-a="no">No, try another</button>
+        <button class="btn btn-ghost" data-a="stop">Stop</button></div>`
+    : j.running ? '<div class="btns"><button class="btn btn-ghost btn-sm" data-a="stop">Stop</button></div>'
+      : '<div class="btns"><button class="btn btn-white" data-a="close">Done</button></div>'}`;
+    if (!j.running) { drawSubsBar(titleWrap); drawEpisodes(titleWrap); return; }
+    setTimeout(tick, j.asking ? 1000 : 600);
+  };
+  m.addEventListener('click', async (e) => {
+    const a = e.target.closest('[data-a]')?.dataset.a;
+    if (!a) return;
+    if (a === 'close') { closeModal(m); return; }
+    await api('POST', `/api/items/${item.id}/subs/answer`, { answer: a }).catch(fail);
+  });
+  tick();
 }
 
 /* ---- The title's links to your own sites: preferred site, link / relink, keep connected */

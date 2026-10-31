@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, discover, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
+from . import ai, dialogs, discover, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -32,6 +32,14 @@ RELATED_TTL = 3 * 24 * 3600
 # "Play this with" on a title's page: "" is "Use anything" (a file on your computer,
 # else the torrent, else it asks between your video sites and watching online).
 PLAY_WITH = ("", "file", "torrent", "scraped", "scraped-browser", "online")
+
+
+SUBS_FOR = 12 * 3600           # subtitles found online for a title that doesn't keep them: deleted after this
+
+
+def _english(path):
+    """0 for a subtitle file named as English, 1 otherwise (English first when there are both)."""
+    return 0 if re.search(r"(?:^|[\W_])(?:en|eng|english)(?:[\W_]|$)", Path(path).stem.lower()) else 1
 
 
 # Public Syncplay servers, tried in order by "Find a working server".
@@ -96,6 +104,9 @@ class App:
         # Your own sites: videos found ({(item, "s:e"): (site, found, when)}), the background
         # matching of a title's episodes (the latest run per title goes on) and how far it is.
         self._online_found, self._link_runs, self._link_progress = {}, {}, {}
+        # Sub or dub, switched in the player (the episodes after it follow); subtitle searches.
+        self._online_track, self._subjobs = {}, {}
+        threading.Thread(target=self._clean_subs, daemon=True).start()
         self.scraper.can_render, self.scraper.can_catch = webtools.can_render, webtools.can_catch
         self._connected_jobs = {}           # Everything connected being looked for: how far along
         self._filler = ThreadPoolExecutor(4, thread_name_prefix="fill")   # titles added straight away
@@ -1342,11 +1353,16 @@ class App:
             # Streams: wait patiently for data, and keep plenty of it ahead.
             extra = ["--network-timeout=180", "--cache=yes", "--demuxer-max-bytes=200MiB",
                      "--demuxer-readahead-secs=90"] + list(extra)
-        return player.Session(
+        for e in entries:
+            if not e.get("sub") and e.get("key"):
+                e["sub"] = self.saved_sub(item, e["key"]) or None       # (your subtitles for it)
+        session = player.Session(
             mpv, item["id"], entries, start=start,
             extra_args=player.script_args(self.settings.get()["skip_intro"], self.settings.get()["theme"]) + list(extra),
             audio_langs="jpn,ja,japanese,eng,en" if item["type"] == "anime" else "",
             on_progress=self._save_position, on_finished=self._finished_entry, first=first, playlist=playlist)
+        session.listeners.append(self._player_message)
+        return session
 
     def _entries(self, item, path, subtitle, season=None, episode=None, queue=True):
         """What to play: the file, then (with `queue`) the episodes after it."""
@@ -1487,6 +1503,292 @@ class App:
     # ---- your own video sites ("Play online (my sites)")
 
     # ---- your own video sites: which one, the links found, the player's playlist
+
+    # ---- subtitles: yours (a folder, or a file in the player) and found online
+
+    def _subs_dir(self, item_id=""):
+        d = self.data_dir / "subtitles" / item_id if item_id else self.data_dir / "subtitles"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def saved_sub(self, item, key):
+        """The subtitle file saved for an episode ("" if none, or it's gone)."""
+        path = (item.get("subs") or {}).get(key) or ""
+        return path if path and os.path.isfile(path) else ""
+
+    def _save_sub(self, item_id, key, path):
+        item = self.store.get(item_id)
+        subs = dict(item.get("subs") or {})
+        subs[key] = path
+        self.store.update(item_id, {"subs": subs})
+
+    def subs_info(self, item):
+        job = self._subjobs.get(item["id"]) or {}
+        return {"saved": {k: Path(v).name for k, v in (item.get("subs") or {}).items() if os.path.isfile(v)},
+                "keep": item.get("keep_subs", True), "job": {k: v for k, v in job.items() if not k.startswith("_")}}
+
+    def subs_from_folder(self, item, body):
+        """Every subtitle file in a folder, matched to the episodes by their names."""
+        folder = str(body.get("path") or "")
+        if not os.path.isdir(folder):
+            raise ApiError("choose a folder with the subtitle files")
+        files = []
+        for root, _dirs, names in os.walk(folder):
+            if root.count(os.sep) - folder.count(os.sep) > 2:
+                continue
+            files += [os.path.join(root, n) for n in names if Path(n).suffix.lower() in scanner.SUB_EXTS]
+        subs, series = dict(item.get("subs") or {}), item["format"] == "series"
+        matched = 0
+        for f in sorted(files):
+            if not series:
+                subs["movie"] = f
+                matched = 1
+                break
+            season, eps = scanner.parse_episode(Path(os.path.relpath(f, folder)).parts)
+            if not eps:
+                continue
+            for e in eps:
+                key = f"{season or item['progress']['season'] or 1}:{e}"
+                if key not in subs or _english(f) < _english(subs[key]):
+                    subs[key] = f
+                    matched += 1
+        self.store.update(item["id"], {"subs": subs})
+        return {"ok": True, "matched": matched, "files": len(files)}
+
+    def set_keep_subs(self, item, body):
+        return self.store.update(item["id"], {"keep_subs": bool(body.get("keep"))})
+
+    def clear_subs(self, item, body):
+        for key, path in list((item.get("subs") or {}).items()):
+            if _inside(path, str(self._subs_dir())):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        return self.store.update(item["id"], {"subs": {}})
+
+    def _clean_subs(self):
+        """Subtitles found online for a title that doesn't keep them: gone after 12 hours."""
+        while True:
+            time.sleep(1800)
+            try:
+                for item in self.store.list():
+                    if item.get("keep_subs", True) or not item.get("subs"):
+                        continue
+                    keep = {}
+                    for key, path in item["subs"].items():
+                        old = os.path.isfile(path) and time.time() - os.path.getmtime(path) > SUBS_FOR
+                        if old and _inside(path, str(self._subs_dir())):
+                            try:
+                                os.remove(path)
+                            except OSError:
+                                keep[key] = path
+                        elif os.path.isfile(path):
+                            keep[key] = path
+                    if keep != item["subs"]:
+                        self.store.update(item["id"], {"subs": keep})
+            except Exception:  # noqa: BLE001 - only tidying: next time
+                pass
+
+    def find_subs(self, item, body):
+        """Find with AI: subtitles for one episode found online, tried in the player with you
+        (in sync? yes: the same release for every episode; no: the next one)."""
+        old = self._subjobs.get(item["id"])
+        if old and old.get("running"):
+            return {"ok": True, "job": {k: v for k, v in old.items() if not k.startswith("_")}}
+        series = item["format"] == "series"
+        season = int(body.get("season") or item["progress"]["season"] or 1) if series else None
+        episode = int(body.get("episode") or item["progress"]["episode"] or 1) if series else None
+        job = self._subjobs[item["id"]] = {"running": True, "stage": "Looking for subtitles…", "progress": 0.03,
+                                          "asking": False, "error": "", "done": 0, "total": 0, "release": "",
+                                          "episode": f"{season}:{episode}" if series else "movie",
+                                          "_event": threading.Event(), "_answer": ""}
+        threading.Thread(target=self._find_subs, args=(item["id"], season, episode, job), daemon=True).start()
+        return {"ok": True, "job": {k: v for k, v in job.items() if not k.startswith("_")}}
+
+    def answer_subs(self, item_id, answer):
+        job = self._subjobs.get(item_id)
+        if not job or not job.get("running"):
+            return {"ok": False}
+        job["_answer"] = answer if answer in ("yes", "no", "stop") else "stop"
+        job["_event"].set()
+        return {"ok": True}
+
+    def _find_subs(self, item_id, season, episode, job):
+        item = self.store.get(item_id)
+        key = f"{season}:{episode}" if season is not None else "movie"
+        session = None
+        try:
+            found = subfinder.search(item, season, episode)
+            job.update(stage="Picking the best match…", progress=0.2)
+            ranked = subfinder.rank(item, season, episode, found)
+            got = self._online_found.get((item_id, key))
+            ranked = subfinder.ai_order(self.settings.get(), item, season, episode, ranked,
+                                        source=got[0]["name"] if got else "")
+            if not ranked:
+                raise subfinder.SubError("no subtitles were found for it")
+            for n, cand in enumerate(ranked[:8]):
+                job.update(stage=f"Downloading {cand['release'] or cand['name']}…", progress=0.35, release=cand["release"] or cand["name"])
+                try:
+                    path = self._store_sub(item_id, key, cand)
+                except subfinder.SubError:
+                    continue
+                job.update(stage="Opening the episode with them…", progress=0.6)
+                session = self._sub_session(item, season, episode, path, session)
+                job.update(stage="Are they in sync? Answer in the player (Y / N) or here.", progress=0.75, asking=True)
+                session.send(["script-message-to", "watchlist_skip", "ask-sync",
+                              f"Subtitles {n + 1}: {(cand['release'] or cand['name'])[:60]}"])
+                job["_event"].clear()
+                job["_answer"] = ""
+                while not job["_event"].wait(1):
+                    if session.ended:
+                        job["_answer"] = "stop"
+                        break
+                job["asking"] = False
+                answer = job["_answer"]
+                if answer == "stop":
+                    job.update(stage="Stopped", running=False)
+                    return
+                if answer == "no":
+                    session.send(["sub-remove"])
+                    continue
+                self._save_sub(item_id, key, path)
+                self._subs_for_the_rest(item, season, episode, cand, job)
+                return
+            job.update(stage="None of them fit - try Browse with your own files", error="no subtitles fitted", running=False)
+        except (subfinder.SubError, OnlineError, ApiError, KeyError) as e:
+            job.update(stage=str(e), error=str(e), running=False)
+        finally:
+            if session and not session.ended:
+                session.send(["script-message-to", "watchlist_skip", "stop-asking"])
+            job["running"] = False
+
+    def _store_sub(self, item_id, key, cand):
+        data = subfinder.download(cand)
+        path = self._subs_dir(item_id) / f"{key.replace(':', 'x')}-{cand['id']}.{cand['format'] if cand['format'] in ('srt', 'ass', 'ssa', 'vtt') else 'srt'}"
+        path.write_bytes(data)
+        return str(path)
+
+    def _sub_session(self, item, season, episode, path, session):
+        """The player with the episode and these subtitles in it (the one open when it's this episode)."""
+        key = f"{season}:{episode}" if season is not None else "movie"
+        now = self.player.session
+        if now and not now.ended and now.item_id == item["id"] and (now.current() or {}).get("key") == key:
+            now.send(["sub-add", path, "select", "Found subtitles", "en"])
+            return now
+        local = self.local_info(item, season or 1, episode or 1)["target"]
+        if local and not local.get("stream"):
+            self.play(item, {"path": local["path"], "subtitle": path, "season": season, "episode": episode})
+        elif self._video_sites(item):
+            res = self.play_scraped(item, {"season": season, "episode": episode})
+            if not res.get("ok"):
+                raise ApiError(res.get("error") or "the episode couldn't be played")
+        else:
+            raise ApiError("play the episode once first (it isn't on your computer or your sites)")
+        for _ in range(120):
+            s = self.player.session
+            if s and s.connected and s.loaded:
+                s.send(["sub-add", path, "select", "Found subtitles", "en"])
+                return s
+            time.sleep(0.5)
+        raise ApiError("the player didn't open")
+
+    def _subs_for_the_rest(self, item, season, episode, chosen, job):
+        """You said it's in sync: the same release's subtitles for every other episode."""
+        if item["format"] != "series":
+            job.update(stage="Saved", progress=1, running=False)
+            return
+        keys = [k for k in self._episode_keys(item, (season, episode)) if k != f"{season}:{episode}"]
+        job.update(total=len(keys), done=0, stage="Getting the other episodes' subtitles…")
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(k):
+            s, e = self._key_numbers(k)
+            if job["_answer"] == "stop":
+                return
+            try:
+                cands = subfinder.rank(item, s, e, subfinder.search(item, s, e))
+                best = subfinder.same_source(chosen, cands) if cands else None
+                if best:
+                    self._save_sub(item["id"], k, self._store_sub(item["id"], k, best))
+            except (subfinder.SubError, KeyError):
+                pass
+            finally:
+                job["done"] += 1
+                job["progress"] = 0.8 + 0.2 * job["done"] / max(1, job["total"])
+        with ThreadPoolExecutor(4) as pool:
+            list(pool.map(one, keys))
+        job.update(stage=f"Done - subtitles for {job['done'] + 1} episodes", progress=1, running=False)
+
+    def _player_message(self, session, msg):
+        """What you do in the player that the app answers: the subtitle check, your own
+        subtitle file, switching between sub and dub."""
+        if msg.get("event") != "client-message":
+            return
+        args = msg.get("args") or []
+        if not args:
+            return
+        if args[0] == "watchlist-sync" and len(args) > 1:
+            self.answer_subs(session.item_id, args[1])
+        elif args[0] == "watchlist-load-subtitle":
+            threading.Thread(target=self._load_own_sub, args=(session,), daemon=True).start()
+        elif args[0] == "watchlist-switch-version":
+            threading.Thread(target=self._switch_version, args=(session,), daemon=True).start()
+
+    def _load_own_sub(self, session):
+        path = dialogs.choose("file", "Choose a subtitle file", "", "subtitle")
+        if not path or Path(path).suffix.lower() not in scanner.SUB_EXTS:
+            return
+        session.send(["sub-add", path, "select", Path(path).stem, ""])
+        entry = session.current()
+        if entry:
+            try:
+                self._save_sub(session.item_id, entry["key"], path)
+            except KeyError:
+                pass
+
+    def _switch_version(self, session):
+        """Sub to dub (or back) for the episode playing, from where it is; the episodes after
+        it follow."""
+        entry = session.current()
+        got = self._online_found.get((session.item_id, (entry or {}).get("key")))
+        if not entry or not entry.get("web") or not got:
+            session.send(["show-text", "Sub / Dub: only for episodes from your own sites", 3000])
+            return
+        site, found = got[0], got[1]
+        playing = (found.get("stream") or {}).get("kind") or entry.get("track") or "sub"
+        other = "sub" if playing == "dub" else "dub"
+        session.send(["show-text", f"Finding the {other}…", 30000])
+        item = self.store.get(session.item_id)
+        season, episode = self._key_numbers(entry["key"])
+        try:
+            new = self.scraper.resolve(site, item, season, episode, track=other)
+        except scrape.ScrapeError as e:
+            session.send(["show-text", f"No {other} found here ({e})", 4000])
+            return
+        if not new.get("url") or new["url"] == found["url"] or ((new.get("stream") or {}).get("kind") or "sub") != other:
+            session.send(["show-text", f"This site has no {other} of it", 4000])
+            return
+        self._online_track[session.item_id] = other
+        self._online_found[(session.item_id, entry["key"])] = (site, new, time.time())
+        fresh = dict(self._web_entry(item, site, entry["key"], new), online=True)
+        sub = self.saved_sub(item, entry["key"])
+        if sub:
+            fresh["sub"] = sub
+        session.swap(fresh, session.position() or 0)
+        session.send(["show-text", f"Now playing the {other}", 2500])
+
+    def shutdown(self):
+        """Quitting: your place saved, the player closed, torrents saved and stopped, the
+        watch party left, and any program the app started ended."""
+        for step in (lambda: self.player.session and self.player.session.stop(),
+                     lambda: self.party and self.party.leave("closed the app"),
+                     self.torrents.shutdown):
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - quitting goes on whatever happens
+                pass
+        player.kill_children()
 
     def _video_sites(self, item):
         return scrape.sites_for(self.settings.get(), item["type"])
@@ -1693,6 +1995,7 @@ class App:
         found a moment ago in the background). Raises OnlineError / KeyError."""
         item = self.store.get(item_id)
         key = f"{season}:{episode}"
+        track = self._online_track.get(item_id) or track
         site, found = self._online_find(item, season, episode, track=track, prefer=site_id)
         self._online_found[(item_id, key)] = (site, found, time.time())
         threading.Thread(target=self._link_around, args=(item_id, site, key, self.player.session), daemon=True).start()
@@ -1712,34 +2015,20 @@ class App:
             return
         site, found, _ = got
         session.send(["set_property", "user-data/watchlist/source", f"{site['name']}: {found.get('page') or ''}"])
+        try:
+            mine = self.saved_sub(self.store.get(item_id), entry["key"])
+        except KeyError:
+            mine = ""
+        if mine and not entry.get("added_mine"):
+            entry["added_mine"] = True
+            session.add_tracks(entry, [{"kind": "sub", "url": mine, "title": "Your subtitles", "lang": "en", "select": True}])
         if entry.get("online") and found.get("subtitle") and not entry.get("added_sub"):
             entry["added_sub"] = True
             dub = (found.get("stream") or {}).get("kind") == "dub"
             session.add_tracks(entry, [{"kind": "sub", "url": found["subtitle"], "title": "English (subtitles)",
                                         "lang": "en", "select": not dub}])
-        threading.Thread(target=self._other_version, args=(session, item_id, site, entry, found), daemon=True).start()
-
-    def _other_version(self, session, item_id, site, entry, found):
-        """The episode's dub (or sub): its audio and subtitles added as tracks of the open file."""
-        if entry.get("versions_added"):
-            return
-        entry["versions_added"] = True
-        item = self.store.get(item_id)
-        season, episode = self._key_numbers(entry["key"])
-        playing = (found.get("stream") or {}).get("kind") or "sub"
-        other = "sub" if playing == "dub" else "dub"
-        try:
-            got = self.scraper.resolve(site, item, season, episode, track=other)
-        except scrape.ScrapeError:
-            return
-        if (not got.get("url") or got["url"] == found["url"] or session.ended
-                or ((got.get("stream") or {}).get("kind") or "sub") != other):
-            return                          # (no other version there)
-        tracks = [{"kind": "audio", "url": got["url"], "lang": "en" if other == "dub" else "ja",
-                   "title": "English (dub)" if other == "dub" else "Original (Japanese)"}]
-        if got.get("subtitle") and not found.get("subtitle"):
-            tracks.append({"kind": "sub", "url": got["subtitle"], "title": "English (subtitles)", "lang": "en"})
-        session.add_tracks(entry, tracks)
+        # (The other version isn't laid over it as a second audio track - a dub's timing differs
+        # from the sub's; the player's Sub / Dub button switches to it from where you are.)
 
     def _link_around(self, item_id, site, key, session=None):
         """Match the title's episodes on the site in the background, from the one playing:
@@ -2178,6 +2467,12 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/scraped/unlink", "scraped_unlink"),
         ("GET", r"/api/items/(\w+)/online/links", "online_links"),
         ("POST", r"/api/party-server/find", "find_party_server"),
+        ("GET", r"/api/items/(\w+)/subs", "subs_info"),
+        ("POST", r"/api/items/(\w+)/subs/find", "find_subs"),
+        ("POST", r"/api/items/(\w+)/subs/answer", "answer_subs"),
+        ("POST", r"/api/items/(\w+)/subs/folder", "subs_folder"),
+        ("POST", r"/api/items/(\w+)/subs/keep", "keep_subs"),
+        ("POST", r"/api/items/(\w+)/subs/clear", "clear_subs"),
         ("POST", r"/api/items/(\w+)/online/link-all", "link_all"),
         ("POST", r"/api/items/(\w+)/online/relink", "relink_episode"),
         ("POST", r"/api/items/(\w+)/online/prefs", "online_prefs"),
@@ -2980,6 +3275,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_scraped_unlink(self, body, item_id):
         return self.app.scraped_unlink(self.app.item(item_id), body)
+
+    def api_subs_info(self, body, item_id):
+        return self.app.subs_info(self.app.item(item_id))
+
+    def api_find_subs(self, body, item_id):
+        return self.app.find_subs(self.app.item(item_id), body)
+
+    def api_answer_subs(self, body, item_id):
+        self.app.item(item_id)
+        return self.app.answer_subs(item_id, str(body.get("answer") or ""))
+
+    def api_subs_folder(self, body, item_id):
+        return self.app.subs_from_folder(self.app.item(item_id), body)
+
+    def api_keep_subs(self, body, item_id):
+        return self.app.set_keep_subs(self.app.item(item_id), body)
+
+    def api_clear_subs(self, body, item_id):
+        return self.app.clear_subs(self.app.item(item_id), body)
 
     def api_find_party_server(self, body):
         """A watch-party server that answers now (Settings: Find a working server)."""
