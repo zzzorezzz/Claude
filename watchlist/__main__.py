@@ -86,7 +86,6 @@ def _self_test(path):
 def _player_test(path):
     """Used by the builds: play a 3-second test video in the bundled mpv, following
     it the same way as a real episode, and report what happened."""
-    import threading
     from . import player
     report = {"mpv": player.find_mpv()}
     if report["mpv"]:
@@ -216,7 +215,6 @@ def main(argv=None):
         if args.browser:
             launcher.open_url(url, browser)
         else:
-            import threading
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             if launcher.open_app_window(url, browser, storage=app.data_dir / "browser-data"):

@@ -141,6 +141,36 @@ class TorrentTest(test_server.ServerBase):
     def _index(self, h, ending):
         return next(f["index"] for f in self.app.torrents.records[h]["files"] if f["path"].endswith(ending))
 
+    def test_one_before_and_one_after_load_quietly_then_fully(self):
+        h = self.add()
+        tor = self.app.torrents
+        eps = tor.episodes(self.item)
+        here, before, after = eps["1:2"]["index"], eps["1:1"]["index"], eps["1:3"]["index"]
+        tor.prepare(h, here)
+        tor.reading[(h, here)] = time.time()
+        quiet = {k: dict(v, complete=False) for k, v in eps.items()}
+        with mock.patch.object(tor, "episodes", return_value=quiet):
+            tor._prefetch_next()
+        prio = tor.records[h]["priorities"]
+        self.assertEqual((prio.get(str(before)), prio.get(str(after))), (1, 1), "a little, while this one comes")
+        done = dict(quiet, **{"1:2": dict(quiet["1:2"], complete=True)})
+        with mock.patch.object(tor, "episodes", return_value=done):
+            tor._prefetch_next()
+        self.assertEqual((prio.get(str(before)), prio.get(str(after))), (7, 7), "as fast as it, once it's all here")
+
+    def test_closing_the_player_stops_the_downloads_and_playing_starts_them(self):
+        h = self.add()
+        tor = self.app.torrents
+        index = tor.episodes(self.item)["1:1"]["index"]
+        tor.prepare(h, index)
+        tor.reading[(h, index)] = time.time()
+        tor.stop_streaming()
+        self.assertTrue(tor.records[h].get("held"))
+        self.assertTrue(tor.handles[h].status().paused)
+        tor.prepare(h, index)
+        self.assertFalse(tor.records[h].get("held"))
+        self.assertFalse(tor.handles[h].status().paused)
+
     def test_the_subtitle_comes_first(self):
         h = self.add()
         subs = self.app.torrents.subtitles(h, self._index(h, "02 [1080p].mkv"), wait=15)

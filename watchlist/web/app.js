@@ -69,7 +69,11 @@ async function api(method, path, body) {
     throw new Error('The Watch Anything window lost its connection - is the app still running?');
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data.error || `request failed (${res.status})`);
+    err.code = data.code || '';
+    throw err;
+  }
   if (method === 'POST' && path === '/api/items') sfx('add');
   return data;
 }
@@ -2627,9 +2631,12 @@ async function openStartParty(item = null) {
     const site = $('#party-site', wrap)?.value || sites[0]?.id || '';
     e.target.disabled = true;
     e.target.textContent = source === 'online' ? `Finding it on ${(sites.find((x) => x.id === site) || {}).name || 'your site'}…` : 'Starting…';
+    const how = wrap.partyHow || '';
+    wrap.partyHow = '';
     try {
-      const r = await api('POST', '/api/party/start', item ? { item_id: item.id, season, episode, path: path || '', source, site } : {});
-      if (r.need_file) out.innerHTML = `<div class="warn">${esc(r.message)}</div>`;
+      const r = await api('POST', '/api/party/start', item ? { item_id: item.id, season, episode, path: path || '', source, site, how } : { how });
+      out.innerHTML = r.note ? `<div class="${r.via === 'direct' && /only people on your network/.test(r.note) ? 'warn' : 'ok-box'}">${esc(r.note)}</div>` : '';
+      if (r.need_file) out.innerHTML += `<div class="warn">${esc(r.message)}</div>`;
       party.open = true;
       await pollParty();
       // The invite, to send: it carries the file's name, the magnet or your site with it.
@@ -2639,6 +2646,16 @@ async function openStartParty(item = null) {
       $('[data-p="copy"]', out).addEventListener('click', () => { navigator.clipboard?.writeText(r.code); toast('Invite copied'); });
       $('[data-p="done"]', out).addEventListener('click', () => closeModal(wrap));
     } catch (err) {
+      if (err.code === 'no_server') {
+        // Syncplay's servers and the backup relay all down: the two other ways.
+        out.innerHTML = `<div class="warn">${esc(err.message)}
+          <p class="small">Two other ways to watch together:</p>
+          <div class="btns"><button class="btn btn-white btn-sm" data-p="direct">Use my app as the server</button>
+            <button class="btn btn-ghost btn-sm" data-p="own-server">Use my own Syncplay server…</button></div></div>`;
+        $('[data-p="direct"]', out).addEventListener('click', () => { wrap.partyHow = 'direct'; $('[data-p="start"]', wrap).click(); });
+        $('[data-p="own-server"]', out).addEventListener('click', () => openOwnServerGuide());
+        return;
+      }
       const server = /watch-party server/.test(err.message || '');
       out.innerHTML = `<div class="warn">${esc(err.message)}
         ${server ? '<div class="btns"><button class="btn btn-white btn-sm" data-p="find-server">Find a working server</button></div>' : ''}</div>`;
@@ -2679,8 +2696,72 @@ async function openStartParty(item = null) {
       await pollParty();
       closeModal(wrap);
     } catch (err) {
-      out.innerHTML = `<div class="warn">${esc(err.message)}</div>`;
+      out.innerHTML = `<div class="warn">${esc(err.message)}
+        <div class="btns"><button class="btn btn-ghost btn-sm" data-p="not-working">Not working?</button></div></div>`;
+      $('[data-p="not-working"]', out).addEventListener('click', () => {
+        const direct = /@\d+\.\d+\.\d+\.\d+:\d+/.test(box.value);
+        $('[data-p="not-working"]', out).closest('.btns').outerHTML = `<div class="small party-help">
+          ${direct ? `<p>This party runs on your host's own app. It only works if their router lets people in from outside
+            (or if you're on the same Wi-Fi as them). Ask them to start the party again: when Syncplay or the backup relay
+            works it goes there by itself, and then anyone can join. Or they can set up their own Syncplay server.</p>`
+    : `<p>Check you copied the whole invite, and that the host's party is still on (ask them to send the invite again).
+            If it still doesn't work, the server it's on may be down for you: the host can start it again - the app picks a
+            server that works (or the backup relay) by itself.</p>`}
+          <div class="btns"><button class="btn btn-ghost btn-sm" data-p="retry">Try again</button>
+            <button class="btn btn-ghost btn-sm" data-p="own-server">Set up our own Syncplay server…</button></div></div>`;
+        $('[data-p="retry"]', out).addEventListener('click', () => join.click());
+        $('[data-p="own-server"]', out).addEventListener('click', () => openOwnServerGuide());
+      });
     } finally { if (join.isConnected) { join.disabled = false; join.textContent = 'Join'; } }
+  });
+}
+
+// Your own Syncplay server (when the public ones and the backup relay are all down): how to
+// set it up on the device you're on, and its address saved for watch parties.
+function openOwnServerGuide() {
+  const os = S.status.platform === 'android' ? 'android' : S.status.platform === 'darwin' ? 'mac' : 'windows';
+  const port = '8999';
+  const steps = {
+    windows: `<ol>
+      <li>Download <b>Syncplay for Windows</b> from <b>syncplay.pl</b> (Download) and install it.</li>
+      <li>Start <b>Syncplay Server</b> (it comes with Syncplay - find it in the Start menu). Keep port <b>${port}</b> and start it.</li>
+      <li>When Windows Firewall asks, allow it (private and public networks).</li>
+      <li>For people outside your home: in your router's settings, forward <b>TCP port ${port}</b> to this PC.
+        People on your Wi-Fi don't need this.</li>
+      <li>Put its address below: your internet address (search “what is my IP”) and the port, like <code>203.0.113.5:${port}</code>
+        - or this PC's address on your Wi-Fi for people at home.</li></ol>`,
+    mac: `<ol>
+      <li>Open <b>Terminal</b> (Applications → Utilities). If macOS offers to install developer tools, accept.</li>
+      <li>Run these, one at a time:<pre>git clone https://github.com/Syncplay/syncplay.git
+python3 -m pip install --user "twisted[tls]" certifi
+python3 syncplay/syncplayServer.py --port ${port}</pre>Leave the Terminal window open while you watch.</li>
+      <li>When macOS asks if Python may accept incoming connections, allow it.</li>
+      <li>For people outside your home: in your router's settings, forward <b>TCP port ${port}</b> to this Mac.</li>
+      <li>Put its address below: your internet address (search “what is my IP”) and the port, like <code>203.0.113.5:${port}</code>.</li></ol>`,
+    android: `<ol>
+      <li>Install <b>Termux</b> from F-Droid (the Play Store version is outdated) and open it.</li>
+      <li>Type these, one at a time:<pre>pkg install python git
+git clone https://github.com/Syncplay/syncplay.git
+pip install "twisted[tls]" certifi
+python syncplay/syncplayServer.py --port ${port}</pre>Keep Termux open (pull down its notification and choose <b>Acquire wakelock</b> so it keeps running).</li>
+      <li>For people outside your home: in your router's settings, forward <b>TCP port ${port}</b> to this phone.</li>
+      <li>Put its address below: your internet address (search “what is my IP”) and the port, like <code>203.0.113.5:${port}</code>.</li></ol>`,
+  };
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad own-server">
+    <h2>Your own Syncplay server</h2>
+    <p class="sub">Syncplay's free server program, run on this ${os === 'android' ? 'phone' : os === 'mac' ? 'Mac' : 'PC'} - your watch parties then go through it.</p>
+    ${steps[os]}
+    <label class="field"><span>Your server's address</span><input class="input" id="own-server-addr" placeholder="203.0.113.5:${port}" value="${esc(S.settings?.party_server && !/^syncplay\.pl:/.test(S.settings.party_server) ? S.settings.party_server : '')}"></label>
+    <div class="btns"><button class="btn btn-white" data-g="save">Use it for watch parties</button></div></div>`, 'own-server-modal');
+  $('[data-g="save"]', wrap).addEventListener('click', async () => {
+    const addr = $('#own-server-addr', wrap).value.trim();
+    if (!/^[A-Za-z0-9.-]+(:\d{1,5})?$/.test(addr)) { toast('Put the address like 203.0.113.5:8999', 'error'); return; }
+    try {
+      await api('PUT', '/api/settings', { party_server: addr.includes(':') ? addr : `${addr}:${port}` });
+      if (S.settings) S.settings.party_server = addr;
+      toast('Saved - start the watch party again');
+      closeModal(wrap);
+    } catch (err) { fail(err); }
   });
 }
 
@@ -6069,7 +6150,7 @@ async function openSettings(focus = '') {
       } else if (a === 'moe') api('POST', '/api/open', { url: 'https://everythingmoe.com' }).catch(fail);
       else if (a === 'find-server') {
         e.target.disabled = true;
-        try { const r = await api('POST', '/api/party-server/find'); form.party_server.value = r.server; toast(`${r.server} answers - press Save to use it`); }
+        try { const r = await api('POST', '/api/party-server/find'); form.party_server.value = r.server; toast(`${r.server} works - saved, watch parties use it now`); }
         finally { e.target.disabled = false; }
       }
       else if (a === 'avatar-off') {

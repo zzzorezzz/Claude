@@ -16,6 +16,7 @@ import uuid
 _sessions = {}
 _lock = threading.Lock()
 _bridge = None          # the phone app's Java side (MainActivity.Bridge); None in tests
+on_closed = None        # the app: a player was closed (its torrents stop downloading)
 
 
 def video_kind(entry):
@@ -117,9 +118,16 @@ class PhoneSession:
                     pass
 
     def _end(self):
+        if self.ended:
+            return
         self.ended = True
         with _lock:
             _sessions.pop(self.id, None)
+        if on_closed is not None:
+            try:
+                on_closed(self)
+            except Exception:  # noqa: BLE001 - the app's business, not the player's
+                pass
 
     # ---- the same calls as player.Session
 

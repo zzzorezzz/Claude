@@ -108,49 +108,76 @@ mp.register_script_message("switch-version", function()
     mp.commandv("script-message", "watchlist-switch-version")
 end)
 
--- An episode that takes a moment to open (found on its site just now): a box saying so,
--- with a bar moving along, instead of a player that looks stuck.
-local loading = { overlay = mp.create_osd_overlay("ass-events"), timer = nil, step = 0 }
+-- Anything loading (an episode opening - found on its site, a torrent's first part, a file -
+-- or a video stopping to load more): a box saying so, with a bar moving along, instead of a
+-- player that looks stuck. While something loads, Next and Previous wait (pressed again and
+-- again they'd only pile more on): they say so instead.
+local loading = { overlay = mp.create_osd_overlay("ass-events"), timer = nil, step = 0, busy = false, text = "" }
 local function loading_stop()
     if loading.timer then loading.timer:kill() end
     loading.timer = nil
+    loading.busy = false
     loading.overlay:remove()
 end
 local function loading_draw()
     local w, h = mp.get_osd_size()
     if not w or w == 0 then w, h = 1280, 720 end
     loading.overlay.res_x, loading.overlay.res_y = w, h
-    local title = mp.get_property("playlist/" .. (mp.get_property_number("playlist-pos", 0)) .. "/title") or "the next episode"
     local bw, bh = 360, 6
     local x0, y0 = (w - bw) / 2, h / 2 + 22
     local seg = bw / 4
     local pos = (loading.step * 9) % (bw + seg) - seg
     local a, b = math.max(0, pos), math.min(bw, pos + seg)
-    local box = string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H1A1414&\\1a&H30&\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+    local box = string.format([[{\an7\pos(%d,%d)\bord0\shad0\1c&H1A1414&\1a&H30&\p1}m 0 0 l %d 0 l %d %d l 0 %d{\p0}]],
         x0 - 24, y0 - 62, bw + 48, bw + 48, 100, 100)
-    local text = string.format("{\\an8\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c&HF2E9E6&}Getting %s ready…", w / 2, y0 - 48, title)
-    local track = string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H554A4A&\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+    local text = string.format([[{\an8\pos(%d,%d)\fs22\bord0\shad0\1c&HF2E9E6&}%s]], w / 2, y0 - 48, loading.text)
+    local track = string.format([[{\an7\pos(%d,%d)\bord0\shad0\1c&H554A4A&\p1}m 0 0 l %d 0 l %d %d l 0 %d{\p0}]],
         x0, y0, bw, bw, bh, bh)
-    local bar = b > a and string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&HFF7A8B&\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+    local bar = b > a and string.format([[{\an7\pos(%d,%d)\bord0\shad0\1c&HFF7A8B&\p1}m 0 0 l %d 0 l %d %d l 0 %d{\p0}]],
         x0 + a, y0, b - a, b - a, bh, bh) or ""
     loading.overlay.data = box .. "\n" .. text .. "\n" .. track .. "\n" .. bar
     loading.overlay:update()
     loading.step = loading.step + 1
 end
-mp.register_event("start-file", function()
-    loading_stop()
-    local path = mp.get_property("path") or ""
-    if not path:find("^https?://") then return end
-    loading.step = 0
-    -- (only when it takes a moment: one that opens at once shows nothing)
+local function loading_start(text)
+    if loading.timer then loading.timer:kill() end
+    loading.busy, loading.text, loading.step = true, text, 0
+    -- (shown only when it takes a moment: what opens at once shows nothing)
     loading.timer = mp.add_timeout(0.8, function()
         loading_draw()
         loading.timer = mp.add_periodic_timer(0.05, loading_draw)
     end)
+end
+mp.register_event("start-file", function()
+    local title = mp.get_property("playlist/" .. (mp.get_property_number("playlist-pos", 0)) .. "/title") or "the episode"
+    loading_start("Getting " .. title .. " ready…")
 end)
-mp.register_event("file-loaded", loading_stop)
+mp.register_event("file-loaded", function()
+    -- (opened paused - a watch party waiting for everyone: nothing is loading any more)
+    if mp.get_property_bool("pause") and not mp.get_property_bool("paused-for-cache") then loading_stop() end
+end)
 mp.register_event("end-file", loading_stop)
-mp.observe_property("playback-time", "number", function(_, t) if t and loading.timer then loading_stop() end end)
+mp.observe_property("playback-time", "number", function(_, t)
+    if t and loading.busy and not mp.get_property_bool("paused-for-cache") and not mp.get_property_bool("seeking") then
+        loading_stop()
+    end
+end)
+mp.observe_property("paused-for-cache", "bool", function(_, waiting)
+    if waiting then
+        if not loading.busy then loading_start("Loading…") end
+    elseif loading.busy and mp.get_property_number("playback-time") then
+        loading_stop()
+    end
+end)
+local function step(command, what)
+    if loading.busy then
+        mp.osd_message("Still loading - " .. what .. " in a moment", 1.5)
+        return
+    end
+    mp.command(command)
+end
+mp.register_script_message("next", function() step("playlist-next", "next episode") end)
+mp.register_script_message("prev", function() step("playlist-prev", "previous episode") end)
 
 -- A video from a site that's stuck loading for 5 seconds (it never starts, or stops to
 -- load and doesn't come back): a small box at the side offering another source. T (or a

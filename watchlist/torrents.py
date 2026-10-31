@@ -653,7 +653,7 @@ class Torrents:
                 if kind_of(of["path"]) == "video" and not self.complete(rec, of, progress):
                     rec["priorities"][other] = 0
                     handle.file_priority(int(other), 0)
-            if rec.get("paused"):
+            if rec.get("paused") or rec.pop("held", None):
                 rec["paused"] = False
                 handle.resume()
             self._wake(h, rec)
@@ -836,13 +836,12 @@ class Torrents:
                 self._save_soon()
 
     def _prefetch_next(self):
-        """While an episode streams, the three before and the three after it download too:
-        quietly while it's still coming, then faster once it's all here (the next one
-        first of all). Moving to another episode moves the window with it."""
+        """While an episode streams, the one after it and the one before it download too:
+        quietly while it's still coming, then as fast as it once it's all here. Moving to
+        another episode moves them with it (only the episode being watched counts)."""
         now = time.time()
-        for (h, index), at in list(self.reading.items()):
-            if now - at > 30:
-                continue
+        recent = [(at, key) for key, at in self.reading.items() if now - at <= 30]
+        for at, (h, index) in sorted(recent)[-1:]:
             rec = self.records.get(h)
             f = next((f for f in (rec or {}).get("files") or [] if f["index"] == index), None)
             try:
@@ -859,14 +858,14 @@ class Torrents:
             done = eps[here]["complete"]
             s, e = (int(x) for x in here.split(":"))
             nxt = eps.get(f"{s}:{e + 1}") or eps.get(f"{s + 1}:1")
-            # The three after it and the three before it (the next one first).
-            around = [nxt, eps.get(f"{s}:{e + 2}"), eps.get(f"{s}:{e + 3}"),
-                      eps.get(f"{s}:{e - 1}"), eps.get(f"{s}:{e - 2}"), eps.get(f"{s}:{e - 3}")]
-            for n, ep in enumerate(around):
+            last_before = max((k for k in eps if k.startswith(f"{s - 1}:")), key=lambda k: int(k.split(":")[1]),
+                              default=None) if s > 1 else None
+            prev = eps.get(f"{s}:{e - 1}") or (eps.get(last_before) if last_before else None)
+            for ep in (nxt, prev):
                 if not ep or ep["complete"]:
                     continue
-                # (while this one comes: just a little; after: the next one highest)
-                want = (7 if n == 0 else 4) if done else 1
+                # (while this one comes: just a little; once it's all here: as fast as it)
+                want = 7 if done else 1
                 other = self.records.get(ep["hash"])
                 handle = self.handles.get(ep["hash"])
                 if other is not None and handle is not None and int(other["priorities"].get(str(ep["index"]), 0)) < want:
@@ -874,6 +873,21 @@ class Torrents:
                     handle.file_priority(ep["index"], want)
                     self._wake(ep["hash"], other)          # (a torrent stopped as done: going again)
                     self._save_soon()
+
+    def stop_streaming(self):
+        """The player was closed: the torrents it was playing from stop downloading (what's
+        downloaded stays). Playing one of their episodes again starts them again."""
+        with self.lock:
+            hashes = {h for (h, _), at in self.reading.items() if time.time() - at < 600}
+            for h in hashes:
+                rec, handle = self.records.get(h), self.handles.get(h)
+                if rec is None or handle is None or rec.get("paused"):
+                    continue
+                rec["held"] = True
+                handle.pause()
+            self.reading.clear()
+            if hashes:
+                self._save_soon()
 
     def _stop_when_done(self):
         """Everything wanted is downloaded: the torrent stops, so it doesn't keep

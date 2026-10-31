@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, cdp, dialogs, discover, hlsfix, picker, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
+from . import ai, cdp, dialogs, discover, hlsfix, partyserver, picker, relay, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -55,9 +55,10 @@ class OnlineError(Exception):
 
 
 class ApiError(Exception):
-    def __init__(self, message, status=HTTPStatus.BAD_REQUEST):
+    def __init__(self, message, status=HTTPStatus.BAD_REQUEST, code=""):
         super().__init__(message)
         self.status = status
+        self.code = code          # (what the screens can act on: "no_server" - offer the other ways)
 
 
 def _inside(path, folder):
@@ -106,6 +107,7 @@ class App:
         self._finding = {}               # (title, episode) -> being found now (an Event)
         self._tried_sources = {}         # (title, episode) -> sources that didn't play there
         # What you showed the app on each site, finding a video yourself (picker.py).
+        phone_player.on_closed = self._player_exited          # (the phone's player closed)
         self._learned_path = self.data_dir / "learned-sites.json"
         webtools.LEARNED.update(read_json(self._learned_path, {}))
         # Sub or dub, switched in the player (the episodes after it follow); subtitle searches.
@@ -404,6 +406,11 @@ class App:
         return mpv
 
     def _party_ended(self, party, reason):
+        for part in getattr(party, "backend", None) or []:
+            try:
+                part.close() if hasattr(part, "close") else part.stop()
+            except Exception:  # noqa: BLE001
+                pass
         with self._party_lock:
             if self.party is party:
                 self.party = None
@@ -415,44 +422,26 @@ class App:
         if old and old.active:
             old.leave("you started another watch party")
 
-    def party_start(self, item=None, season=None, episode=None, path="", source="", site=""):
+    def party_start(self, item=None, season=None, episode=None, path="", source="", site="", how=""):
         """Host: open a private room and hand back an invite. The party isn't tied
         to anything playing: whatever you play while it's on, everyone follows.
-        With a title, its episode starts playing for the party too."""
+        With a title, its episode starts playing for the party too.
+
+        Where the party is: your server (Settings), else another of Syncplay's that works,
+        else - by itself - the backup relay (relay.py). If that fails too, you choose
+        (`how`): "direct" (your app is the server, guests come straight to your computer)."""
         self._need_mpv()
         with self._party_lock:
             current = self.party
+        note = ""
         if current and current.active and current.role == "host":
             party = current                  # already hosting: just play this in it
+        elif how == "direct":
+            party, note = self._party_direct()
         else:
-            room = syncplay.new_room()
-            chosen = self._party_server()
-            # Your server first; a public one that doesn't work right now: the next public one
-            # (and that one is kept in Settings for next time).
-            servers = [chosen] + ([x for x in syncplay.PUBLIC_SERVERS if x != chosen]
-                                  if chosen in syncplay.PUBLIC_SERVERS else [])
-            party, problem = None, None
-            for server in servers:
-                attempt = party_mod.Party(server, room, self._party_name(), "host",
-                                          context=metadata.ssl_context(), on_end=self._party_ended,
-                                          avatar=self.settings.get()["party_avatar"])
-                try:
-                    attempt.connect()
-                except party_mod.PartyError as e:
-                    problem = problem or e
-                    continue
-                party = attempt
-                break
-            if party is None:
-                raise ApiError(f"{problem} - press Find a working server", HTTPStatus.BAD_GATEWAY)
-            if party.server != chosen:
-                try:
-                    self.settings.update({"party_server": party.server})
-                except ValueError:
-                    pass
-            party.invite = syncplay.short_invite(party.server, room) or syncplay.make_invite(party.server, room, host=party.me)
-            self._start_party(party)
-        out = {"ok": True, "code": party.invite, "room": party.room, "server": party.server, "file": ""}
+            party, note = self._party_somewhere()
+        out = {"ok": True, "code": party.invite, "room": party.room, "server": party.server, "file": "",
+               "note": note, "via": getattr(party, "via", "syncplay")}
         if item is not None and source == "online":
             # Watch online (your own site): found there and played for everyone; the invite
             # then carries the site and the title, so guests find the same episode.
@@ -484,6 +473,92 @@ class App:
             out["file"] = target["name"]
             threading.Thread(target=self._party_hello, args=(party,), daemon=True).start()
         return out
+
+    def _party_host(self, server, room):
+        party = party_mod.Party(server, room, self._party_name(), "host", context=metadata.ssl_context(),
+                                on_end=self._party_ended, avatar=self.settings.get()["party_avatar"])
+        party.connect()
+        return party
+
+    def _party_somewhere(self):
+        """A party on Syncplay's servers (yours first, then any public one that works, kept in
+        Settings), else through the backup relay. ApiError (code "no_server") if nothing works."""
+        room = syncplay.new_room()
+        chosen = self._party_server()
+        servers = [chosen]
+        # (yours first; if it doesn't work, the others are checked all at once - quickly - and
+        # the first that works is used)
+        others = [x for x in syncplay.PUBLIC_SERVERS if x != chosen]
+
+        def more():
+            found = syncplay.working_server(others, stay=1.5) if others else ""
+            return [found] if found else []
+        for server in self._servers_to_try(servers, more):
+            try:
+                party = self._party_host(server, room)
+            except party_mod.PartyError:
+                continue
+            if server != chosen and server in syncplay.PUBLIC_SERVERS:
+                try:
+                    self.settings.update({"party_server": server})
+                except ValueError:
+                    pass
+            party.invite = syncplay.short_invite(party.server, room) or syncplay.make_invite(party.server, room, host=party.me)
+            party.via = "syncplay"
+            self._start_party(party)
+            return party, ""
+        # Syncplay's servers are all down: the backup relay, by itself.
+        own = partyserver.PartyServer()
+        port = own.listen(0, "127.0.0.1")
+        try:
+            hub, secret, index = relay.host(own)
+            party = self._party_host(f"127.0.0.1:{port}", relay.ROOM)
+        except (OSError, party_mod.PartyError) as e:
+            own.stop()
+            raise ApiError(f"none of the watch-party servers works right now, nor the backup relay ({e})",
+                           HTTPStatus.BAD_GATEWAY, code="no_server") from e
+        party.invite = syncplay.relay_invite(secret, index)
+        party.via, party.backend = "relay", [hub, own]
+        self._start_party(party)
+        return party, "Syncplay's servers are down right now, so this party goes through the backup relay (encrypted)."
+
+    @staticmethod
+    def _servers_to_try(first, more):
+        """`first`, then (only once those failed) what more() finds."""
+        yield from first
+        yield from more()
+
+    def _party_direct(self):
+        """Your app as the server: guests come straight to your computer. Your router is asked
+        to let them in (UPnP); if it doesn't, it works only for people on your network.
+        ApiError straight away if it can't work at all."""
+        own = partyserver.PartyServer()
+        port = own.listen(8999 if not launcher.ANDROID else 0)
+        party = None
+        try:
+            party = self._party_host(f"127.0.0.1:{port}", syncplay.new_room())
+        except party_mod.PartyError as e:
+            own.stop()
+            raise ApiError(f"your app couldn't run the party itself ({e})", HTTPStatus.BAD_GATEWAY) from e
+        opened = partyserver.open_port(port)
+        outside = partyserver.public_address() if opened else ""
+        local = partyserver.local_address()
+        if opened and outside:
+            address, note = f"{outside}:{port}", (f"Your app is the server: your router let it open port {port}, "
+                                                  "so people can join from anywhere.")
+        elif local and not local.startswith("127."):
+            address, note = f"{local}:{port}", ("Your app is the server, but your router didn't let it open a port: only "
+                                                "people on your network (the same Wi-Fi) can join. For others, set up your "
+                                                "own Syncplay server.")
+        else:
+            party.leave("no network")
+            own.stop()
+            raise ApiError("your app can't be the server here: this device isn't on a network others can reach",
+                           HTTPStatus.BAD_GATEWAY)
+        party.invite = syncplay.short_invite(address, party.room)
+        party.via, party.backend = "direct", [own]
+        self._start_party(party)
+        return party, note
 
     @staticmethod
     def _party_hello(party):
@@ -1411,7 +1486,8 @@ class App:
             mpv, item["id"], entries, start=start,
             extra_args=player.script_args(self.settings.get()["skip_intro"], self.settings.get()["theme"]) + list(extra),
             audio_langs="jpn,ja,japanese,eng,en" if item["type"] == "anime" else "",
-            on_progress=self._save_position, on_finished=self._finished_entry, first=first, playlist=playlist)
+            on_progress=self._save_position, on_finished=self._finished_entry, first=first, playlist=playlist,
+            on_exit=self._player_exited)
         session.listeners.append(self._player_message)
         return session
 
@@ -1442,7 +1518,7 @@ class App:
                 by_path = {v["path"]: v for v in videos}
                 here = ordered.index(path) if path in ordered else -1
                 after = ordered[here + 1:] if here >= 0 else []
-                before = ordered[max(0, here - 50):here] if around and here > 0 else []
+                before = ordered[:here] if around and here > 0 else []          # (every episode: the player lists them all)
 
                 def queued(p):
                     v = by_path[p]
@@ -1453,7 +1529,7 @@ class App:
                     if v.get("torrent"):
                         entry["torrent"] = v["torrent"]
                     return entry
-                entries += [queued(p) for p in after[:50]]
+                entries += [queued(p) for p in after]
                 if before:
                     entries[:0] = [queued(p) for p in before]
                     patch["first"] = len(before)
@@ -2420,6 +2496,14 @@ class App:
                 self._online_found.pop(k, None)
         return self.store.update(item["id"], patch) if patch else item
 
+    def _player_exited(self, session, *_):
+        """The player was closed: its torrents stop downloading - unless another player is
+        already playing (you went straight on to something else)."""
+        playing = phone_player.current() if launcher.ANDROID else self.player.session
+        if playing is not None and playing is not session and not playing.ended:
+            return
+        self.torrents.stop_streaming()
+
     @staticmethod
     def _key_numbers(key):
         """(season, episode) of a player entry's key ("1:3"); (None, None) for a film."""
@@ -2958,7 +3042,7 @@ class Handler(BaseHTTPRequestHandler):
                     body = self._body() if method in ("POST", "PUT") else {}
                     return self._json(getattr(self, "api_" + name)(body, *m.groups()))
                 except ApiError as e:
-                    return self._json({"error": str(e)}, e.status)
+                    return self._json({"error": str(e), **({"code": e.code} if e.code else {})}, e.status)
                 except metadata.MetadataError as e:
                     return self._json({"error": str(e)}, HTTPStatus.BAD_GATEWAY)
                 except torrents_mod.TorrentError as e:
@@ -3389,7 +3473,8 @@ class Handler(BaseHTTPRequestHandler):
     def api_party_start(self, body):
         item = self.app.item(str(body["item_id"])) if body.get("item_id") else None
         return self.app.party_start(item, int(body.get("season") or 1), int(body.get("episode") or 1),
-                                    str(body.get("path") or ""), str(body.get("source") or ""), str(body.get("site") or ""))
+                                    str(body.get("path") or ""), str(body.get("source") or ""), str(body.get("site") or ""),
+                                    how=str(body.get("how") or ""))
 
     def api_party_join(self, body):
         return self.app.party_join(str(body.get("code") or ""))
@@ -3737,12 +3822,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_find_party_server(self, body):
         """A watch-party server that answers now (Settings: Find a working server)."""
-        for addr in syncplay.PUBLIC_SERVERS:
-            if syncplay.answers(addr):
-                if body.get("save"):
-                    self.app.settings.update({"party_server": addr})
-                return {"server": addr}
-        raise ApiError("none of the public watch-party servers answered - check your internet connection")
+        addr = syncplay.working_server()
+        if not addr:
+            raise ApiError("none of Syncplay's watch-party servers is working right now - a watch party then "
+                           "goes through the backup relay by itself")
+        self.app.settings.update({"party_server": addr})          # (kept: used from now on)
+        return {"server": addr, "saved": True}
 
     def api_pick_start(self, body, item_id):
         return self.app.pick_start(self.app.item(item_id), body)

@@ -30,6 +30,8 @@ import ssl
 import threading
 import time
 
+from . import relay
+
 PROTOCOL_VERSION = "1.2.255"     # what Syncplay clients send, for old servers
 SYNCPLAY_VERSION = "1.7.7"
 FEATURES = {"sharedPlaylists": False, "chat": True, "uiMode": "CLI", "featureList": True,
@@ -139,8 +141,11 @@ class Party:
 
     def __init__(self, server, room, name, role, resolve=None, leader=None, context=None, on_end=None,
                  open_player=None, invite="", avatar="", open_link=None):
-        host, _, port = server.partition(":")
-        self.server_host, self.server_port = host, int(port or 8999)
+        if server.startswith("relay:"):
+            self.server_host, self.server_port = server, 0     # (through the backup relay: relay.py)
+        else:
+            host, _, port = server.partition(":")
+            self.server_host, self.server_port = host, int(port or 8999)
         self.server, self.room, self.name, self.role = server, room, name, role
         self.resolve, self.leader, self.context = resolve, leader, context
         self.on_end = on_end or (lambda party, reason: None)
@@ -181,17 +186,23 @@ class Party:
 
     def connect(self, timeout=10):
         try:
-            self.conn = Connection(self.server_host, self.server_port, timeout, self.context)
+            relayed = relay.parse(self.server)
+            if relayed:
+                self.conn = relay.Connection(*relayed, timeout=timeout)
+            else:
+                self.conn = Connection(self.server_host, self.server_port, timeout, self.context)
             self.conn.send({"Hello": {"username": self.name, "room": {"name": self.room},
                                       "version": PROTOCOL_VERSION, "realversion": SYNCPLAY_VERSION,
                                       "features": FEATURES}})
         except OSError as e:
-            raise PartyError(f"couldn't connect to the watch-party server {self.server} ({e})") from e
+            where = "the backup relay" if self.server.startswith("relay:") else f"the watch-party server {self.server}"
+            raise PartyError(f"couldn't connect to {where} ({e})") from e
         self.active = True
         threading.Thread(target=self._read_loop, daemon=True).start()
         if not self._joined.wait(timeout):
-            self.leave("the watch-party server didn't answer")
-            raise PartyError(f"the watch-party server {self.server} didn't answer")
+            where = "the backup relay" if self.server.startswith("relay:") else f"the watch-party server {self.server}"
+            self.leave(f"{where} didn't answer")
+            raise PartyError(f"{where} didn't answer")
         if self.ended:
             raise PartyError(self.ended)
         self.conn.send({"List": None})
@@ -257,6 +268,8 @@ class Party:
                 return
             self.active = False
             self.ended = self.ended or reason
+        self._joined.set()               # (still joining: that's over now, not after the wait)
+        self._listed.set()
         if self.conn:
             self.conn.close()
         self.on_end(self, self.ended)

@@ -65,6 +65,28 @@ public class PlayerActivity extends Activity {
     private PlayerView view;
     private TextView message;
     private TextView otherSource;
+    private android.widget.ProgressBar loadingBar;
+
+    /** Every episode of the list (the whole season or show), to play any of them. */
+    private void chooseEpisode() {
+        int n = player.getMediaItemCount();
+        if (n < 2) return;
+        String[] names = new String[n];
+        for (int i = 0; i < n; i++) {
+            CharSequence title = player.getMediaItemAt(i).mediaMetadata.title;
+            names[i] = (i == player.getCurrentMediaItemIndex() ? "▶  " : "") + (title != null ? title : "Episode " + (i + 1));
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Episodes")
+                .setItems(names, (d, which) -> {
+                    if (player.getPlaybackState() == Player.STATE_BUFFERING && which != player.getCurrentMediaItemIndex()) {
+                        show("Still loading - one moment", 1500);
+                        return;
+                    }
+                    player.seekTo(which, 0);
+                })
+                .show();
+    }
     private final Runnable offerOtherSource = () -> {
         if (otherSource != null && !session.isEmpty()) otherSource.setVisibility(View.VISIBLE);
     };
@@ -154,6 +176,31 @@ public class PlayerActivity extends Activity {
                 Gravity.END | Gravity.CENTER_VERTICAL);
         side.rightMargin = pad * 2;
         root.addView(otherSource, side);
+        // Anything loading: a thin bar moving along the top (and the player's own spinner).
+        loadingBar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        loadingBar.setIndeterminate(true);
+        loadingBar.setVisibility(View.GONE);
+        FrameLayout.LayoutParams top = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, pad / 2,
+                Gravity.TOP);
+        root.addView(loadingBar, top);
+        view.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS);
+        // Every episode of the list, to jump to any of them.
+        TextView episodes = new TextView(this);
+        episodes.setText("☰  Episodes");
+        episodes.setTextColor(Color.WHITE);
+        episodes.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        episodes.setBackgroundColor(0xB3141826);
+        episodes.setPadding(pad * 2, pad, pad * 2, pad);
+        episodes.setOnClickListener(v -> chooseEpisode());
+        FrameLayout.LayoutParams corner = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END);
+        corner.topMargin = pad * 2;
+        corner.rightMargin = pad * 2;
+        root.addView(episodes, corner);
+        view.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility ->
+                episodes.setVisibility(visibility == View.VISIBLE && player != null && player.getMediaItemCount() > 1
+                        ? View.VISIBLE : View.GONE));
+        episodes.setVisibility(View.GONE);
         setContentView(root);
         hideBars(view);
 
@@ -164,7 +211,35 @@ public class PlayerActivity extends Activity {
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(new DefaultDataSource.Factory(this, http)))
                 .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(15_000, 90_000, 1_500, 3_000).build())
                 .build();
-        view.setPlayer(player);
+        // Next and Previous wait while something loads (pressed again and again they'd only pile
+        // more on): they say so instead.
+        view.setPlayer(new androidx.media3.common.ForwardingPlayer(player) {
+            private boolean loading() {
+                if (getPlaybackState() != Player.STATE_BUFFERING) return false;
+                show("Still loading - one moment", 1500);
+                return true;
+            }
+
+            @Override
+            public void seekToNext() {
+                if (!loading()) super.seekToNext();
+            }
+
+            @Override
+            public void seekToNextMediaItem() {
+                if (!loading()) super.seekToNextMediaItem();
+            }
+
+            @Override
+            public void seekToPrevious() {
+                if (!loading()) super.seekToPrevious();
+            }
+
+            @Override
+            public void seekToPreviousMediaItem() {
+                if (!loading()) super.seekToPreviousMediaItem();
+            }
+        });
         try {
             JSONObject play = new JSONObject(getIntent().getStringExtra("json"));
             load(play);
@@ -187,6 +262,7 @@ public class PlayerActivity extends Activity {
             @Override
             public void onPlaybackStateChanged(int st) {
                 handler.removeCallbacks(offerOtherSource);
+                loadingBar.setVisibility(st == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
                 if (st == Player.STATE_BUFFERING) handler.postDelayed(offerOtherSource, 5000);
                 else otherSource.setVisibility(View.GONE);
                 if (st == Player.STATE_ENDED) {
