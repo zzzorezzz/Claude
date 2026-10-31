@@ -33,8 +33,7 @@ class StartsTest(unittest.TestCase):
                 time.sleep(0.3)
         if answer is None:
             proc.kill()
-            self.fail("the app didn't answer within a minute:
-" + proc.communicate()[0].decode("utf-8", "replace")[-3000:])
+            self.fail("the app didn't answer within a minute: " + proc.communicate()[0].decode("utf-8", "replace")[-3000:])
         self.assertEqual(answer.get("app"), "watchlist")
 
 
