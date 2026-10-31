@@ -2,6 +2,9 @@ name: Live sites (recommended sites, 5 seconds of three titles each)
 
 # Run by hand: it uses the internet (the sites themselves), so it isn't part of every build.
 on:
+  # By hand, or with "[live]" in a commit message (a branch's workflows can't be started by hand).
+  push:
+    branches: ["claude/**"]
   workflow_dispatch:
     inputs:
       sites:
@@ -14,6 +17,7 @@ permissions:
 
 jobs:
   mac:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[live]')
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
