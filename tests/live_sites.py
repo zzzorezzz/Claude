@@ -55,7 +55,7 @@ def play5(mpv, found, script):
         return 0.0, "mpv timed out"
     out = p.stdout + p.stderr
     pos = [float(x.split("POS ")[1].split()[0]) for x in out.splitlines() if "POS " in x]
-    return (max(pos) if pos else 0.0), ("" if pos and max(pos) >= 4.5 else out.strip().splitlines()[-3:])
+    return (max(pos) if pos else 0.0), ("" if pos and max(pos) >= 4.5 else [x for x in out.strip().splitlines() if "POS" not in x][-12:])
 
 
 def main(argv):

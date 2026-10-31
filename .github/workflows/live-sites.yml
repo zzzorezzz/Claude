@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   mac:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[live]')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[live')
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -40,15 +40,20 @@ jobs:
       - name: Every recommended site, three titles each, played for 5 seconds
         env:
           WATCHLIST_CHROMIUM_HOME: chromium-home
+          SITES: ${{ github.event.inputs.sites }}
+          MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           python - <<'PY'
-          import sys
+          import os, re, sys
           from pathlib import Path
           from watchlist import cdp
           cdp.HOME = Path("chromium-home")
           print("video finder:", cdp.find())
           from tests import live_sites
-          sys.exit(live_sites.main(["live-report.json", *"${{ github.event.inputs.sites }}".split()]))
+          # (sites by hand, or "[live: Name Name]" in the commit message)
+          named = re.search(r"\[live:([^\]]*)\]", os.environ.get("MESSAGE") or "")
+          sites = (os.environ.get("SITES") or (named.group(1) if named else "")).split()
+          sys.exit(live_sites.main(["live-report.json", *sites]))
           PY
 
       - uses: actions/upload-artifact@v4
