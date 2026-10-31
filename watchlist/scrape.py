@@ -29,8 +29,9 @@ the next episode starts straight away.
 
 import difflib
 import html
-import json
 import html.parser
+import http.client
+import json
 import re
 import threading
 import time
@@ -129,8 +130,15 @@ def _site_origin(site):
 
 # ---- reading pages
 
+def safe_url(url):
+    """An address as it can be asked for: spaces and other characters a request can't carry
+    encoded ("English Hi2.vtt" -> "English%20Hi2.vtt"); what's already encoded stays."""
+    return urllib.parse.quote(str(url).strip(), safe=":/?#[]@!$&'()*+,;=%~")
+
+
 def fetch(url, referer="", limit=MAX_PAGE, timeout=TIMEOUT, as_json=False, xhr=False):
     """(text, final url). Raises ScrapeError."""
+    url = safe_url(url)
     headers = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}
     if as_json:
         origin = f"{urllib.parse.urlsplit(url).scheme}://{urllib.parse.urlsplit(url).netloc}"
@@ -146,7 +154,7 @@ def fetch(url, referer="", limit=MAX_PAGE, timeout=TIMEOUT, as_json=False, xhr=F
     got = _fetch_impersonate(url, headers, timeout, limit) if as_json else None
     if got is not None:
         return got
-    req = urllib.request.Request(url, headers=headers)
+    req = urllib.request.Request(safe_url(url), headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=metadata.ssl_context()) as r:
             data = r.read(limit)
@@ -895,11 +903,11 @@ def _check(url, referer):
     if referer:
         headers["Referer"] = referer
     try:
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(safe_url(url), headers=headers)
         with urllib.request.urlopen(req, timeout=6, context=metadata.ssl_context()) as r:
             kind = (r.headers.get("Content-Type") or "").lower()
             head = r.read(2048)
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
         return False
     if head.lstrip().startswith(b"#EXTM3U"):
         return True
@@ -985,13 +993,13 @@ def qualities(url, headers=None):
     ([] for a single-quality stream or anything else)."""
     if ".m3u8" not in url.lower():
         return []
-    req = urllib.request.Request(url, headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
+    req = urllib.request.Request(safe_url(url), headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
                                                **{k: v for k, v in (headers or {}).items() if k in ("Referer", "Origin") and v}})
     try:
         with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
             text = r.read(512 * 1024).decode("utf-8", "replace")
             base = r.geturl()
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
         return []
     out, lines = [], text.splitlines()
     for i, line in enumerate(lines):
@@ -1029,7 +1037,7 @@ def _sub_links(data, base):
                 walk(v, label)
         elif isinstance(x, str) and re.match(r"(?:https?:)?//|/", x) and (
                 re.search(r"\.(?:vtt|srt|ass)(?:[?#]|$)|format=(?:srt|vtt)|/subs?/|subtitle", x, re.I)):
-            out.append((_sub_language(x, label), urllib.parse.urljoin(base, x)))
+            out.append((_sub_language(x, label), safe_url(urllib.parse.urljoin(base, x))))
     walk(data)
     return out
 
@@ -1046,13 +1054,14 @@ def pick_subtitle(urls, headers=None):
         if url in tried:
             continue
         tried.add(url)
-        req = urllib.request.Request(url, headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
+        url = safe_url(url)
+        req = urllib.request.Request(safe_url(url), headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
                                                    **{k: v for k, v in (headers or {}).items() if k in ("Referer", "Origin") and v}})
         try:
             with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
                 head = r.read(400000).decode("utf-8", "replace")
-        except (urllib.error.URLError, OSError, ValueError):
-            continue
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+            continue                          # (one subtitle file that can't be read never stops the video)
         if head.lstrip()[:1] in ("{", "["):
             try:
                 todo += sorted(_sub_links(json.loads(head), url))          # (a list of subtitles: its files)
@@ -1091,13 +1100,13 @@ def scrambled_playlist(url, headers=None):
     player gets to try."""
     if ".m3u8" not in url.lower():
         return False
-    req = urllib.request.Request(url, headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
+    req = urllib.request.Request(safe_url(url), headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
                                                **{k: v for k, v in (headers or {}).items()
                                                   if k in ("Referer", "Origin", "Cookie") and v}})
     try:
         with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
             head = r.read(64)
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
         return False
     return not head.lstrip().removeprefix(BOM).startswith(b"#EXTM3U")
 
@@ -1762,7 +1771,11 @@ class Scraper:
         # its player starts with is whatever was chosen there last (Dub, after a dub was played).
         labelled = auto_url == page_url and self._labelled_streams(page_url)
         if self._catcher() and (want == "sub" or auto_url != page_url) and not labelled:
-            got = self._catch_stream(auto_url, None)
+            # Sub: chosen on the page too when it has a switch for it (a player that remembers
+            # the last choice made there would start with the dub after one was played).
+            switch = None if auto_url != page_url else {"id": "switch:sub", "label": "Sub", "kind": "sub", "url": "",
+                                                        "how": "click", "exact": True}
+            got = self._catch_stream(auto_url, switch)
             if got:
                 out.update(url=got["url"], referer=got["referer"], headers=got.get("headers") or {}, subtitle=got.get("subtitle") or "")
                 if auto_url != page_url:
@@ -1782,7 +1795,7 @@ class Scraper:
         found = order_streams(streams(page), prefs)
         if want != "sub" and auto_url == page_url and not any(x["kind"] == want for x in found):
             # No dub server button: the player's own Sub / Dub switch, clicked by its name.
-            found.insert(0, {"id": f"switch:{want}", "label": want.title(), "kind": want, "url": "", "how": "click"})
+            found.insert(0, {"id": f"switch:{want}", "label": want.title(), "kind": want, "url": "", "how": "click", "exact": True})
         out["streams"] = [{k: x[k] for k in ("id", "label", "kind")} for x in found]
         if found:
             names = ", ".join(x["label"] + (f" ({x['kind']})" if x["kind"] else "") for x in found[:8])
@@ -1948,7 +1961,8 @@ class Scraper:
         choosing = f" and choosing {x['label']}" if x else ""
         self._note(f"Opening the episode in a hidden browser window{choosing}…")
         target = x["url"] if x and x["how"] == "page" and x.get("url") else page_url
-        caught = self.catch(target, click=({"label": x["label"], "kind": x["kind"]} if x and x["how"] != "page" else None))
+        caught = self.catch(target, click=({"label": x["label"], "kind": x["kind"], "exact": bool(x.get("exact"))}
+                                           if x and x["how"] != "page" else None))
         if not caught:
             return None
         headers = caught.get("headers") or {}

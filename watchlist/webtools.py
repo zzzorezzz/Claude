@@ -116,6 +116,8 @@ EPISODES_TAB_JS = r"""(() => {
 # Choose one of an episode's streams (a server / sub / dub button) in the page, by its
 # name: the hidden window then tells the app it clicked (a request to CLICKED).
 CLICKED = "https://watchanything.invalid/clicked"
+# ...or that the page has nothing to click for it (what it plays by itself is taken at once).
+NO_CLICK = "https://watchanything.invalid/nothing-to-click"
 CLICK_JS = r"""(() => {
   if (window.top !== window || window.__waClick) return; window.__waClick = true;
   const want = __WANT__;
@@ -130,10 +132,31 @@ CLICK_JS = r"""(() => {
     return false;
   };
   let tries = 0;
+  const opened = new Set();
+  const done = () => fetch('__CLICKED__').catch(() => {});
+  // Sub / dub (or a server) kept in a dropdown under the player: a <select> gets the
+  // option chosen; a dropdown button ("Sub ▾") is opened, so its options can be clicked.
+  const dropdowns = () => {
+    const label = norm(want.label);
+    for (const sel of document.querySelectorAll('select')) {
+      const opt = [...sel.options].find((o) => norm(o.textContent) === label) || [...sel.options].find((o) => norm(o.textContent).includes(label));
+      if (opt && sel.value !== opt.value) {
+        sel.value = opt.value;
+        sel.dispatchEvent(new Event('input', { bubbles: true }));
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return 'chosen';
+      }
+    }
+    const triggers = [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], [aria-haspopup="true"]')]
+      .filter((el) => !opened.has(el) && /^(sub|dub|raw|soft ?sub|hard ?sub|japanese|english|audio|language|server)/i.test((el.textContent || '').trim()));
+    if (triggers.length) { opened.add(triggers[0]); triggers[0].click(); return 'opened'; }
+    return '';
+  };
   const pick = () => {
     tries += 1;
-    const els = [...document.querySelectorAll('[data-server-id], [data-server], [data-type] a, [data-type] li, [data-type] button,'
-      + ' [data-link], [data-embed], [class*="server"] a, [class*="server"] li, [class*="server"] button, [class*="server-item"], [class*="episode"], a, button, li, span, div')];
+    const els = [...document.querySelectorAll('[role="option"], [role="menuitem"], [data-server-id], [data-server], [data-type] a, [data-type] li, [data-type] button,'
+      + ' [data-link], [data-embed], [class*="server"] a, [class*="server"] li, [class*="server"] button, [class*="server-item"], [class*="episode"], a, button, li, span, div')]
+      .filter((el) => !el.matches('[role="combobox"], [aria-haspopup]'));
     const label = norm(want.label);
     // The button itself, not a box around it: its name exactly, else the smallest match.
     const found = els.filter((el) => {
@@ -142,18 +165,22 @@ CLICK_JS = r"""(() => {
       return (text.includes(label) || title.includes(label)) && kindOk(el);
     });
     const exact = found.filter((el) => norm(el.textContent) === label);
-    const hit = (exact.length ? exact : found).sort((a, b) => norm(a.textContent).length - norm(b.textContent).length)[0];
+    const named = want.exact ? found.filter((el) => new RegExp(`^${label}(bed|s)?$`).test(norm(el.textContent))) : [];
+    const hit = (want.exact ? named : exact.length ? exact : found).sort((a, b) => norm(a.textContent).length - norm(b.textContent).length)[0];
     if (hit) {
-      const clickable = hit.closest('a, button, li, [role="button"]') || hit;
+      const clickable = hit.closest('[role="option"], [role="menuitem"], a, button, li, [role="button"]') || hit;
       clickable.click();
-      fetch('__CLICKED__').catch(() => {});
+      done();
       return;
     }
-    if (tries < 25) setTimeout(pick, 600);
+    const d = dropdowns();
+    if (d === 'chosen') { done(); return; }
+    if (want.exact && !d && !opened.size && tries >= 6) { fetch('__NO_CLICK__').catch(() => {}); return; }   // (no such switch here)
+    if (tries < 25) setTimeout(pick, d === 'opened' ? 350 : 600);
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(pick, 400));
   else setTimeout(pick, 400);
-})();""".replace("__CLICKED__", CLICKED)
+})();""".replace("__CLICKED__", CLICKED).replace("__NO_CLICK__", NO_CLICK)
 
 ADBLOCK = True                 # Settings → Browser → Block ads and pop-ups (kept current by the app)
 _pending = {}                  # address -> options, for a window about to open (see _options)
@@ -258,6 +285,10 @@ def _hook(opts, core):
         url = str(args.Request.Uri)
         if url.startswith(CLICKED):
             opts["clicked_at"] = time.time()
+            args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
+            return
+        if url.startswith(NO_CLICK):
+            opts["no_click"] = True
             args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
             return
         if opts.get("adblock") and blocked(url):
@@ -417,7 +448,7 @@ def catch_video(url, timeout=30, click=None):
                     if videos():
                         break
                     got.clear()
-                if click and not opts.get("clicked_at") and videos() and time.time() > deadline - timeout + 15:
+                if click and not opts.get("clicked_at") and videos() and (opts.get("no_click") or time.time() > deadline - timeout + 15):
                     break                   # the button wasn't found: what the page plays by itself
             found[:] = videos()
             if not found:

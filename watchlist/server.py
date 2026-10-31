@@ -2191,6 +2191,17 @@ class App:
         except ValueError:
             return None, None
 
+    def clear_connections(self, item, body):
+        """Everything a title is connected to, undone: its links to your own sites, the folder or
+        file you chose for it, and its torrent (with what it downloaded)."""
+        self.scraper.forget(item["id"])
+        for k in [k for k in self._online_found if k[0] == item["id"]]:
+            self._online_found.pop(k, None)
+        self._online_track.pop(item["id"], None)
+        self.torrents.replace_for(item["id"], "")
+        return self.store.update(item["id"], {"online_links": {}, "online_site_eps": {}, "local_folder": "",
+                                              "local_file": "", "local_broken": False})
+
     def scraped_unlink(self, item, body):
         """Forget the title found on a site (a wrong match, or to start over)."""
         site = next((x for x in self.settings.get().get("video_sites") or [] if x["id"] == body.get("site")), None)
@@ -2466,6 +2477,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/scraped", "play_scraped"),
         ("POST", r"/api/items/(\w+)/scraped/unlink", "scraped_unlink"),
         ("GET", r"/api/items/(\w+)/online/links", "online_links"),
+        ("POST", r"/api/items/(\w+)/connections/clear", "clear_connections"),
         ("POST", r"/api/party-server/find", "find_party_server"),
         ("GET", r"/api/items/(\w+)/subs", "subs_info"),
         ("POST", r"/api/items/(\w+)/subs/find", "find_subs"),
@@ -3306,6 +3318,9 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 continue
         raise ApiError("none of the public watch-party servers answered - check your internet connection")
+
+    def api_clear_connections(self, body, item_id):
+        return self.app.clear_connections(self.app.item(item_id), body)
 
     def api_online_links(self, body, item_id):
         return self.app.online_links(self.app.item(item_id))

@@ -2842,6 +2842,7 @@ function drawTitle(wrap) {
           <button class="btn btn-grey" data-t="party" title="Host a watch party: watch in sync with someone else, each on your own computer">${ICON.people} Watch together</button>
           <button class="btn btn-grey" data-t="trailer">${ICON.play} ${item.trailer ? 'Trailer' : 'Find trailer'}</button>
           <button class="btn btn-grey" data-t="all-watched" title="${item.in_watched ? 'Put it back in your everyday rows' : `Mark the whole ${isSeries(item) ? 'show' : 'film'} as watched: it moves to the Watched page`}">${item.in_watched ? '↩ Back to my list' : `${ICON.check} Watched it all`}</button>
+          <button class="btn btn-grey" data-t="clear-links" title="Remove everything this title is connected to: its links to your own sites, the folder or file you chose and its magnet">Delete connections</button>
           <button class="btn-round" data-t="menu" title="Collections & more">${ICON.plus}</button>
           <button class="btn-round" data-t="remove" title="Remove from list">${ICON.trash}</button>
         </div>
@@ -3448,6 +3449,15 @@ async function titleClick(wrap, e) {
   try {
     if (t === 'watch') openWatch(item);
     else if (t === 'vlc') openWatch(item, null, { player: 'vlc' });
+    else if (t === 'clear-links') {
+      const full = !simpleMode();
+      if (!(await confirmModal(`Delete everything ${item.title} is connected to?`,
+        `Its links to your own sites${full ? ', the folder or file you chose for it, and its magnet (with what it downloaded)' : ''} are removed. They're found again the next time you play it.`,
+        'Delete connections'))) return;
+      upsert(await api('POST', `/api/items/${item.id}/connections/clear`));
+      toast(`${item.title}'s connections deleted`);
+      render(); refreshOpenTitle();
+    }
     else if (t === 'trailer') playTrailer(wrap, item);
     else if (t === 'close-trailer') { $('.tm-trailer', wrap)?.remove(); }
     else if (t === 'youtube') api('POST', '/api/open', { url: `https://www.youtube.com/watch?v=${item.trailer}` }).catch(fail);
@@ -4764,7 +4774,8 @@ async function subsBarClick(wrap, e) {
   const b = e.target.closest('[data-sb]');
   if (!b || b.type === 'checkbox') return false;
   const item = findItem(wrap.dataset.itemId);
-  if (b.dataset.sb === 'add') openSubsMenu(wrap, item, b);
+  // (opened once this click is done: the click closing any open menu would close it at once)
+  if (b.dataset.sb === 'add') setTimeout(() => openSubsMenu(wrap, item, b), 0);
   else if (b.dataset.sb === 'show') openSubsJob(wrap, item);
   else if (b.dataset.sb === 'clear') {
     if (await confirmModal('Remove the subtitles?', `The subtitles added to ${item.title} are taken off (ones the app downloaded are deleted).`, 'Remove')) {

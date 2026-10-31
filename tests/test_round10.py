@@ -118,7 +118,8 @@ class PageTest(unittest.TestCase):
         with mock.patch.object(scraper, "episode_page", return_value=("https://site.test/watch/ep-1", {"url": "https://site.test/title"}, [])):
             got = scraper.resolve(site, item, 1, 1)
         self.assertEqual(got["url"], "https://cdn.test/master.m3u8")
-        scraper.catch.assert_called_once_with("https://site.test/watch/ep-1", click=None)
+        # (Sub chosen on the page when it has a switch named that; else what it plays by itself)
+        scraper.catch.assert_called_once_with("https://site.test/watch/ep-1", click={"label": "Sub", "kind": "sub", "exact": True})
 
     def test_anikoto_sub_and_dub_servers_come_from_its_server_list(self):
         page = "https://anikototv.to/watch/show-x1/ep-2"
@@ -188,7 +189,7 @@ class PageTest(unittest.TestCase):
         page = "https://www.miruro.test/watch/AbC/naruto?ep=1"
         with mock.patch.object(scraper, "episode_page", return_value=(page, {"url": page}, [])),                 mock.patch.object(scrape, "fetch", return_value=("<div id=player></div>", page)),                 mock.patch.object(scrape, "scrambled_playlist", return_value=False):
             got = scraper.resolve(site, anime("Naruto", id="mir"), 1, 1, track="dub")
-        scraper.catch.assert_called_once_with(page, click={"label": "Dub", "kind": "dub"})
+        scraper.catch.assert_called_once_with(page, click={"label": "Dub", "kind": "dub", "exact": True})
         self.assertEqual(got["stream"]["kind"], "dub")
         # (the choice you made before is kept: track= finds a version without changing it)
         self.assertNotEqual(scraper.memory["_sites"][site["url"]].get("kind"), "dub")
@@ -260,7 +261,7 @@ class PageTest(unittest.TestCase):
             got = scraper.resolve(site, item, 1, 1, stream="x:dub:HD-1")
         self.assertEqual(got["url"], "https://cdn.test/dub.m3u8")
         self.assertEqual(got["stream"]["kind"], "dub")
-        scraper.catch.assert_called_once_with("https://site.test/watch/ep-1", click={"label": "HD-1", "kind": "dub"})
+        scraper.catch.assert_called_once_with("https://site.test/watch/ep-1", click={"label": "HD-1", "kind": "dub", "exact": False})
 
     def test_videos_on_a_page(self):
         html = """<video><source src="/media/ep1-720p.mp4"></video>
