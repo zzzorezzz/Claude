@@ -308,6 +308,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[android]')
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # (two Android versions side by side: the build server's emulators aren't equally steady)
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [30, 33]
     steps:
       - uses: actions/checkout@v4
 
@@ -359,7 +364,7 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           # (a recent Android: its WebView runs the video finder's scripts in every frame)
-          api-level: 34
+          api-level: ${{ matrix.api }}
           target: default
           arch: x86_64
           disk-size: 4096M
@@ -375,7 +380,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-screenshots
+          name: android-screenshots-${{ matrix.api }}
           path: |
             android-*.png
             live-report-android.json
@@ -383,6 +388,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WatchAnything-android
+          name: WatchAnything-android-${{ matrix.api }}
           path: WatchAnything.apk
           retention-days: 90
