@@ -18,6 +18,38 @@ _lock = threading.Lock()
 _bridge = None          # the phone app's Java side (MainActivity.Bridge); None in tests
 
 
+def video_kind(entry):
+    """"hls" / "dash" for a stream from a site whose address doesn't say so (looked at:
+    its first bytes), "" otherwise. The phone's player picks how to read it by this."""
+    import urllib.request
+    path = str(entry.get("path") or "")
+    low = path.lower().split("?")[0]
+    if not path.startswith(("http://", "https://")) or "/online/" in path:
+        return ""
+    if low.endswith((".m3u8", ".m3u")):
+        return "hls"
+    if low.endswith(".mpd"):
+        return "dash"
+    if low.endswith((".mp4", ".mkv", ".webm", ".m4v", ".mov", ".avi", ".ts")):
+        return ""
+    headers = {k: v for k, v in (entry.get("headers") or {}).items() if k in ("User-Agent", "Origin", "Cookie")}
+    if entry.get("referer"):
+        headers["Referer"] = entry["referer"]
+    headers.setdefault("User-Agent", "Mozilla/5.0")
+    try:
+        req = urllib.request.Request(path, headers=dict(headers, Range="bytes=0-1023"))
+        with urllib.request.urlopen(req, timeout=12) as r:
+            kind = (r.headers.get("Content-Type") or "").lower()
+            head = r.read(1024).lstrip()
+    except Exception:  # noqa: BLE001 - left to the player
+        return ""
+    if head.startswith(b"#EXTM3U") or "mpegurl" in kind:
+        return "hls"
+    if b"<MPD" in head[:400] or "dash+xml" in kind:
+        return "dash"
+    return ""
+
+
 def set_bridge(bridge):
     global _bridge
     _bridge = bridge
@@ -42,9 +74,12 @@ class PhoneSession:
 
     def launch(self):
         """What the phone app needs to open the player for this."""
+        for e in self.entries:
+            if "mime" not in e:
+                e["mime"] = video_kind(e)
         return {"session": self.id, "item_id": self.item_id, "start": self.start_at, "index": self.index, "paused": self.start_paused,
                 "keep_open": self.keep_open, "anime": self.anime, "party": self.party,
-                "entries": [{k: e.get(k) for k in ("path", "sub", "key", "label", "referer", "headers")}
+                "entries": [{k: e.get(k) for k in ("path", "sub", "key", "label", "referer", "headers", "mime")}
                              for e in self.entries]}
 
     def open(self):

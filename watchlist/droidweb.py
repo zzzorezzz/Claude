@@ -8,6 +8,7 @@ playlist at an address that doesn't say so is caught by MANIFEST_JS instead,
 which looks at what the page's own fetch/XHR got back."""
 
 import json
+import re
 import threading
 import time
 
@@ -42,6 +43,23 @@ MANIFEST_JS = r"""(() => {
 })();""".replace("__MANIFEST__", MANIFEST)
 
 
+_STATIC = re.compile(r"\.(js|mjs|css|png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|eot|ts|m4s|aac|mp3|m4a|mp4|webm|vtt|srt|ass|"
+                     r"html?|php|json|xml|txt|map|wasm|key)$", re.I)
+
+
+def _might_be_playlist(url):
+    """An address a playlist could be at: not a page's own parts (scripts, pictures, fonts),
+    not a piece of a video, not an ad."""
+    import urllib.parse
+    from . import webtools
+    if not url.startswith(("http://", "https://")) or webtools.blocked(url):
+        return False
+    path = urllib.parse.urlsplit(url).path
+    if ".m3u8" in path.lower() or ".mpd" in path.lower():
+        return False                 # (said already: caught as it is)
+    return not _STATIC.search(path)
+
+
 def available():
     bridge = launcher.android_bridge
     return launcher.ANDROID and bridge is not None and hasattr(bridge, "pageOpen")
@@ -56,6 +74,7 @@ class Page:
         self.on_request, self.on_response, self.on_closed = on_request, on_response, on_closed
         self.loaded = threading.Event()
         self.seen = {}               # address -> its request's headers (for what MANIFEST_JS finds)
+        self._peeks = 0
         blocked = sorted(webtools.AD_HOSTS) if (webtools.ADBLOCK if adblock is None else adblock) else []
         self.id = str(self.bridge.pageOpen(json.dumps([MANIFEST_JS, *scripts]), json.dumps(blocked)))
         self.ua = str(self.bridge.pageUserAgent())
@@ -92,6 +111,27 @@ class Page:
             self.seen[u] = headers
         if self.on_request:
             self.on_request(u, headers, ev.get("k") or "")
+        # The phone's browser tells requests, not what came back: an address that doesn't
+        # say what it is (a playlist at ".../stream?id=...") is looked at, in case.
+        if self.on_response and ev.get("k") != "Document" and self._peeks < 80 and _might_be_playlist(u):
+            self._peeks += 1
+            threading.Thread(target=self._peek, args=(u, headers), daemon=True).start()
+
+    def _peek(self, u, headers):
+        import urllib.request
+        h = {k: v for k, v in headers.items() if k in ("User-Agent", "Referer", "Origin", "Cookie")}
+        h.setdefault("User-Agent", self.ua)
+        try:
+            req = urllib.request.Request(u, headers=dict(h, Range="bytes=0-511"))
+            with urllib.request.urlopen(req, timeout=10) as r:
+                kind = (r.headers.get("Content-Type") or "").lower()
+                head = r.read(512).lstrip()
+        except Exception:  # noqa: BLE001
+            return
+        if head.startswith(b"#EXTM3U") or "mpegurl" in kind:
+            self.on_response(u, "application/vnd.apple.mpegurl", headers)
+        elif b"<MPD" in head[:400] or "dash+xml" in kind:
+            self.on_response(u, "application/dash+xml", headers)
 
     def go(self, url):
         self.bridge.pageGo(self.id, url)

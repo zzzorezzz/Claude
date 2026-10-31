@@ -221,7 +221,8 @@ public class PlayerActivity extends Activity {
         for (int i = 0; i < entries.length(); i++) {
             String p = entries.getJSONObject(i).optString("path", "").toLowerCase();
             if (p.contains("/online/")) continue;
-            if (p.contains(".mpd")) hint = MimeTypes.APPLICATION_MPD;
+            String kind = entries.getJSONObject(i).optString("mime", "");
+            if ("dash".equals(kind) || p.contains(".mpd")) hint = MimeTypes.APPLICATION_MPD;
             else if (p.contains(".mp4") || p.contains(".mkv") || p.contains(".webm")) hint = null;
             if (p.startsWith("http")) break;
         }
@@ -235,7 +236,10 @@ public class PlayerActivity extends Activity {
                     .setUri(toUri(e.getString("path")))
                     .setMediaId(e.optString("key", "movie"))
                     .setMediaMetadata(new MediaMetadata.Builder().setTitle(e.optString("label")).build());
-            if (e.getString("path").contains("/online/") && hint != null) b.setMimeType(hint);
+            String kind = e.optString("mime", "");
+            if ("hls".equals(kind)) b.setMimeType(MimeTypes.APPLICATION_M3U8);
+            else if ("dash".equals(kind)) b.setMimeType(MimeTypes.APPLICATION_MPD);
+            else if (e.getString("path").contains("/online/") && hint != null) b.setMimeType(hint);
             String sub = e.optString("sub", "");
             if (!sub.isEmpty() && !"null".equals(sub)) {
                 b.setSubtitleConfigurations(Collections.singletonList(
