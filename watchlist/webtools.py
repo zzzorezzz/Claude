@@ -18,6 +18,7 @@
    app every request, in every frame).
 """
 
+import os
 import re
 import sys
 import threading
@@ -204,13 +205,23 @@ def _webview():
     return launcher._webview
 
 
+def _chromium():
+    """Pages are opened in a hidden Chromium (cdp.py) instead of Edge windows: on a Mac and
+    Linux (and on Windows when asked to, to test it)."""
+    from . import launcher
+    return not launcher.ANDROID and (sys.platform != "win32" or os.environ.get("WATCHLIST_CDP") == "1")
+
+
 def can_catch():
-    """Whether videos can be caught from pages (Windows, in the app's own window)."""
+    """Whether videos can be caught from pages: in the app's own Edge windows on Windows,
+    in a hidden Chromium elsewhere."""
+    if _chromium():
+        return True
     return _webview() is not None and sys.platform == "win32"
 
 
 def can_render():
-    return _webview() is not None
+    return _chromium() or _webview() is not None
 
 
 def _options(window):
@@ -379,6 +390,9 @@ def _hidden_window(url, opts, title="Watch Anything"):
 
 def render(url, timeout=20, settle=2.5):
     """(page's HTML after its JavaScript has run, its address), or None."""
+    if _chromium():
+        from . import cdp
+        return cdp.render(url, timeout, settle)
     if not can_render():
         return None
     with _lock:
@@ -415,6 +429,9 @@ def catch_video(url, timeout=30, click=None):
     """{"url", "headers", "subs"} for the video a page's player asks for, or None. With
     `click` ({"label", "kind"}), that stream's button is clicked first, and only
     what the player asks for after it counts."""
+    if _chromium():
+        from . import cdp
+        return cdp.catch_video(url, timeout, click)
     if not can_catch():
         return None
     found, got = [], threading.Event()

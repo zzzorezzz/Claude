@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, dialogs, discover, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
+from . import ai, cdp, dialogs, discover, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -107,6 +107,11 @@ class App:
         # Sub or dub, switched in the player (the episodes after it follow); subtitle searches.
         self._online_track, self._subjobs = {}, {}
         threading.Thread(target=self._clean_subs, daemon=True).start()
+        # Elsewhere than Windows, videos are found in a hidden Chromium kept in the app's folder
+        # (the one on the computer, or a small one fetched once - now, so it's ready).
+        cdp.HOME = self.data_dir / "video-finder"
+        if webtools.can_catch() and sys.platform != "win32" and not cdp.find():
+            threading.Thread(target=self._get_chromium, daemon=True).start()
         self.scraper.can_render, self.scraper.can_catch = webtools.can_render, webtools.can_catch
         self._connected_jobs = {}           # Everything connected being looked for: how far along
         self._filler = ThreadPoolExecutor(4, thread_name_prefix="fill")   # titles added straight away
@@ -1778,12 +1783,19 @@ class App:
         session.swap(fresh, session.position() or 0)
         session.send(["show-text", f"Now playing the {other}", 2500])
 
+    @staticmethod
+    def _get_chromium():
+        try:
+            cdp.download()
+        except Exception:  # noqa: BLE001 - tried again when a video is looked for
+            pass
+
     def shutdown(self):
         """Quitting: your place saved, the player closed, torrents saved and stopped, the
         watch party left, and any program the app started ended."""
         for step in (lambda: self.player.session and self.player.session.stop(),
                      lambda: self.party and self.party.leave("closed the app"),
-                     self.torrents.shutdown):
+                     self.torrents.shutdown, cdp.shutdown):
             try:
                 step()
             except Exception:  # noqa: BLE001 - quitting goes on whatever happens

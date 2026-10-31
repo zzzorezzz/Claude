@@ -1,0 +1,54 @@
+name: Live sites (recommended sites, 5 seconds of three titles each)
+
+# Run by hand: it uses the internet (the sites themselves), so it isn't part of every build.
+on:
+  workflow_dispatch:
+    inputs:
+      sites:
+        description: "Only these sites (names, space-separated; empty: all)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: The player (mpv) and the app's own Python packages
+        run: |
+          brew install mpv
+          python -m pip install certifi yt-dlp curl_cffi
+          which mpv && mpv --version | head -1
+
+      - name: The video finder's Chromium, fetched as the app does on a Mac without Chrome
+        run: |
+          python -c "from pathlib import Path; from watchlist import cdp; cdp.HOME = Path('chromium-home'); print(cdp.download())"
+
+      - name: Every recommended site, three titles each, played for 5 seconds
+        env:
+          WATCHLIST_CHROMIUM_HOME: chromium-home
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          from watchlist import cdp
+          cdp.HOME = Path("chromium-home")
+          print("video finder:", cdp.find())
+          from tests import live_sites
+          sys.exit(live_sites.main(["live-report.json", *"${{ github.event.inputs.sites }}".split()]))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-sites-mac
+          path: live-report.json
