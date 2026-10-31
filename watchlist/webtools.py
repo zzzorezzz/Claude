@@ -321,7 +321,7 @@ def _hook(opts, core):
 
 def page_script(window):
     """Elsewhere than Windows: the ad-blocking script, run in each page once it has loaded."""
-    if sys.platform == "win32":
+    if sys.platform == "win32" or window is None:
         return
 
     def loaded():

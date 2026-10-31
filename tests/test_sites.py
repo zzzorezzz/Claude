@@ -350,7 +350,7 @@ class TvAndFilmTest(SiteBase):
         state = self.find()
         self.assertEqual(state["error"], "", state["log"])
         self.assertEqual(state["added"]["hash"], h(FILM), state["choices"])
-        self.assertEqual(FakeSite.searches[0], "Inception 2010")
+        self.assertIn("Inception 2010", FakeSite.searches)        # (searched at once with the others: any order)
 
     def test_sites_only_for_their_kinds(self):
         self.item = self.app.store.get(self.item["id"])          # an anime: this site is for TV and films
