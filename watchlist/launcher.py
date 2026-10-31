@@ -477,7 +477,8 @@ def open_app_window(url, browser="", storage=None):
                 background_color="#0d0f1a")
             # Closing the app's window quits the whole app: its other windows, the player,
             # torrents and everything else it started (nothing keeps running unseen).
-            dialogs.window.events.closed += lambda: on_quit()
+            if dialogs.window is not None:
+                dialogs.window.events.closed += lambda: on_quit()
             _webview = webview
             path = _prepare_storage(storage)
             webview.start(private_mode=not path, storage_path=path)
