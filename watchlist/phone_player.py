@@ -24,11 +24,11 @@ def set_bridge(bridge):
 
 
 class PhoneSession:
-    def __init__(self, item_id, entries, start=0.0, paused=False, keep_open=False, anime=False):
+    def __init__(self, item_id, entries, start=0.0, paused=False, keep_open=False, anime=False, index=0):
         self.id = uuid.uuid4().hex[:12]
         self.item_id, self.entries = item_id, list(entries)
         self.start_at, self.start_paused, self.keep_open, self.anime = start, paused, keep_open, anime
-        self.index, self.pos, self.dur, self.paused = 0, None, None, paused
+        self.index, self.pos, self.dur, self.paused = index, None, None, paused
         self.pos_at = 0.0
         self.listeners = []
         self.connected, self.error, self.ended = False, "", False
@@ -42,9 +42,10 @@ class PhoneSession:
 
     def launch(self):
         """What the phone app needs to open the player for this."""
-        return {"session": self.id, "item_id": self.item_id, "start": self.start_at, "paused": self.start_paused,
+        return {"session": self.id, "item_id": self.item_id, "start": self.start_at, "index": self.index, "paused": self.start_paused,
                 "keep_open": self.keep_open, "anime": self.anime, "party": self.party,
-                "entries": [{k: e.get(k) for k in ("path", "sub", "key", "label", "referer")} for e in self.entries]}
+                "entries": [{k: e.get(k) for k in ("path", "sub", "key", "label", "referer", "headers")}
+                             for e in self.entries]}
 
     def open(self):
         """Open the player from here (a guest following the host)."""

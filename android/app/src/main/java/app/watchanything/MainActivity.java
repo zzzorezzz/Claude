@@ -42,6 +42,7 @@ public class MainActivity extends Activity {
     private View fullscreen;
     private ValueCallback<Uri[]> pickCallback;
     private WebChromeClient chrome;
+    private Pages pages;
     static int port = 0;
 
     /** What the app's engine calls to open a link (Python → Java). */
@@ -58,6 +59,31 @@ public class MainActivity extends Activity {
         /** A watch party telling the open player what to do. */
         public void playerCommand(String session, String json) {
             PlayerActivity.command(session, json);
+        }
+
+        // The video finder's hidden pages (Pages.java, droidweb.py).
+        public String pageOpen(String scripts, String blocked) {
+            return pages.open(scripts, blocked);
+        }
+
+        public String pageUserAgent() {
+            return pages.userAgent();
+        }
+
+        public void pageGo(String id, String url) {
+            pages.go(id, url);
+        }
+
+        public String pageRun(String id, String js) {
+            return pages.run(id, js);
+        }
+
+        public String pageEvents(String id) {
+            return pages.events(id);
+        }
+
+        public void pageClose(String id) {
+            pages.close(id);
         }
     }
 
@@ -101,6 +127,7 @@ public class MainActivity extends Activity {
         web.setBackgroundColor(Color.parseColor("#0d0f1a"));
         root.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        pages = new Pages(this, root);
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -167,6 +194,14 @@ public class MainActivity extends Activity {
                     port = android.callAttr("start", new Bridge(), getFilesDir().getAbsolutePath()).toInt();
                 }
                 runOnUiThread(() -> web.loadUrl("http://127.0.0.1:" + port + "/"));
+                // The build server's live check of the recommended sites (adb: --es live "names or all").
+                String live = getIntent().getStringExtra("live");
+                if (live != null) {
+                    String only = "all".equals(live) ? "" : live;
+                    Python.getInstance().getModule("watchlist.livecheck").callAttr("run_phone",
+                            getFilesDir().getAbsolutePath() + "/live-report.json",
+                            Python.getInstance().getBuiltins().callAttr("str", only).callAttr("split"));
+                }
             } catch (Throwable e) {
                 String msg = String.valueOf(e.getMessage()).replace("<", "&lt;");
                 runOnUiThread(() -> web.loadDataWithBaseURL(null,

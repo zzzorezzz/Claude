@@ -1922,12 +1922,18 @@ class App:
             self._party_now(hosting, entry, upcoming=True)      # guests start finding it now
         hold = bool(hosting and any(p != hosting.me for p in hosting.people))
         if launcher.ANDROID:
-            session = phone_player.PhoneSession(item["id"], [entry], start, paused=hold, anime=item["type"] == "anime")
+            # The whole season in the phone's player too, each episode found as it opens.
+            entries, first = self._online_playlist(item, site, entry)
+            session = phone_player.PhoneSession(item["id"], entries, start, paused=hold, anime=item["type"] == "anime",
+                                                index=first)
+            self._online_found[(item["id"], key)] = (site, found, time.time())
             if hosting:
                 session.party = True
                 hosting.attach(session, hold=hold)
                 self._party_now(hosting, entry)
             self.store.update(item["id"], patch)
+            if series:
+                threading.Thread(target=self._link_around, args=(item["id"], site, key, session), daemon=True).start()
             return dict(result, **session.launch(), player="android", resumed_at=start)
         mpv = player.find_mpv()
         if not mpv:
@@ -2010,7 +2016,8 @@ class App:
         track = self._online_track.get(item_id) or track
         site, found = self._online_find(item, season, episode, track=track, prefer=site_id)
         self._online_found[(item_id, key)] = (site, found, time.time())
-        threading.Thread(target=self._link_around, args=(item_id, site, key, self.player.session), daemon=True).start()
+        playing = phone_player.current() if launcher.ANDROID else self.player.session
+        threading.Thread(target=self._link_around, args=(item_id, site, key, playing), daemon=True).start()
         return found["url"]
 
     def _online_event(self, session, item_id, msg):

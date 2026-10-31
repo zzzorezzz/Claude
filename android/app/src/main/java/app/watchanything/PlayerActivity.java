@@ -193,16 +193,37 @@ public class PlayerActivity extends Activity {
         inParty = play.optBoolean("party", false);
         anime = play.optBoolean("anime", anime);
         JSONArray entries = play.getJSONArray("entries");
-        // A video from your own site: asked for as if from its page (some sites check).
+        // A video from a site: asked for as its page asked (the same Referer, Origin, browser
+        // and cookies: sites check).
         for (int i = 0; i < entries.length(); i++) {
-            String referer = entries.getJSONObject(i).optString("referer", "");
+            JSONObject e = entries.getJSONObject(i);
+            String referer = e.optString("referer", "");
             if (!referer.isEmpty() && !"null".equals(referer)) {
                 Map<String, String> headers = new HashMap<>();
                 headers.put("Referer", referer);
+                String agent = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Mobile Safari/537.36";
+                JSONObject more = e.optJSONObject("headers");
+                if (more != null) {
+                    for (java.util.Iterator<String> it = more.keys(); it.hasNext(); ) {
+                        String k = it.next();
+                        if ("User-Agent".equalsIgnoreCase(k)) agent = more.optString(k, agent);
+                        else if ("Origin".equalsIgnoreCase(k) || "Cookie".equalsIgnoreCase(k)) headers.put(k, more.optString(k));
+                    }
+                }
                 http.setDefaultRequestProperties(headers);
-                http.setUserAgent("Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Mobile Safari/537.36");
+                http.setUserAgent(agent);
                 break;
             }
+        }
+        // The season's other episodes are the app's own links (found as they open): the same
+        // kind of video as the one found already, which the player can't tell from the link.
+        String hint = MimeTypes.APPLICATION_M3U8;
+        for (int i = 0; i < entries.length(); i++) {
+            String p = entries.getJSONObject(i).optString("path", "").toLowerCase();
+            if (p.contains("/online/")) continue;
+            if (p.contains(".mpd")) hint = MimeTypes.APPLICATION_MPD;
+            else if (p.contains(".mp4") || p.contains(".mkv") || p.contains(".webm")) hint = null;
+            if (p.startsWith("http")) break;
         }
         List<MediaItem> items = new ArrayList<>();
         keys.clear();
@@ -214,6 +235,7 @@ public class PlayerActivity extends Activity {
                     .setUri(toUri(e.getString("path")))
                     .setMediaId(e.optString("key", "movie"))
                     .setMediaMetadata(new MediaMetadata.Builder().setTitle(e.optString("label")).build());
+            if (e.getString("path").contains("/online/") && hint != null) b.setMimeType(hint);
             String sub = e.optString("sub", "");
             if (!sub.isEmpty() && !"null".equals(sub)) {
                 b.setSubtitleConfigurations(Collections.singletonList(
@@ -232,7 +254,8 @@ public class PlayerActivity extends Activity {
                 .setSelectUndeterminedTextLanguage(true)
                 .build());
         long start = (long) (play.optDouble("start", 0) * 1000);
-        player.setMediaItems(items, 0, start);
+        int first = Math.max(0, Math.min(items.size() - 1, play.optInt("index", 0)));
+        player.setMediaItems(items, first, start);
         player.prepare();
         player.setPlayWhenReady(!play.optBoolean("paused", false));
     }

@@ -305,7 +305,7 @@ class _Page:
     """A page (and every frame in it, the players from other sites too)."""
 
     def __init__(self, browser, scripts, on_request=None, on_response=None):
-        self.b, self.scripts = browser, scripts
+        self.b, self.scripts, self.ua = browser, scripts, browser.ua
         self.on_request, self.on_response = on_request, on_response
         self.sessions, self.extra = set(), {}
         self.loaded = threading.Event()
@@ -390,10 +390,17 @@ def _header(headers, name):
     return next((v for k, v in headers.items() if k.lower() == name.lower()), "")
 
 
-def catch_video(url, timeout=30, click=None):
+def _chromium_page(scripts, on_request=None, on_response=None):
+    return _Page(_get_browser(), scripts, on_request, on_response)
+
+
+def catch_video(url, timeout=30, click=None, open_page=None):
     """As webtools.catch_video: {"url", "headers", "subs"} for the video a page's player
-    asks for (after clicking `click` when given), or None."""
+    asks for (after clicking `click` when given), or None. `open_page` opens the page
+    somewhere else than this Chromium (the phone's own WebView: droidweb.py)."""
     from . import webtools
+    open_page = open_page or _chromium_page
+    page = None
     found, got, opts = [], threading.Event(), {"subs": []}
 
     def keep(video, headers):
@@ -407,7 +414,7 @@ def catch_video(url, timeout=30, click=None):
             # (an Origin the browser didn't report: the page's, as a browser sends it)
             origin = _header(headers, "Origin") or ("{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(ref)) if ref else "")
             found.append((video, {k: v for k, v in {"Referer": ref, "Origin": origin,
-                                                    "User-Agent": _header(headers, "User-Agent") or _browser.ua,
+                                                    "User-Agent": _header(headers, "User-Agent") or (page.ua if page else ""),
                                                     "Cookie": _header(headers, "Cookie")}.items() if v}, time.time()))
             if not click or opts.get("clicked_at"):
                 got.set()
@@ -437,7 +444,7 @@ def catch_video(url, timeout=30, click=None):
         scripts.append(webtools.ADBLOCK_JS)
     with _lock:
         try:
-            page = _Page(_get_browser(), scripts, on_request, on_response)
+            page = open_page(scripts, on_request, on_response)
         except (CDPError, OSError, ValueError, KeyError, StopIteration):
             return None
         try:
@@ -467,12 +474,13 @@ def catch_video(url, timeout=30, click=None):
             page.close()
 
 
-def render(url, timeout=20, settle=2.5):
+def render(url, timeout=20, settle=2.5, open_page=None):
     """As webtools.render: (the page's HTML after its scripts ran, its address), or None."""
     from . import webtools
+    open_page = open_page or _chromium_page
     with _lock:
         try:
-            page = _Page(_get_browser(), [webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
+            page = open_page([webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
         except (CDPError, OSError, ValueError, KeyError, StopIteration):
             return None
         try:

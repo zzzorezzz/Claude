@@ -212,16 +212,22 @@ def _chromium():
     return not launcher.ANDROID and (sys.platform != "win32" or os.environ.get("WATCHLIST_CDP") == "1")
 
 
+def _phone():
+    """On a phone: pages open in the phone app's hidden WebView (droidweb.py)."""
+    from . import droidweb
+    return droidweb.available()
+
+
 def can_catch():
     """Whether videos can be caught from pages: in the app's own Edge windows on Windows,
-    in a hidden Chromium elsewhere."""
-    if _chromium():
+    in a hidden Chromium on a computer elsewhere, in a hidden WebView on a phone."""
+    if _chromium() or _phone():
         return True
     return _webview() is not None and sys.platform == "win32"
 
 
 def can_render():
-    return _chromium() or _webview() is not None
+    return _chromium() or _phone() or _webview() is not None
 
 
 def _options(window):
@@ -393,6 +399,9 @@ def render(url, timeout=20, settle=2.5):
     if _chromium():
         from . import cdp
         return cdp.render(url, timeout, settle)
+    if _phone():
+        from . import droidweb
+        return droidweb.render(url, timeout, settle)
     if not can_render():
         return None
     with _lock:
@@ -432,6 +441,9 @@ def catch_video(url, timeout=30, click=None):
     if _chromium():
         from . import cdp
         return cdp.catch_video(url, timeout, click)
+    if _phone():
+        from . import droidweb
+        return droidweb.catch_video(url, timeout, click)
     if not can_catch():
         return None
     found, got = [], threading.Event()

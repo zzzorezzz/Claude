@@ -1631,3 +1631,11 @@ body.simple .ep-file { display: none !important; }
 .set-save .btn { pointer-events: auto; box-shadow: 0 6px 20px rgba(0, 0, 0, .45); }
 .set-save .unsaved-note { position: absolute; left: 0; bottom: calc(100% + 8px); margin: 0; white-space: nowrap;
   font-size: 12px; padding: 5px 10px; background: var(--panel-2); box-shadow: 0 6px 20px rgba(0, 0, 0, .45); }
+
+/* Touch screens: tapping a poster opens its page, so its buttons are just Watch and More,
+   big enough for a finger. */
+@media (pointer: coarse) {
+  .card-buttons .cb[data-act="info"] { display: none; }
+  .card-buttons .cb { width: 36px; height: 36px; }
+  .card-buttons .cb svg { width: 18px; height: 18px; }
+}

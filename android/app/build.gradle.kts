@@ -13,8 +13,8 @@ android {
         applicationId = "app.watchanything"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 132
+        versionName = "1.3.2"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
@@ -47,6 +47,8 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
     implementation("androidx.media3:media3-ui:1.2.1")
+    // The video finder's hidden pages: scripts in every frame before the page's own.
+    implementation("androidx.webkit:webkit:1.8.0")
     // Torrents: the same libtorrent as on a computer, for the phone's processors.
     val jlibtorrent = "2.0.12.9"
     implementation("com.frostwire:jlibtorrent:$jlibtorrent")
