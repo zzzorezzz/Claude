@@ -298,8 +298,14 @@ def _hook(opts, core):
         except Exception:  # noqa: BLE001
             return ""
 
+    watch = opts.get("watch")
+
     def on_request(sender, args):
         url = str(args.Request.Uri)
+        if watch and url.startswith(PRESSED):
+            watch.clicked(urllib.parse.unquote(url[len(PRESSED):]))
+            args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
+            return
         if url.startswith(CLICKED):
             opts["clicked_at"] = time.time()
             args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
@@ -340,12 +346,16 @@ def _hook(opts, core):
                 if url not in subs:
                     subs.append(url)
         core.WebResourceResponseReceived += on_response
-        try:
-            core.IsMuted = True
-        except Exception:  # noqa: BLE001 - (an older Edge engine)
-            pass
+        if not watch:
+            try:
+                core.IsMuted = True
+            except Exception:  # noqa: BLE001 - (an older Edge engine)
+                pass
     scripts = []
-    if catch:
+    if watch:
+        from .picker import TRACK_JS
+        scripts.append(TRACK_JS)
+    elif catch:
         scripts.append(AUTOPLAY_JS)
         if opts.get("click"):
             import json
@@ -379,6 +389,63 @@ def page_script(window):
             except Exception:  # noqa: BLE001
                 pass
     window.events.loaded += loaded
+
+
+# What you showed the app on each site (picker.py): {site's server: {"frame", "video", "label"}}.
+LEARNED = {}
+PRESSED = "https://watchanything.invalid/pressed?label="
+
+
+def _learned(page_url):
+    host = urllib.parse.urlsplit(page_url or "").netloc.lower()
+    while host:
+        if host in LEARNED:
+            return LEARNED[host]
+        host = host.partition(".")[2] if host.count(".") > 1 else ""
+    return None
+
+
+def learned_rank(page_url, video, headers):
+    """0 for a video like the one you picked on this site before, 1 otherwise."""
+    got = _learned(page_url)
+    if not got:
+        return 1
+    ref = urllib.parse.urlsplit((headers or {}).get("Referer") or "").netloc.lower()
+    host = urllib.parse.urlsplit(video).netloc.lower()
+    return 0 if (got.get("frame") and ref == got["frame"]) or (got.get("video") and host == got["video"]) else 1
+
+
+def learned_found(page_url, videos):
+    """Whether what's been caught has the kind you picked (always, for a site you haven't)."""
+    if not _learned(page_url):
+        return True
+    return any(learned_rank(page_url, v[0], v[1]) == 0 for v in videos)
+
+
+def learned_click(page_url, click):
+    """The button to press on a site's page: the one asked for, else the one you pressed when you picked."""
+    if click:
+        return click
+    got = _learned(page_url)
+    return {"label": got["label"], "kind": "", "exact": False} if got and got.get("label") else None
+
+
+def watch_window(url, job):
+    """Windows: `url` in a window of the app's own whose every video goes to `job` (picker.py).
+    Returns what closes it."""
+    from . import launcher
+    wv = _webview()
+    patch()
+    opts = {"adblock": ADBLOCK, "watch": job, "subs": job.subs,
+            "catch": lambda video, headers: job.video(video, headers)}
+    _pending[url] = opts
+    win = wv.create_window("Find the video - Watch Anything", url, width=1200, height=820, background_color="#0d0f1a")
+    try:
+        win.events.closed += job.closed
+        win.events.loaded += lambda: setattr(job, "page", win.get_current_url() or job.page)
+    except Exception:  # noqa: BLE001
+        pass
+    return win.destroy
 
 
 def _hidden_window(url, opts, title="Watch Anything"):
@@ -447,6 +514,7 @@ def catch_video(url, timeout=30, click=None):
     if not can_catch():
         return None
     found, got = [], threading.Event()
+    click = learned_click(url, click)
     opts = {"adblock": True, "click": click}
 
     def catch(video, headers):
@@ -474,7 +542,7 @@ def catch_video(url, timeout=30, click=None):
                 got.wait(0.5)
                 if got.is_set():
                     time.sleep(1.2)         # a moment more: the playlist listing every quality often comes right after
-                    if videos():
+                    if videos() and (learned_found(url, videos()) or time.time() > deadline - timeout + 20):
                         break
                     got.clear()
                 if click and not opts.get("clicked_at") and videos() and (opts.get("no_click") or time.time() > deadline - timeout + 15):
@@ -483,7 +551,8 @@ def catch_video(url, timeout=30, click=None):
             if not found:
                 return None
             after = [f for f in found if f[2] >= opts.get("clicked_at", 0)] or found
-            best = min(after, key=lambda f: (0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1,
+            best = min(after, key=lambda f: (learned_rank(url, f[0], f[1]),
+                                             0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1,
                                              after.index(f)))
             return {"url": best[0], "headers": best[1], "subs": list(opts.get("subs") or [])}
         finally:

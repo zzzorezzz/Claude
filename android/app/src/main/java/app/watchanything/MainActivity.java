@@ -85,6 +85,10 @@ public class MainActivity extends Activity {
         public void pageClose(String id) {
             pages.close(id);
         }
+
+        public void pageShow(String id) {
+            pages.show(id);
+        }
     }
 
     /** What the screens call (JavaScript → Java). */
@@ -270,6 +274,7 @@ public class MainActivity extends Activity {
             chrome.onHideCustomView();
             return;
         }
+        if (pages.back()) return;
         web.evaluateJavascript("window.androidBack ? androidBack() : false", value -> {
             if (!"true".equals(value)) moveTaskToBack(true);
         });

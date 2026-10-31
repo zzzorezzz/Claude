@@ -55,6 +55,28 @@ SKIP_SCRIPT = Path(__file__).resolve().parent / "mpv_scripts" / "watchlist_skip.
 UI_DIR = Path(__file__).resolve().parent / "mpv_config"
 
 
+def _config_dir():
+    """The player's settings folder. mpv keeps small files of its own next to its settings
+    (its caches); inside the Mac app those would be changes to the app itself, which macOS
+    blocks ("prevented from modifying apps"). So the packaged app's player uses a copy kept
+    with your data, refreshed when the app is updated."""
+    if not (getattr(sys, "frozen", False) and sys.platform != "win32"):
+        return UI_DIR
+    from . import __version__
+    from .config import default_data_dir
+    target = default_data_dir() / "player"
+    try:
+        stamp = target / ".version"
+        if not stamp.is_file() or stamp.read_text().strip() != __version__:
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            shutil.copytree(UI_DIR, target)
+            stamp.write_text(__version__)
+        return target
+    except OSError:
+        return UI_DIR
+
+
 def ui_args(theme="violet"):
     """Modern controls when they're bundled (in the app's colour theme); otherwise mpv's own, tidied up."""
     if (UI_DIR / "scripts" / "uosc" / "main.lua").is_file():
@@ -65,7 +87,7 @@ def ui_args(theme="violet"):
                   f"curtain={bg},success=4ade80,error=ff6b81,match={second},heatmap={second}")
         # The controls hide after 5 seconds without the mouse moving or a key pressed (even
         # with the mouse resting over them), and come back when it moves or a key is used.
-        return [f"--config-dir={UI_DIR}", "--osc=no", "--osd-bar=no", "--border=yes", "--cursor-autohide=5000",
+        return [f"--config-dir={_config_dir()}", "--osc=no", "--osd-bar=no", "--border=yes", "--cursor-autohide=5000",
                 "--osd-font-size=30", "--osd-border-size=1.5", "--osd-color=#FFE6E9F2", "--osd-shadow-offset=1",
                 f"--script-opts-append=uosc-color={colors}",
                 f"--script-opts-append=uosc-chapter_ranges=openings:{second}55,endings:{second}55,ads:ff6b8166"]

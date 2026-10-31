@@ -51,6 +51,7 @@ final class Pages {
         final JSONArray events = new JSONArray();
         Set<String> blocked = Collections.emptySet();
         String[] scripts = new String[0];
+        boolean shown;
 
         synchronized void add(JSONObject ev) {
             if (events.length() < 5000) events.put(ev);
@@ -237,6 +238,39 @@ final class Pages {
         Hidden h = pages.get(id);
         if (h == null) throw new IllegalStateException("closed");
         return h.drain();
+    }
+
+    /** A page you use yourself (finding a video, picker.py): in front of the app's screen. */
+    void show(String id) {
+        Hidden h = pages.get(id);
+        if (h == null) return;
+        h.shown = true;
+        activity.runOnUiThread(() -> {
+            h.web.bringToFront();
+            h.web.requestFocus();
+            android.widget.Toast.makeText(activity, "Play the video here, then press Back to choose it",
+                    android.widget.Toast.LENGTH_LONG).show();
+        });
+    }
+
+    /** Back pressed: a page you were using goes back behind the app (and the app is told). */
+    boolean back() {
+        for (Hidden h : pages.values()) {
+            if (!h.shown) continue;
+            if (h.web.canGoBack()) {
+                h.web.goBack();
+                return true;
+            }
+            h.shown = false;
+            root.removeView(h.web);
+            root.addView(h.web, 0);
+            try {
+                h.add(new JSONObject().put("t", "closed"));
+            } catch (Exception ignored) {
+            }
+            return true;
+        }
+        return false;
     }
 
     void close(String id) {

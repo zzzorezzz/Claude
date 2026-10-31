@@ -107,3 +107,47 @@ end)
 mp.register_script_message("switch-version", function()
     mp.commandv("script-message", "watchlist-switch-version")
 end)
+
+-- An episode that takes a moment to open (found on its site just now): a box saying so,
+-- with a bar moving along, instead of a player that looks stuck.
+local loading = { overlay = mp.create_osd_overlay("ass-events"), timer = nil, step = 0 }
+local function loading_stop()
+    if loading.timer then loading.timer:kill() end
+    loading.timer = nil
+    loading.overlay:remove()
+end
+local function loading_draw()
+    local w, h = mp.get_osd_size()
+    if not w or w == 0 then w, h = 1280, 720 end
+    loading.overlay.res_x, loading.overlay.res_y = w, h
+    local title = mp.get_property("playlist/" .. (mp.get_property_number("playlist-pos", 0)) .. "/title") or "the next episode"
+    local bw, bh = 360, 6
+    local x0, y0 = (w - bw) / 2, h / 2 + 22
+    local seg = bw / 4
+    local pos = (loading.step * 9) % (bw + seg) - seg
+    local a, b = math.max(0, pos), math.min(bw, pos + seg)
+    local box = string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H1A1414&\\1a&H30&\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+        x0 - 24, y0 - 62, bw + 48, bw + 48, 100, 100)
+    local text = string.format("{\\an8\\pos(%d,%d)\\fs22\\bord0\\shad0\\1c&HF2E9E6&}Getting %s ready…", w / 2, y0 - 48, title)
+    local track = string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H554A4A&\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+        x0, y0, bw, bw, bh, bh)
+    local bar = b > a and string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&HFF7A8B&\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+        x0 + a, y0, b - a, b - a, bh, bh) or ""
+    loading.overlay.data = box .. "\n" .. text .. "\n" .. track .. "\n" .. bar
+    loading.overlay:update()
+    loading.step = loading.step + 1
+end
+mp.register_event("start-file", function()
+    loading_stop()
+    local path = mp.get_property("path") or ""
+    if not path:find("^https?://") then return end
+    loading.step = 0
+    -- (only when it takes a moment: one that opens at once shows nothing)
+    loading.timer = mp.add_timeout(0.8, function()
+        loading_draw()
+        loading.timer = mp.add_periodic_timer(0.05, loading_draw)
+    end)
+end)
+mp.register_event("file-loaded", loading_stop)
+mp.register_event("end-file", loading_stop)
+mp.observe_property("playback-time", "number", function(_, t) if t and loading.timer then loading_stop() end end)

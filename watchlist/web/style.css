@@ -1619,10 +1619,13 @@ body.simple .ep-file { display: none !important; }
 .subs-job .buf-bar { margin-top: 10px; }
 
 /* Dragging a poster: the others wiggle, the one moved is a faint placeholder where it would land. */
-@keyframes jiggle { 0%, 100% { transform: rotate(-1.2deg); } 50% { transform: rotate(1.2deg); } }
-.grid.jiggle .card:not(.drag-ghost) { animation: jiggle .28s ease-in-out infinite; }
-.grid.jiggle .card:nth-child(2n):not(.drag-ghost) { animation-delay: -.14s; }
-.card.drag-ghost { opacity: .35; outline: 2px dashed var(--accent); outline-offset: 3px; border-radius: 12px; }
+/* A poster being dragged: it follows the pointer; its place waits for it, outlined. */
+.card.drag-float { position: fixed; left: 0; top: 0; z-index: 1000; pointer-events: none; margin: 0;
+  box-shadow: 0 22px 50px rgba(0, 0, 0, .6); transition: none; will-change: transform; }
+.card.drag-float .card-info { opacity: 0; }
+.card.drag-place { opacity: .28; outline: 2px dashed var(--accent); outline-offset: 3px; transform: none !important; }
+body.dragging, body.dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+.card { -webkit-user-drag: none; -webkit-touch-callout: none; }
 
 /* Settings: Save and Cancel float on their own (nothing behind them covering the settings);
    the unsaved-changes note pops up just above them. */
@@ -1639,3 +1642,15 @@ body.simple .ep-file { display: none !important; }
   .card-buttons .cb { width: 36px; height: 36px; }
   .card-buttons .cb svg { width: 18px; height: 18px; }
 }
+body.dragging .card:hover, body.dragging .card:focus-visible { transform: none; box-shadow: none; }
+
+/* ---------- Finding a video yourself ---------- */
+.picker-opts { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 10px; }
+.picker-tracks { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 6px 0 14px; }
+.picker-track { min-width: 96px; }
+.picker-check { color: var(--green, #4ade80); font-weight: 900; margin-right: 6px; }
+.picker-list { display: grid; gap: 8px; max-height: 46vh; overflow: auto; margin-bottom: 14px; }
+.picker-video { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px;
+  border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); }
+.picker-video .tag { margin-left: 6px; }
+.picker-status { padding: 2px 2px 6px; }

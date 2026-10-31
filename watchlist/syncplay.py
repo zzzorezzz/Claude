@@ -32,6 +32,22 @@ def new_room():
     return "watchanything-" + secrets.token_hex(5)
 
 
+# A party's invite: "WA-" and the room's own 8 letters ("WA-K7QD-2M9X"), plus "@server" for a
+# server of your own. It stays the same for the whole party: what's playing (a file, a magnet,
+# your site) reaches whoever joins from the room itself, so anyone can join with it at any time.
+SHORT = re.compile(r"\bWA-([A-Z2-7]{4})-?([A-Z2-7]{4})(?:@([A-Za-z0-9.-]+(?::\d{1,5})?))?", re.I)
+
+
+def short_invite(server, room):
+    """The short invite for a room made by new_room() ("" for any other room)."""
+    m = re.fullmatch(r"watchanything-([0-9a-f]{10})", room or "")
+    if not m:
+        return ""
+    letters = base64.b32encode(bytes.fromhex(m.group(1))).decode("ascii")
+    code = f"WA-{letters[:4]}-{letters[4:]}"
+    return code if server == DEFAULT_SERVER else f"{code}@{server}"
+
+
 def make_invite(server, room, item=None, season=None, episode=None, host=None, now=None):
     """An invite to a room (and, with item, what it was started for). `now` is
     what the host is playing (a torrent's magnet and exact file, or the video site
@@ -66,9 +82,17 @@ def online_source(meta):
 def read_invite(code):
     """The invite's contents, or ValueError."""
     code = re.sub(r"\s+", "", str(code or ""))
+    short = SHORT.search(code)
+    if short:
+        try:
+            room = "watchanything-" + base64.b32decode((short.group(1) + short.group(2)).upper()).hex()
+        except (binascii.Error, ValueError):
+            raise ValueError("that watch-party code isn't right - check it letter by letter") from None
+        return {"server": short.group(3) or DEFAULT_SERVER, "room": room, "title": "", "year": None, "type": "",
+                "source": "", "source_id": "", "host": None}
     m = re.search(r"WLP1\.([A-Za-z0-9_-]+)", code)
     if not m:
-        raise ValueError("that isn't a watch-party code - it starts with WLP1.")
+        raise ValueError("that isn't a watch-party code - it starts with WA-")
     body = m.group(1)
     try:
         data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode("utf-8"))

@@ -98,7 +98,7 @@ class ShareTest(test_server.ServerBase):
         col, bb, frieren = self.make_collection()
         status, r = self.call("POST", f"/api/collections/{col['id']}/share")
         self.assertEqual(status, 200, r)
-        self.assertTrue(r["code"].startswith("WLC1."))
+        self.assertTrue(r["code"].startswith("WLC2."))
         self.assertEqual(r["count"], 2)
         data = share.read(f"here you go: {r['code']} enjoy")                  # pasted with other words
         self.assertEqual(data["name"], "Weekend")

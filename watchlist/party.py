@@ -207,6 +207,8 @@ class Party:
         meta = dict(file_.get("watchlist") or {})
         if self.avatar:
             meta["avatar"] = self.avatar
+        if self.role == "host":
+            meta["host"] = True
         file_ = dict(file_, watchlist=meta)
         self.people[self.me] = file_
         try:
@@ -266,7 +268,9 @@ class Party:
             return self.me
         if self.leader and self.leader in self.people:
             return self.leader
-        return next((n for n, f in self.people.items() if n != self.me and f), self.leader)
+        host = next((n for n, f in self.people.items()
+                     if n != self.me and ((f or {}).get("watchlist") or {}).get("host")), None)
+        return host or next((n for n, f in self.people.items() if n != self.me and f), self.leader)
 
     def leader_file(self):
         name = self.leader_name()

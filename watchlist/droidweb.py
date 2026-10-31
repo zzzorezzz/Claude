@@ -50,13 +50,13 @@ def available():
 class Page:
     """A page in the phone's hidden WebView, the same calls as cdp._Page."""
 
-    def __init__(self, scripts, on_request=None, on_response=None):
+    def __init__(self, scripts, on_request=None, on_response=None, on_closed=None, adblock=None):
         from . import webtools
         self.bridge = launcher.android_bridge
-        self.on_request, self.on_response = on_request, on_response
+        self.on_request, self.on_response, self.on_closed = on_request, on_response, on_closed
         self.loaded = threading.Event()
         self.seen = {}               # address -> its request's headers (for what MANIFEST_JS finds)
-        blocked = sorted(webtools.AD_HOSTS) if webtools.ADBLOCK else []
+        blocked = sorted(webtools.AD_HOSTS) if (webtools.ADBLOCK if adblock is None else adblock) else []
         self.id = str(self.bridge.pageOpen(json.dumps([MANIFEST_JS, *scripts]), json.dumps(blocked)))
         self.ua = str(self.bridge.pageUserAgent())
         self._open = True
@@ -75,6 +75,11 @@ class Page:
     def _event(self, ev):
         if ev.get("t") == "load":
             self.loaded.set()
+            self.page = ev.get("u") or ""
+            return
+        if ev.get("t") == "closed":
+            if self.on_closed:
+                self.on_closed()
             return
         u, headers = ev.get("u") or "", ev.get("h") or {}
         if u.startswith(MANIFEST):
@@ -104,6 +109,32 @@ class Page:
             self.bridge.pageClose(self.id)
         except Exception:  # noqa: BLE001
             pass
+
+
+def watch(url, job):
+    """The page shown for you to use (picker.py): every video it asks for goes to `job`.
+    Returns what closes it."""
+    import urllib.parse
+    from . import picker, webtools
+
+    def on_request(u, headers, kind):
+        if u.startswith(picker.CLICKED_ON):
+            job.clicked(urllib.parse.unquote(u[len(picker.CLICKED_ON):]))
+        elif webtools.VIDEO.search(urllib.parse.urlsplit(u).path):
+            job.video(u, headers, getattr(page, "page", ""))
+        elif webtools.SUBTITLE.search(urllib.parse.urlsplit(u).path) or webtools.SUBTITLE_ASK.search(u):
+            job.subtitle(u)
+
+    def on_response(u, mime, headers):
+        job.video(u, headers, getattr(page, "page", ""))
+
+    def closed():
+        job.closed()
+        page.close()
+    page = Page([picker.TRACK_JS], on_request, on_response, on_closed=closed)
+    page.go(url)
+    page.bridge.pageShow(page.id)
+    return page.close
 
 
 def catch_video(url, timeout=30, click=None):

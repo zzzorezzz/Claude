@@ -29,9 +29,41 @@ def pack(name, items, by=""):
     return {"v": 1, "name": str(name)[:80], "by": str(by or "")[:40], "items": rows}
 
 
+# The short form (WLC2): each title as [type, where from + id, name, year, poster] with the
+# poster's address shortened to what's particular to it.
+SHORT = "WLC2."
+TYPES = {"tv": "t", "anime": "a", "movie": "m"}
+POSTERS = ["https://image.tmdb.org/t/p/", "https://cdn.myanimelist.net/images/anime/", "https://"]
+
+
+def _poster_short(url):
+    for n, prefix in enumerate(POSTERS):
+        if url.startswith(prefix):
+            return f"{n}{url[len(prefix):]}"
+    return ""
+
+
+def _poster_long(text):
+    if not text or not text[0].isdigit() or int(text[0]) >= len(POSTERS):
+        return ""
+    return POSTERS[int(text[0])] + text[1:]
+
+
 def to_code(data):
-    raw = zlib.compress(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode(), 9)
-    return PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    rows = [[TYPES[r["ty"]], ("T" if r["s"] == "tmdb" else "M") + r["i"], r["t"], r.get("y") or 0, _poster_short(r.get("p") or "")]
+            for r in data["items"]]
+    packed = [data["name"], data.get("by") or "", rows]
+    raw = zlib.compress(json.dumps(packed, ensure_ascii=False, separators=(",", ":")).encode(), 9)
+    return SHORT + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _from_short(body):
+    packed = json.loads(zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)), bufsize=1 << 20))
+    kinds = {v: k for k, v in TYPES.items()}
+    name, by, rows = packed
+    return {"name": name, "by": by,
+            "items": [{"t": r[2], "y": r[3] or None, "ty": kinds.get(r[0], ""), "s": "tmdb" if r[1][:1] == "T" else "mal",
+                       "i": r[1][1:], "p": _poster_long(r[4])} for r in rows if isinstance(r, list) and len(r) >= 5]}
 
 
 def to_file_text(data):
@@ -48,13 +80,17 @@ def read(text):
             text = json.loads(text).get("watchlist_collection", "")
         except (ValueError, AttributeError) as e:
             raise ShareError("that file isn't a shared Watch Anything collection") from e
+    short = re.search(re.escape(SHORT) + r"([A-Za-z0-9_-]+)", text)
     m = re.search(re.escape(PREFIX) + r"([A-Za-z0-9_-]+)", text)
-    if not m:
-        raise ShareError("that isn't a shared collection - it should start with " + PREFIX)
-    body = m.group(1)
+    if not (short or m):
+        raise ShareError("that isn't a shared collection - it should start with " + SHORT)
     try:
-        data = json.loads(zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)), bufsize=1 << 20))
-    except (ValueError, zlib.error) as e:
+        if short:
+            data = _from_short(short.group(1))
+        else:
+            body = m.group(1)
+            data = json.loads(zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)), bufsize=1 << 20))
+    except (ValueError, zlib.error, TypeError, IndexError) as e:
         raise ShareError("that share code is incomplete - copy the whole thing") from e
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ShareError("that share code is damaged")

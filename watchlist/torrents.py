@@ -582,8 +582,9 @@ class Torrents:
         if not f:
             return False
         owner = self._owner(rec, f)[0]
-        # (A file of no title yet - an extra, or one the pack hasn't placed - is still its torrent's.)
-        return owner == item_id or (owner is None and rec["item_id"] == item_id)
+        # (A file of no title yet - an extra, or one the pack hasn't placed - is still its torrent's;
+        # and any file of the title's own torrent is one you can play for it.)
+        return owner == item_id or rec["item_id"] == item_id
 
     def find_file(self, path):
         """(hash, index) of a torrent's downloaded file, by its path."""
@@ -845,7 +846,8 @@ class Torrents:
             rec = self.records.get(h)
             f = next((f for f in (rec or {}).get("files") or [] if f["index"] == index), None)
             try:
-                item = self.app.store.get(self._owner(rec, f)[0]) if f else None
+                # (a file the pack hasn't placed yet: its torrent's own title)
+                item = self.app.store.get(self._owner(rec, f)[0] or rec["item_id"]) if f else None
             except KeyError:
                 item = None
             if not item:

@@ -558,7 +558,7 @@ function cardHTML(item, opts = {}) {
       <div class="card-title">${esc(item.title)}</div>
       <div class="card-meta">${meta.join(' · ')}</div>
     </div>`;
-  return `<div class="card${opts.resume ? ' card-resume' : ''}" data-id="${esc(item.id)}" ${opts.resume ? 'data-resume="1"' : ''} data-sig="${hashText(item.id + inner)}" tabindex="0" draggable="true">${inner}</div>`;
+  return `<div class="card${opts.resume ? ' card-resume' : ''}" data-id="${esc(item.id)}" ${opts.resume ? 'data-resume="1"' : ''} data-sig="${hashText(item.id + inner)}" tabindex="0">${inner}</div>`;
 }
 
 // Continue watching: what you were in the middle of, most recent first.
@@ -741,33 +741,138 @@ $('#view').addEventListener('contextmenu', (e) => {
   if (item) openItemMenu(item, { x: e.clientX, y: e.clientY });
 });
 
-// Drag a poster: the others wiggle and make room as it moves over them (drop it anywhere
-// in the grid for your own order), or drop it onto a folder chip to move it there.
-let dragCard = null;
-$('#view').addEventListener('dragstart', (e) => {
+// Drag a poster: press and hold, and it lifts and follows the pointer like a file; the
+// others glide aside to make room where it would go (drop it for your own order), or drop
+// it onto a folder chip to move it there. On a touch screen a long press picks it up.
+const drag = { card: null, start: null, timer: 0, float: null, grid: null, dx: 0, dy: 0, moved: false, scroll: 0, last: null };
+function dragReset() {
+  clearTimeout(drag.timer);
+  drag.start = null;
+}
+$('#view').addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || drag.float) return;
   const card = e.target.closest('.card');
-  if (!card) return;
-  e.dataTransfer.setData('text/x-watchlist', card.dataset.id);
-  e.dataTransfer.effectAllowed = 'move';
+  if (!card || e.target.closest('button, a, input, select')) return;
+  drag.card = card;
+  drag.start = { x: e.clientX, y: e.clientY, touch: e.pointerType !== 'mouse' };
+  clearTimeout(drag.timer);
+  // A mouse: held a moment, or moved a little. A finger: held still (so it can still scroll).
+  drag.timer = setTimeout(() => { if (drag.start) dragBegin(drag.start.x, drag.start.y); }, drag.start.touch ? 420 : 260);
+});
+document.addEventListener('pointermove', (e) => {
+  if (drag.start && !drag.float) {
+    const far = Math.hypot(e.clientX - drag.start.x, e.clientY - drag.start.y);
+    if (drag.start.touch ? far > 10 : far > 6) {
+      if (drag.start.touch) dragReset();            // (a finger moving at once is scrolling)
+      else dragBegin(e.clientX, e.clientY);
+    }
+  }
+  if (drag.float) { e.preventDefault(); dragMove(e.clientX, e.clientY); }
+}, { passive: false });
+document.addEventListener('touchmove', (e) => { if (drag.float) e.preventDefault(); }, { passive: false });
+document.addEventListener('pointerup', (e) => { if (drag.float) dragEnd(e.clientX, e.clientY); else dragReset(); });
+document.addEventListener('pointercancel', () => { if (drag.float) dragEnd(null, null); else dragReset(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drag.float) dragEnd(null, null, true); });
+// A drag isn't also a click on the poster.
+document.addEventListener('click', (e) => {
+  if (drag.moved) { e.stopPropagation(); e.preventDefault(); drag.moved = false; }
+}, true);
+$('#view').addEventListener('dragstart', (e) => { if (e.target.closest('.card')) e.preventDefault(); });
+
+function dragBegin(x, y) {
+  const card = drag.card;
+  if (!card || !card.isConnected || !drag.start) return dragReset();
+  clearTimeout(drag.timer);
+  const r = card.getBoundingClientRect();
+  drag.dx = drag.start.x - r.left;
+  drag.dy = drag.start.y - r.top;
+  drag.grid = card.closest('.grid, .row-track');
+  drag.moved = true;
+  const float = card.cloneNode(true);
+  float.className = 'card drag-float';
+  float.style.width = `${r.width}px`;
+  float.style.height = `${r.height}px`;
+  document.body.appendChild(float);
+  drag.float = float;
+  card.classList.add('drag-place');
   document.body.classList.add('dragging');
-  dragCard = card.closest('.grid') ? card : null;
-  if (dragCard) {
-    setTimeout(() => { dragCard?.classList.add('drag-ghost'); dragCard?.closest('.grid')?.classList.add('jiggle'); }, 0);
+  if (navigator.vibrate) navigator.vibrate(15);
+  dragMove(x, y);
+}
+function scrollSpeed(y) {
+  const edge = 70;
+  if (y < edge) return -(edge - y) / 3;
+  if (y > innerHeight - edge) return (y - innerHeight + edge) / 3;
+  return 0;
+}
+function dragMove(x, y) {
+  drag.float.style.transform = `translate(${x - drag.dx}px, ${y - drag.dy}px) scale(1.06) rotate(-1.5deg)`;
+  drag.last = { x, y };
+  // Near the top or bottom of the window: the page scrolls along.
+  if (scrollSpeed(y) && !drag.scroll) {
+    const step = () => {
+      const v = drag.float && drag.last ? scrollSpeed(drag.last.y) : 0;
+      if (!v) { drag.scroll = 0; return; }
+      scrollBy(0, v);
+      dragOver(drag.last.x, drag.last.y);
+      drag.scroll = requestAnimationFrame(step);
+    };
+    drag.scroll = requestAnimationFrame(step);
   }
-});
-$('#view').addEventListener('dragend', () => {
-  document.body.classList.remove('dragging');
+  dragOver(x, y);
+}
+function dragOver(x, y) {
+  const under = document.elementFromPoint(x, y);
+  $$('.drop-over').forEach((el) => { if (!el.contains(under)) el.classList.remove('drop-over'); });
+  const chip = under && under.closest('[data-drop]');
+  if (chip) { chip.classList.add('drop-over'); return; }
+  const grid = drag.grid;
+  if (!grid || !under || under.closest('.grid, .row-track') !== grid) return;
+  const over = under.closest('.card');
+  if (!over || over === drag.card) return;
+  if (over.getAnimations().some((a) => !(a instanceof CSSAnimation))) return;   // (still gliding)
+  const r = over.getBoundingClientRect();
+  const after = x > r.left + r.width / 2;
+  if ((after ? over.nextElementSibling : over.previousElementSibling) === drag.card) return;
+  slideCards(grid, () => over.insertAdjacentElement(after ? 'afterend' : 'beforebegin', drag.card));
+}
+function dragEnd(x, y, cancel) {
+  const card = drag.card;
+  const float = drag.float;
+  const grid = drag.grid;
+  const hit = !cancel && x !== null ? document.elementFromPoint(x, y) : null;
+  const chip = hit && hit.closest('[data-drop]');
   $$('.drop-over').forEach((el) => el.classList.remove('drop-over'));
-  if (dragCard) {
-    const grid = dragCard.closest('.grid');
-    dragCard.classList.remove('drag-ghost');
-    grid?.classList.remove('jiggle');
-    if (!dragCard.dataset.dropped) render();          // (let go outside the grid: back where it was)
-    delete dragCard.dataset.dropped;
+  document.body.classList.remove('dragging');
+  cancelAnimationFrame(drag.scroll);
+  Object.assign(drag, { float: null, card: null, grid: null, last: null, scroll: 0 });
+  dragReset();
+  setTimeout(() => { drag.moved = false; }, 50);
+  const finish = () => {
+    float.remove();
+    card.classList.remove('drag-place');
+  };
+  if (chip) {
+    finish();
+    moveToFolder(card.dataset.id, chip.dataset.drop === 'none' ? '' : chip.dataset.drop);
+    return;
   }
-  dragCard = null;
-});
-// The cards slide to their new places (each from where it was to where it is now).
+  if (cancel || !grid) {
+    finish();
+    render();                                        // (back where it was)
+    return;
+  }
+  // It settles into its place, and the order on screen is your order.
+  const r = card.getBoundingClientRect();
+  float.style.transition = 'transform .18s cubic-bezier(.2, .8, .2, 1)';
+  float.style.transform = `translate(${r.left}px, ${r.top}px)`;
+  setTimeout(finish, 180);
+  const shown = $$('.card', grid).map((c) => c.dataset.id);
+  const rest = cardOrder().filter((id) => !shown.includes(id));
+  try { localStorage.setItem('card-order', JSON.stringify([...shown, ...rest])); } catch { /* fine */ }
+  if (S.sort !== 'custom') { S.sort = 'custom'; prefSet('sort', 'custom'); toast('Sorted in your own order - change it with the sort button'); }
+}
+// The cards glide to their new places (each from where it was to where it is now).
 function slideCards(grid, move) {
   const cards = $$('.card', grid);
   const before = new Map(cards.map((c) => [c, c.getBoundingClientRect()]));
@@ -779,52 +884,9 @@ function slideCards(grid, move) {
     const dy = a.top - b.top;
     if (!dx && !dy) return;
     c.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }],
-      { duration: 220, easing: 'cubic-bezier(.2, .8, .2, 1)' });
+      { duration: 240, easing: 'cubic-bezier(.2, .8, .2, 1)' });
   });
 }
-$('#view').addEventListener('dragover', (e) => {
-  const grid = dragCard && e.target.closest('.grid');
-  if (grid && grid === dragCard.closest('.grid')) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    const over = e.target.closest('.card');
-    if (!over || over === dragCard || over.getAnimations().some((x) => !(x instanceof CSSAnimation))) return;   // (still sliding)
-    const r = over.getBoundingClientRect();
-    const after = e.clientX > r.left + r.width / 2;
-    if ((after ? over.nextElementSibling : over.previousElementSibling) === dragCard) return;
-    slideCards(grid, () => over.insertAdjacentElement(after ? 'afterend' : 'beforebegin', dragCard));
-    return;
-  }
-  const target = e.target.closest('[data-drop]');
-  if (!target || !e.dataTransfer.types.includes('text/x-watchlist')) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'move';
-  target.classList.add('drop-over');
-});
-$('#view').addEventListener('dragleave', (e) => {
-  const target = e.target.closest('[data-drop]');
-  if (target && !target.contains(e.relatedTarget)) target.classList.remove('drop-over');
-});
-$('#view').addEventListener('drop', (e) => {
-  const grid = dragCard && e.target.closest('.grid');
-  if (grid && grid === dragCard.closest('.grid')) {
-    e.preventDefault();
-    dragCard.dataset.dropped = '1';
-    // The order as it is on screen now.
-    const shown = $$('.card', grid).map((c) => c.dataset.id);
-    const rest = cardOrder().filter((x) => !shown.includes(x));
-    try { localStorage.setItem('card-order', JSON.stringify([...shown, ...rest])); } catch { /* fine */ }
-    if (S.sort !== 'custom') { S.sort = 'custom'; prefSet('sort', 'custom'); toast('Sorted in your own order - change it with the sort button'); }
-    return;
-  }
-  const target = e.target.closest('[data-drop]');
-  if (!target) return;
-  e.preventDefault();
-  target.classList.remove('drop-over');
-  const id = e.dataTransfer.getData('text/x-watchlist');
-  if (dragCard) dragCard.dataset.dropped = '1';
-  if (id) moveToFolder(id, target.dataset.drop === 'none' ? '' : target.dataset.drop);
-});
 
 async function moveToFolder(itemId, folderId) {
   const item = findItem(itemId);
@@ -1156,8 +1218,8 @@ async function openShareCollection(id) {
 function openSharedCollection() {
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>Open a shared collection</h2>
-    <p class="sub">Paste the share code you were sent (it starts with WLC1.), or choose the file.</p>
-    <textarea class="input shared-paste" rows="3" placeholder="WLC1.…"></textarea>
+    <p class="sub">Paste the share code you were sent (it starts with WLC2.), or choose the file.</p>
+    <textarea class="input shared-paste" rows="3" placeholder="WLC2.…"></textarea>
     <div class="btns"><button class="btn btn-white" data-s="peek" disabled>Open</button>
       <button class="btn btn-ghost" data-s="choose">Choose a file…</button></div>
     <div id="shared-view"></div></div>`, 'shared-modal');
@@ -2537,7 +2599,7 @@ async function openStartParty(item = null) {
       ${item ? `<div class="party-box">
         <button class="btn btn-red" data-p="start">${inParty && party.st.role === 'host' ? 'Play this in the party' : 'Start the watch party'}</button></div>` : ''}
       ${item ? '' : `<div class="party-box">
-        <textarea class="input party-paste" rows="3" placeholder="Paste the invite (WLP1.…)"></textarea>
+        <textarea class="input party-paste" rows="3" placeholder="Paste the invite (WA-…)"></textarea>
         <div id="party-peek"></div>
         <button class="btn btn-white" data-p="join" disabled>Join</button></div>`}
     </div>
@@ -3640,7 +3702,7 @@ function drawTorrentBox(wrap) {
       <button class="btn btn-white btn-sm" data-t="add-magnet">${data.torrents.length ? 'Replace' : 'Add'}</button></div>
     <p class="muted small">Only the list of files is fetched now. An episode downloads when you play it, while you watch.</p>
     ${data.torrents.length ? `<div class="ol-row keep-magnet"><label class="check-line"><input type="checkbox" data-t="keep-magnet" ${item.keep_magnet ? 'checked' : ''}> Keep magnet connected</label>
-      <button class="btn btn-ghost btn-sm danger" data-t="forget-magnet" title="Take the torrent off this title (what it downloaded goes too)">Delete connections</button></div>` : ''}
+      <button class="btn btn-ghost btn-sm danger" data-t="forget-magnet" title="Take the torrent off this title (what it downloaded goes too)">Remove magnet</button></div>` : ''}
     ${data.torrents.length ? `<label class="check-row keep-row"><input type="checkbox" data-t="tor-keep" ${data.keep ? 'checked' : ''}>
       <span><b>Keep downloaded episodes</b><br><span class="muted small">${data.keep ? 'Episodes stay on your computer after you watch them.'
     : `Off: an episode you watch to the end credits is deleted ${mins} minutes later. One you stop part way through is kept.`}</span></span></label>` : ''}`;
@@ -4727,14 +4789,136 @@ async function playScraped(wrap, opts = {}) {
   if (!wrap.isConnected || run !== wrap.st.scrapeRun || res.superseded) return;
   if (!res.ok && res.choices) { pickSiteTitle(wrap, res.choices, opts); return; }
   if (!res.ok) {
-    closeModal(wrap);
-    toast(`Couldn't play ${what} from your sites - right-click the episode → Troubleshoot. (${res.error})`, 'error');
+    const body = watchBody(wrap, `<h2>Couldn't find ${esc(what)}</h2>
+      <p class="sub">${esc(res.error || '')}</p>
+      <p class="muted small">Find it yourself in the app's browser: play it there and pick the right video. The app connects it and learns the site.</p>
+      <div class="btns"><button class="btn btn-white" data-x="pick">🔎 Find it myself</button><button class="btn btn-ghost" data-x="close">Close</button></div>`);
+    body.addEventListener('click', (e) => {
+      const x = e.target.closest('[data-x]');
+      if (!x) return;
+      closeModal(wrap);
+      if (x.dataset.x === 'pick') openPicker(item, { season: wrap.st.ep.season, episode: wrap.st.ep.episode, site: opts.site || '', ask: true });
+    });
     return;
   }
   if (res.player === 'android') phone()?.play(JSON.stringify(res));
   closeModal(wrap);
   toast(res.player === 'browser' ? `Opened ${what} from ${res.site}` : `Playing ${what} from ${res.site}`);
   reload();
+}
+
+// Finding a video yourself: the episode (or film) opens in the app's browser; play it there
+// and every video the page asks for shows up here, with what tells them apart (how long,
+// how good, where from, what you pressed before it). The one you pick is connected - the
+// other episodes then connect the same way - and the site is learned for next time.
+// Anime: Sub and Dub each (a ✓ by each one connected). Kept until Delete connections.
+function openPicker(item, opts = {}) {
+  const series = isSeries(item);
+  const anime = item.type === 'anime';
+  const sites = videoSites(item);
+  if (!sites.length) { toast('Add your own video site in Settings → Your own sites first', 'error'); return; }
+  const seasons = (item.seasons || []).filter((x) => (x.number || 0) > 0);
+  const st = { season: opts.season || item.progress?.season || 1, episode: opts.episode || item.progress?.episode || 1,
+    site: opts.site || item.online_site || sites[0].id, job: null, timer: 0, track: null };
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">✕</button><div class="modal-pad picker">
+    <h2>Find ${series ? 'the episode' : 'it'} yourself</h2>
+    <p class="sub">It opens on your site in the app's browser. Play it there as you normally would (pick the server, press play) -
+      every video the page loads shows up below. Pick the right one${series ? ' and the other episodes connect the same way' : ''}.
+      The app remembers how you found it on that site.</p>
+    <div class="picker-opts">
+      <label class="ol-field"><span>Site</span><select class="select" data-pk="site">
+        ${sites.map((x) => `<option value="${esc(x.id)}" ${st.site === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+      ${series && !anime ? `<label class="ol-field"><span>Season</span><select class="select" data-pk="season">
+        ${(seasons.length ? seasons : [{ number: 1 }]).map((x) => `<option value="${x.number}" ${x.number === st.season ? 'selected' : ''}>Season ${x.number}</option>`).join('')}</select></label>` : ''}
+      ${series ? `<label class="ol-field"><span>Episode</span><input class="input" type="number" min="1" data-pk="episode" value="${st.episode}" style="width:90px"></label>` : ''}
+    </div>
+    <div class="picker-tracks"></div>
+    <div class="picker-list"></div>
+    <div class="btns"><button class="btn btn-white" data-pk="ok">OK</button></div></div>`, 'picker-modal');
+  const tracks = $('.picker-tracks', wrap);
+  const list = $('.picker-list', wrap);
+  const stopJob = () => {
+    clearTimeout(st.timer);
+    if (st.job) api('POST', `/api/pick/${st.job}/close`, {}).catch(() => {});
+    st.job = null;
+  };
+  wrap.onClose = () => {
+    stopJob();
+    reload();
+    if (opts.wrap && opts.wrap.isConnected) { drawOnlineLinks(opts.wrap); drawEpisodes(opts.wrap); }
+  };
+  const drawTracks = () => {
+    const picked = (findItem(item.id) || item).picked || {};
+    const button = (track, label) => `<button class="btn ${st.track === track ? 'btn-white' : 'btn-grey'} picker-track" data-pk="go" data-track="${track}">
+      ${picked[track || 'video'] ? '<span class="picker-check">✓</span>' : ''}${label}</button>`;
+    const names = { sub: 'Sub', dub: 'Dub' };
+    tracks.innerHTML = anime
+      ? `${button('sub', 'Sub')}${button('dub', 'Dub')}<span class="muted small">${picked.sub || picked.dub
+        ? `Connected: ${['sub', 'dub'].filter((t) => picked[t]).map((t) => `${names[t]} (${esc(picked[t].site_name)})`).join(', ')}`
+        : 'Choose Sub or Dub, then find it on the page'}</span>`
+      : `${button('', picked.video ? 'Open the browser again' : 'Open the browser')}${picked.video ? `<span class="muted small">Connected on ${esc(picked.video.site_name)}</span>` : ''}`;
+  };
+  const fmtLen = (sec) => (sec ? `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}` : '');
+  const poll = async () => {
+    if (!st.job || !wrap.isConnected) return;
+    let d;
+    try { d = await api('GET', `/api/pick/${st.job}`); } catch { return; }
+    if (!wrap.isConnected) return;
+    const it = findItem(item.id);
+    if (it) it.picked = d.picked;
+    item.picked = d.picked;
+    const used = new Set(list._used || []);
+    const videos = d.videos.slice().reverse();
+    list.innerHTML = `<div class="picker-status muted small">${d.open ? '<span class="spin-dot"></span> Watching the browser window' : 'The browser window was closed'}
+        - ${videos.length ? `${videos.length} video${videos.length === 1 ? '' : 's'} so far` : 'no video yet: play it there'}</div>
+      ${videos.map((v) => `<div class="picker-video">
+        <div><b>Video ${v.n}</b>${v.length ? `<span class="tag">${fmtLen(v.length)}</span>` : ''}${v.quality ? `<span class="tag">${esc(v.quality)}</span>` : ''}<span class="tag">${v.kind === 'playlist' ? 'stream' : 'file'}</span>
+          <div class="muted small">from ${esc(v.frame || v.host)}${v.frame && v.frame !== v.host ? ` · served by ${esc(v.host)}` : ''}${v.after ? ` · after you pressed “${esc(v.after)}”` : ''}</div></div>
+        ${used.has(v.n) ? '<button class="btn btn-grey btn-sm" disabled>✓ Connected</button>' : `<button class="btn btn-white btn-sm" data-pk="use" data-n="${v.n}">Use this one</button>`}</div>`).join('')}`;
+    if (d.open) st.timer = setTimeout(poll, 1500);
+  };
+  const start = async (track) => {
+    stopJob();
+    st.track = track;
+    list._used = [];
+    drawTracks();
+    list.innerHTML = '<div class="center"><div class="spinner"></div><p class="muted small">Opening the browser…</p></div>';
+    try {
+      const d = await api('POST', `/api/items/${item.id}/pick`, { site: st.site, season: st.season, episode: st.episode, track });
+      st.job = d.id;
+      poll();
+    } catch (e) { list.innerHTML = ''; fail(e); }
+  };
+  wrap.addEventListener('change', (e) => {
+    const el = e.target.closest('[data-pk]');
+    if (!el) return;
+    if (el.dataset.pk === 'site') st.site = el.value;
+    if (el.dataset.pk === 'season') st.season = Number(el.value) || 1;
+    if (el.dataset.pk === 'episode') st.episode = Math.max(1, Number(el.value) || 1);
+  });
+  wrap.addEventListener('click', async (e) => {
+    const el = e.target.closest('[data-pk]');
+    if (!el || el.tagName === 'SELECT' || el.tagName === 'INPUT') return;
+    const a = el.dataset.pk;
+    if (a === 'go') start(el.dataset.track);
+    else if (a === 'ok') closeModal(wrap);
+    else if (a === 'use') {
+      el.disabled = true;
+      try {
+        const r = await api('POST', `/api/pick/${st.job}/use`, { n: Number(el.dataset.n) });
+        const it = findItem(item.id);
+        if (it) it.picked = r.picked;
+        item.picked = r.picked;
+        list._used = [...(list._used || []), Number(el.dataset.n)];
+        drawTracks();
+        el.textContent = '✓ Connected';
+        toast(`${anime ? (st.track === 'dub' ? 'Dub' : 'Sub') : series ? 'Episode' : 'Film'} connected on ${r.site}${series ? ' - the other episodes are connecting the same way' : ''}`);
+      } catch (err) { el.disabled = false; fail(err); }
+    }
+  });
+  drawTracks();
+  // A film or a show: straight to the browser when opened from its page (anime first asks Sub or Dub).
+  if (!anime && !opts.ask) start('');
 }
 
 // The match on a site was unclear: you pick the title (it's remembered).
@@ -4881,8 +5065,8 @@ async function drawOnlineLinks(wrap) {
         <option value="">Automatic (Settings order)</option>
         ${d.sites.map((x) => `<option value="${esc(x.id)}" ${d.preferred === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
       <button class="btn btn-grey btn-sm" data-ol="link-all" title="Match every ${isSeries(item) ? 'episode' : 'film'} on your site now, without watching - kept after the app closes">${linked ? '↻ Relink all' : '🔗 Link all'}</button>
-      ${linked ? `<label class="check-line"><input type="checkbox" data-ol="keep" ${d.keep ? 'checked' : ''}> Keep site connected</label>
-        <button class="btn btn-ghost btn-sm danger" data-ol="forget" title="Forget every link to your sites for this title">Delete connections</button>` : ''}
+      ${linked ? `<label class="check-line"><input type="checkbox" data-ol="keep" ${d.keep ? 'checked' : ''}> Keep site connected</label>` : ''}
+      <button class="btn btn-grey btn-sm" data-ol="pick" title="Open ${isSeries(item) ? 'an episode' : 'it'} in the built-in browser, play it there, and pick the right video - the app connects it and learns the site">🔎 Find it myself</button>
     </div>
     <div class="muted small ol-status">${lk.running ? `<span class="spin-dot"></span> Linking on ${esc(lk.site)}: ${lk.done} of ${lk.total}…`
       : lk.error ? `Couldn't link on ${esc(lk.site)}: ${esc(lk.error)}`
@@ -4897,6 +5081,7 @@ async function onlineLinksClick(wrap, e) {
   const item = findItem(wrap.dataset.itemId);
   const a = el.dataset.ol;
   if (a === 'link-all') openRelink(wrap, item, null);
+  else if (a === 'pick') openPicker(item, { wrap });
   else if (a === 'forget') {
     if (!(await confirmModal('Delete every connection?', `${item.title}'s episodes are matched on your sites again the next time they play.`, 'Delete connections'))) return true;
     upsert(await api('POST', `/api/items/${item.id}/online/prefs`, { forget: true }));

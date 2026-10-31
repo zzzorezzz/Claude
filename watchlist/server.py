@@ -19,7 +19,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, cdp, dialogs, discover, hlsfix, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
+from . import ai, cdp, dialogs, discover, hlsfix, picker, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -104,6 +104,10 @@ class App:
         # Your own sites: videos found ({(item, "s:e"): (site, found, when)}), the background
         # matching of a title's episodes (the latest run per title goes on) and how far it is.
         self._online_found, self._link_runs, self._link_progress = {}, {}, {}
+        self._finding = {}               # (title, episode) -> being found now (an Event)
+        # What you showed the app on each site, finding a video yourself (picker.py).
+        self._learned_path = self.data_dir / "learned-sites.json"
+        webtools.LEARNED.update(read_json(self._learned_path, {}))
         # Sub or dub, switched in the player (the episodes after it follow); subtitle searches.
         self._online_track, self._subjobs = {}, {}
         threading.Thread(target=self._clean_subs, daemon=True).start()
@@ -429,7 +433,7 @@ class App:
                 party.connect()
             except party_mod.PartyError as e:
                 raise ApiError(str(e)) from e
-            party.invite = syncplay.make_invite(party.server, room, host=party.me)
+            party.invite = syncplay.short_invite(party.server, room) or syncplay.make_invite(party.server, room, host=party.me)
             self._start_party(party)
         out = {"ok": True, "code": party.invite, "room": party.room, "server": party.server, "file": ""}
         if item is not None and source == "online":
@@ -493,6 +497,9 @@ class App:
         if invite.get("host") and invite["host"] not in party.people:
             party.leave("the host isn't there")
             raise ApiError(f'{invite["host"]} isn\'t in that watch party any more - ask for a new invite')
+        if not any(n != party.me for n in party.people):
+            party.leave("nobody's there")
+            raise ApiError("nobody is in that watch party - check the code, or ask for it again")
         self._start_party(party)
         party._follow_leader()
         return {"ok": True, "leader": party.leader_name(), "invite": invite}
@@ -501,11 +508,6 @@ class App:
         """The host plays (or is about to play) `entry`: the invite carries it, and
         with `upcoming` everyone starts getting it ready now."""
         meta = dict(entry.get("party") or {}, label=entry.get("label") or "")
-        try:
-            party.invite = syncplay.make_invite(party.server, party.room, host=party.me,
-                                                now=meta if meta.get("magnet") or syncplay.online_source(meta) else None)
-        except (TypeError, ValueError):
-            pass
         if upcoming:
             party.announce_upcoming(meta, meta["label"])
 
@@ -566,6 +568,10 @@ class App:
         session = self.player.play(self._session(self._need_mpv(), item, [entry], 0,
                                                  ["--pause", "--keep-open=yes"]))
         party.attach(session)
+        if entry.get("web"):
+            # From a video site: as for your own (its subtitles, where it's from, Sub / Dub).
+            session.listeners.append(lambda sess, msg: self._online_event(sess, item["id"], msg))
+            self._online_extras(session, item["id"], entry)
 
     def party_use_file(self, path):
         """A guest choosing their own file for what the host is playing."""
@@ -1820,6 +1826,39 @@ class App:
                 order.append(site)
         return order + [x for x in sites if x not in order]
 
+    FOUND_FOR = 15 * 60       # a video found on a site still plays this long after (its address expires)
+
+    def _episode_video(self, item, season, episode, track="", prefer="", pin="", skip=()):
+        """(site, found) for an episode: the one found a moment ago (ahead of time, while the one
+        before played), the one being found right now (waited for), or found now."""
+        key = f"{season}:{episode}" if item["format"] == "series" else "movie"
+        slot = (item["id"], key)
+        for _ in range(2):
+            got = self._online_found.get(slot)
+            if got and not pin and time.time() - got[2] < self.FOUND_FOR and got[0]["id"] not in skip \
+                    and (not prefer or got[0]["id"] == prefer or prefer not in {x["id"] for x in self._video_sites(item)}) \
+                    and (not track or ((got[1].get("stream") or {}).get("kind") or "sub") == track):
+                return got[0], got[1]
+            with self._lock:
+                busy = self._finding.get(slot)
+                if not busy:
+                    busy = self._finding[slot] = threading.Event()
+                    mine = True
+                else:
+                    mine = False
+            if not mine:
+                busy.wait(120)                 # (being found already: that one, not a second)
+                continue
+            try:
+                site, found = self._online_find(item, season, episode, track=track, prefer=prefer, pin=pin, skip=skip)
+                self._online_found[slot] = (site, found, time.time())
+                return site, found
+            finally:
+                with self._lock:
+                    self._finding.pop(slot, None)
+                busy.set()
+        return self._online_find(item, season, episode, track=track, prefer=prefer, pin=pin, skip=skip)
+
     def _online_find(self, item, season, episode, track="", prefer="", pin="", fresh=False, skip=()):
         """(site, found) from the first site that has the episode; OnlineError if none does."""
         key = f"{season}:{episode}" if item["format"] == "series" else "movie"
@@ -1894,8 +1933,8 @@ class App:
         if not track and body.get("stream"):
             track = (str(body["stream"]).split(":") + ["", ""])[1]
         try:
-            site, found = self._online_find(item, season, episode, track=track, prefer=str(body.get("site") or ""),
-                                            pin=str(body.get("entry") or ""))
+            site, found = self._episode_video(item, season, episode, track=track, prefer=str(body.get("site") or ""),
+                                              pin=str(body.get("entry") or ""))
         except OnlineError as e:
             if body.get("open_page") and e.page:
                 self.open_link(e.page)
@@ -1970,7 +2009,9 @@ class App:
                         pass
             if got:
                 found = got
+                self._online_found[(item["id"], key)] = (site, found, time.time())
             else:
+                self._online_found.pop((item["id"], key), None)
                 # ...then the next site.
                 skip.append(site["id"])
                 streams = []
@@ -2005,7 +2046,11 @@ class App:
             else:
                 out.append({"path": self._online_url(item, k, site, entry.get("track")), "key": k, "web": True,
                             "online": True, "label": self._label(item, k), "referer": entry["referer"],
-                            "headers": entry["headers"], "track": entry.get("track"), "site": site["id"]})
+                            "headers": entry["headers"], "track": entry.get("track"), "site": site["id"],
+                            # (a watch party's guests find it on the same site, the same version)
+                            "party": dict(self._party_meta(item, k), track=entry.get("track") or "",
+                                          site={"name": site["name"], "url": site["url"]},
+                                          entry=(entry.get("party") or {}).get("entry") or "")})
         return out, keys.index(entry["key"])
 
     def online_video(self, item_id, season, episode, site_id, track):
@@ -2014,8 +2059,16 @@ class App:
         item = self.store.get(item_id)
         key = f"{season}:{episode}"
         track = self._online_track.get(item_id) or track
-        site, found = self._online_find(item, season, episode, track=track, prefer=site_id)
-        self._online_found[(item_id, key)] = (site, found, time.time())
+        with self._party_lock:
+            hosting = self.party if self.party and self.party.active and self.party.role == "host" else None
+        if hosting:
+            site_now = next((x for x in self._video_sites(item) if x["id"] == site_id), None)
+            if site_now:
+                meta_entry = {"label": self._label(item, key),
+                              "party": dict(self._party_meta(item, key), track=track or "",
+                                            site={"name": site_now["name"], "url": site_now["url"]})}
+                self._party_now(hosting, meta_entry, upcoming=True)
+        site, found = self._episode_video(item, season, episode, track=track, prefer=site_id)
         playing = phone_player.current() if launcher.ANDROID else self.player.session
         threading.Thread(target=self._link_around, args=(item_id, site, key, playing), daemon=True).start()
         return self._playable(found)
@@ -2084,9 +2137,7 @@ class App:
                 track = (session.current() or {}).get("track") if session else ""
                 try:
                     if n < 2 and session and not session.ended:
-                        if (item_id, k) not in self._online_found:
-                            s2, found = self._online_find(item, season, episode, track=track or "", prefer=site["id"])
-                            self._online_found[(item_id, k)] = (s2, found, time.time())
+                        self._episode_video(item, season, episode, track=track or "", prefer=site["id"])
                     else:
                         self.scraper.episode_page(site, item, season, episode)
                         self._online_linked(item, k, site)
@@ -2227,7 +2278,101 @@ class App:
         self._online_track.pop(item["id"], None)
         self.torrents.replace_for(item["id"], "")
         return self.store.update(item["id"], {"online_links": {}, "online_site_eps": {}, "local_folder": "",
-                                              "local_file": "", "local_broken": False})
+                                              "local_file": "", "local_broken": False, "picked": {}})
+
+    # ---- finding a video yourself (picker.py)
+
+    def pick_start(self, item, body):
+        """Open the episode (or film) on one of your sites in a browser the app watches."""
+        sites = self._video_sites(item)
+        if not sites:
+            raise ApiError("add your own video site in Settings first")
+        series = item["format"] == "series"
+        season = max(1, int(body.get("season") or 1)) if series else None
+        episode = max(1, int(body.get("episode") or 1)) if series else None
+        key = f"{season}:{episode}" if series else "movie"
+        site = next((x for x in sites if x["id"] == body.get("site")), None) or self._online_order(item, key)[0]
+        track = "dub" if body.get("track") == "dub" else ("sub" if item["type"] == "anime" else "")
+        url = ""
+        if series:
+            url = (self.scraper.linked_episodes(item["id"], site) or {}).get(key) or ""
+        if not url:
+            url = scrape.search_url(site, item["title"]) if site.get("kind") not in ("archive", "json_api") else site["url"]
+        webtools.ADBLOCK = self.settings.get()["adblock"]
+        try:
+            job = picker.start(item["id"], season, episode, site["id"], url)
+        except RuntimeError as e:
+            raise ApiError(str(e)) from e
+        job.track = track
+        return dict(job.view(), site=site["name"], track=track, key=key)
+
+    def pick_view(self, job_id):
+        job = picker.get(job_id)
+        if not job:
+            raise ApiError("that browser window has gone", HTTPStatus.NOT_FOUND)
+        try:
+            picked = self.store.get(job.item_id).get("picked") or {}
+        except KeyError:
+            picked = {}
+        return dict(job.view(), picked=picked, track=getattr(job, "track", ""))
+
+    def pick_use(self, job_id, body):
+        """The video you chose: this episode is connected to it (and the rest the same way),
+        and the site is remembered for next time."""
+        job = picker.get(job_id)
+        if not job:
+            raise ApiError("that browser window has gone", HTTPStatus.NOT_FOUND)
+        entry = next((v for v in job.videos if v["n"] == int(body.get("n") or 0)), None)
+        if not entry:
+            raise ApiError("that video isn't in the list")
+        item = self.store.get(job.item_id)
+        track = getattr(job, "track", "") or ""
+        series = item["format"] == "series"
+        key = f"{job.season}:{job.episode}" if series else "movie"
+        headers = entry["headers"]
+        page = entry["page"] or job.page
+        found = {"url": entry["url"], "referer": headers.get("Referer") or page,
+                 "headers": {k: v for k, v in headers.items() if k in ("Origin", "User-Agent", "Cookie")},
+                 "subtitle": scrape.pick_subtitle(list(job.subs), headers) if track != "dub" else None,
+                 "page": page, "entry": {"url": page, "name": item["title"]},
+                 "stream": {"kind": track or "sub", "label": entry["frame"] or entry["host"]}}
+        # The site it's on: one of yours (the page's server), else the one it was opened on.
+        sites = self._video_sites(item)
+        host = urllib.parse.urlsplit(page).netloc.lower().removeprefix("www.")
+        site = next((x for x in sites if urllib.parse.urlsplit(x["url"]).netloc.lower().removeprefix("www.") == host), None) \
+            or next((x for x in sites if x["id"] == job.site_id), None)
+        if not site:
+            raise ApiError("that video site isn't in Settings any more")
+        # Learned for the site (for every title on it).
+        recipe = picker.recipe(job, entry)
+        for h in {urllib.parse.urlsplit(site["url"]).netloc.lower(), urllib.parse.urlsplit(page).netloc.lower()}:
+            if h:
+                webtools.LEARNED[h] = recipe
+        write_json(self._learned_path, webtools.LEARNED)
+        # This episode's page, kept until Delete connections.
+        if series:
+            self.scraper.set_episode(item, site, job.season, job.episode, page)
+        else:
+            self.scraper.pin_entry(item, site, page)
+            self.scraper._remember(item["id"], site, movie_page={"entry": page, "url": page})
+        self._online_linked(item, key, site)
+        self._online_found[(item["id"], key)] = (site, found, time.time())
+        if track:
+            self._online_track[item["id"]] = track
+        picked = dict(item.get("picked") or {})
+        picked[track or "video"] = {"site": site["id"], "site_name": site["name"], "key": key, "page": page,
+                                    "from": entry["frame"] or entry["host"], "at": time.time()}
+        self.store.update(item["id"], {"picked": picked})
+        if series:
+            # The other episodes, connected the same way (in the background).
+            threading.Thread(target=self._link_around_first, args=(item, site, key), daemon=True).start()
+        return {"ok": True, "picked": picked, "site": site["name"]}
+
+    def pick_close(self, job_id):
+        job = picker.get(job_id)
+        if job:
+            job.close()
+        return {"ok": True}
 
     def scraped_unlink(self, item, body):
         """Forget the title found on a site (a wrong match, or to start over)."""
@@ -2290,39 +2435,75 @@ class App:
         key = f"{season}:{episode}" if series else "movie"
         label = meta.get("label") or self._label(item, key)
         report("preparing", 0.05, None, f"{label} - finding it on {source['name']}")
-        mine = next((x for x in self.settings.get().get("video_sites") or [] if x["url"] == source["url"]), None)
-        site = mine or scrape.clean([{"name": source["name"], "url": source["url"], "types": [item["type"]]}])[0]
+        site = self._party_site(source, item)
+        track = meta.get("track") or ""
+        report("preparing", 0.2, None, f"{label} - opening it on {source['name']}")
+        # Found by this app, from here: a site's video link is often good only for the computer
+        # that found it (Atlantic: "error code 14"), so the host's is the last resort.
+        found = None
+        try:
+            pin = "" if self.scraper.remembered(item["id"], site) else str(meta.get("entry") or "")
+            if pin:
+                found = self.scraper.resolve(site, item, season, episode, pin=pin, track=track)
+                self._online_found[(item["id"], key)] = (site, found, time.time())
+            else:
+                found = self._episode_video(item, season, episode, track=track, prefer=site["id"])[1]
+        except (scrape.ScrapeError, OnlineError):
+            found = None
         url = str(meta.get("url") or "")
-        if url.startswith(("http://", "https://")) and not scrape.scrambled_playlist(url, dict(meta.get("headers") or {}, Referer=meta.get("referer") or "")):
-            report("preparing", 0.6, None, label)
+        if not (found and found.get("url")) and url.startswith(("http://", "https://")) \
+                and not scrape.scrambled_playlist(url, dict(meta.get("headers") or {}, Referer=meta.get("referer") or "")):
             found = {"url": url, "referer": meta.get("referer") or "", "headers": meta.get("headers") or {},
-                     "subtitle": meta.get("sub") or "", "stream": {"kind": meta.get("track") or "sub"}}
-        else:
-            report("preparing", 0.2, None, f"{label} - opening it on {source['name']}")
-            try:
-                found = self.scraper.resolve(site, item, season, episode, pin=str(meta.get("entry") or ""),
-                                             track=meta.get("track") or "")
-            except scrape.ScrapeError:
-                return None
-            if not found.get("url"):
-                return None
+                     "subtitle": meta.get("sub") or "", "stream": {"kind": track or "sub"}}
+        if not (found and found.get("url")):
+            return None
+        self._online_found[(item["id"], key)] = (site, found, time.time())
+        self._online_linked(item, key, site)
+        if track:
+            self._online_track[item["id"]] = track
         report("preparing", 0.9, None, label)
-        entry = self._web_entry(item, site, key, found)
+        entry = dict(self._web_entry(item, site, key, found), online=True)
         entry["item_id"] = item["id"]
         if series:
-            # The next episode, ready when the host moves on.
+            # The next episode found now (ready when the host moves on), the others linked.
             threading.Thread(target=self._prefetch_online, args=(site, item, season, episode + 1, meta),
                              daemon=True).start()
         return entry
+
+    def _party_site(self, source, item):
+        """The host's video site, as one of this app's own (added to your sites if it isn't one,
+        so everything works the same for you: Sub / Dub, its episodes linked, playing on later)."""
+        sites = self.settings.get().get("video_sites") or []
+        host = urllib.parse.urlsplit(source["url"]).netloc.lower().removeprefix("www.")
+        mine = next((x for x in sites if x["url"] == source["url"]), None) or \
+            next((x for x in sites if urllib.parse.urlsplit(x["url"]).netloc.lower().removeprefix("www.") == host), None)
+        if mine:
+            if item["type"] not in mine.get("types", []) or not mine.get("on", True):
+                changed = [dict(x, types=sorted(set(x.get("types") or []) | {item["type"]}), on=True) if x is mine else x
+                           for x in sites]
+                try:
+                    self.settings.update({"video_sites": changed})
+                except (ValueError, TypeError):
+                    pass
+                mine = next((x for x in self.settings.get().get("video_sites") or [] if x["id"] == mine["id"]), mine)
+            return mine
+        new = scrape.clean([{"name": source["name"], "url": source["url"], "types": [item["type"]]}])[0]
+        try:
+            self.settings.update({"video_sites": [*sites, new]})
+            return next((x for x in self.settings.get().get("video_sites") or [] if x["url"] == new["url"]), new)
+        except (ValueError, TypeError):
+            return new
 
     def _prefetch_online(self, site, item, season, episode, meta):
         total = item.get("episodes_total") or 0
         if total and episode > total:
             return
         try:
-            self.scraper.resolve(site, item, season, episode, pin=str(meta.get("entry") or ""), track=meta.get("track") or "")
-        except scrape.ScrapeError:
+            self._episode_video(item, season, episode, track=meta.get("track") or "", prefer=site["id"])
+        except (scrape.ScrapeError, OnlineError):
             pass
+        # ...and the rest of the episodes linked on the site, as when you play it yourself.
+        self._link_around(item["id"], site, f"{season}:{max(1, episode - 1)}")
 
     def _party_url_entry(self, item, meta):
         """The host plays a video from their own site: the guest streams the same one."""
@@ -2505,6 +2686,10 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/scraped/unlink", "scraped_unlink"),
         ("GET", r"/api/items/(\w+)/online/links", "online_links"),
         ("POST", r"/api/items/(\w+)/connections/clear", "clear_connections"),
+        ("POST", r"/api/items/(\w+)/pick", "pick_start"),
+        ("GET", r"/api/pick/(\w+)", "pick_view"),
+        ("POST", r"/api/pick/(\w+)/use", "pick_use"),
+        ("POST", r"/api/pick/(\w+)/close", "pick_close"),
         ("POST", r"/api/party-server/find", "find_party_server"),
         ("GET", r"/api/items/(\w+)/subs", "subs_info"),
         ("POST", r"/api/items/(\w+)/subs/find", "find_subs"),
@@ -3362,6 +3547,18 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 continue
         raise ApiError("none of the public watch-party servers answered - check your internet connection")
+
+    def api_pick_start(self, body, item_id):
+        return self.app.pick_start(self.app.item(item_id), body)
+
+    def api_pick_view(self, body, job_id):
+        return self.app.pick_view(job_id)
+
+    def api_pick_use(self, body, job_id):
+        return self.app.pick_use(job_id, body)
+
+    def api_pick_close(self, body, job_id):
+        return self.app.pick_close(job_id)
 
     def api_clear_connections(self, body, item_id):
         return self.app.clear_connections(self.app.item(item_id), body)

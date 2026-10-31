@@ -84,6 +84,93 @@ def find():
     return next((p for p in _installed() if p and os.path.isfile(p)), "")
 
 
+def _downloaded_full():
+    if sys.platform == "darwin":
+        found = list((HOME / "chrome").glob("chrome-*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"))
+    elif sys.platform == "win32":
+        found = list((HOME / "chrome").glob("chrome-*/chrome.exe"))
+    else:
+        found = list((HOME / "chrome").glob("chrome-*/chrome"))
+    return str(found[0]) if found else ""
+
+
+def find_full():
+    """A Chromium that can show a window: one on the computer, else Google's (fetched)."""
+    return next((p for p in _installed() if p and os.path.isfile(p)), "") or _downloaded_full()
+
+
+def download_full():
+    """Google's ordinary Chrome for Testing, fetched into the app's folder once (for the
+    window you find a video in, on a computer without Chrome)."""
+    with _download:
+        if _downloaded_full():
+            return _downloaded_full()
+        with urllib.request.urlopen(CFT, timeout=30) as r:
+            info = json.loads(r.read())
+        rows = info["channels"]["Stable"]["downloads"]["chrome"]
+        url = next(x["url"] for x in rows if x["platform"] == _platform())
+        dest = HOME / "chrome"
+        dest.mkdir(parents=True, exist_ok=True)
+        part = dest / "download.zip"
+        with urllib.request.urlopen(url, timeout=900) as r, open(part, "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
+        if sys.platform == "win32":
+            with zipfile.ZipFile(part) as z:
+                z.extractall(dest)
+        else:
+            # (unzip keeps the app's links and permissions, which Python's zipfile doesn't)
+            subprocess.run(["ditto", "-x", "-k", str(part), str(dest)] if sys.platform == "darwin"
+                           else ["unzip", "-q", "-o", str(part), "-d", str(dest)], check=True)
+        part.unlink(missing_ok=True)
+        return _downloaded_full()
+
+
+def watch(url, job):
+    """An ordinary browser window at `url` whose every video goes to `job` (picker.py).
+    Returns what closes it."""
+    from . import picker, webtools
+    exe = find_full() or download_full()
+    if not exe:
+        raise CDPError("no Chrome to show the page in")
+    browser = Browser(exe, visible=url, profile="profile-browse")
+    target = None
+    for _ in range(50):
+        pages = [t for t in browser.call("Target.getTargets").get("targetInfos", []) if t.get("type") == "page"]
+        target = next((t["targetId"] for t in pages if not t.get("url", "").startswith(("about:", "chrome:"))), None) \
+            or (pages[0]["targetId"] if pages else None)
+        if target:
+            break
+        time.sleep(0.1)
+
+    def on_request(u, headers, kind):
+        if u.startswith(picker.CLICKED_ON):
+            job.clicked(urllib.parse.unquote(u[len(picker.CLICKED_ON):]))
+        elif webtools.VIDEO.search(urllib.parse.urlsplit(u).path) or kind == "Media":
+            job.video(u, headers)
+        elif webtools.SUBTITLE.search(urllib.parse.urlsplit(u).path) or webtools.SUBTITLE_ASK.search(u):
+            job.subtitle(u)
+
+    def on_response(u, mime, headers):
+        if "mpegurl" in mime or "dash+xml" in mime or mime.startswith("video/"):
+            job.video(u, headers)
+        elif "text/vtt" in mime or "subrip" in mime or "x-ass" in mime:
+            job.subtitle(u)
+    scripts = [picker.TRACK_JS] + ([webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
+    page = _Page(browser, scripts, on_request, on_response, target=target)
+
+    def follow():
+        # The page you're on (for linking the episode to it), until the window is closed.
+        while browser.alive():
+            try:
+                job.page = page.run("location.href") or job.page
+            except CDPError:
+                pass
+            time.sleep(1.5)
+        job.closed()
+    threading.Thread(target=follow, daemon=True).start()
+    return browser.close
+
+
 def download(log=lambda *_: None):
     """Google's headless Chromium for this computer, fetched into the app's folder once."""
     with _download:
@@ -184,21 +271,24 @@ class _Socket:
 class Browser:
     """One headless Chromium, its pages opened and closed as they're needed."""
 
-    def __init__(self, exe):
-        self.profile = HOME / "profile"
+    def __init__(self, exe, visible="", profile="profile"):
+        self.profile = HOME / profile
         self.profile.mkdir(parents=True, exist_ok=True)
         (self.profile / "DevToolsActivePort").unlink(missing_ok=True)
         # Headless, except a full Chromium can run as an ordinary window kept off the screen
-        # (WATCHLIST_CDP_WINDOW=1): some players only start in an ordinary browser.
+        # (WATCHLIST_CDP_WINDOW=1): some players only start in an ordinary browser. `visible`:
+        # an ordinary window you use (picker.py), open at that page.
         shown = os.environ.get("WATCHLIST_CDP_WINDOW") == "1" and "headless-shell" not in exe
         mode = ["--window-position=-10000,-10000", "--no-startup-window"] if shown else ["--headless=new"]
+        if visible:
+            mode = ["--new-window"]
         args = [exe, *mode, "--remote-debugging-port=0", f"--user-data-dir={self.profile}",
-                "--autoplay-policy=no-user-gesture-required", "--mute-audio", "--no-first-run",
+                "--autoplay-policy=no-user-gesture-required", *([] if visible else ["--mute-audio"]), "--no-first-run",
                 "--no-default-browser-check", "--disable-background-timer-throttling",
                 "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
                 "--window-size=1280,720",
                 # (as an ordinary browser: some sites send a browser that says it's automated home)
-                "--disable-blink-features=AutomationControlled", "about:blank"]
+                "--disable-blink-features=AutomationControlled", visible or "about:blank"]
         if not self._launch(args):
             # One left running on its folder (the app closed without stopping it): a new one
             # only hands over to it and goes. Stop that one, then start again.
@@ -340,12 +430,12 @@ def shutdown():
 class _Page:
     """A page (and every frame in it, the players from other sites too)."""
 
-    def __init__(self, browser, scripts, on_request=None, on_response=None):
+    def __init__(self, browser, scripts, on_request=None, on_response=None, target=None):
         self.b, self.scripts, self.ua = browser, scripts, browser.ua
         self.on_request, self.on_response = on_request, on_response
         self.sessions, self.extra = set(), {}
         self.loaded = threading.Event()
-        self.target = browser.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+        self.target = target or browser.call("Target.createTarget", {"url": "about:blank"})["targetId"]
         browser.handlers.append(self._event)
         self.session = browser.call("Target.attachToTarget", {"targetId": self.target, "flatten": True})["sessionId"]
         self._prepare(self.session, top=True)
@@ -437,6 +527,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
     from . import webtools
     open_page = open_page or _chromium_page
     page = None
+    click = webtools.learned_click(url, click)
     found, got, opts = [], threading.Event(), {"subs": []}
 
     def keep(video, headers):
@@ -493,7 +584,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
                 got.wait(0.5)
                 if got.is_set():
                     time.sleep(1.2)
-                    if videos():
+                    if videos() and (webtools.learned_found(url, videos()) or time.time() > deadline - timeout + 20):
                         break
                     got.clear()
                 if click and not opts.get("clicked_at") and videos() and (opts.get("no_click") or time.time() > deadline - timeout + 15):
@@ -502,7 +593,8 @@ def catch_video(url, timeout=30, click=None, open_page=None):
             if not found:
                 return None
             after = [f for f in found if f[2] >= opts.get("clicked_at", 0)] or found
-            best = min(after, key=lambda f: (0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1, after.index(f)))
+            best = min(after, key=lambda f: (webtools.learned_rank(url, f[0], f[1]),
+                                             0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1, after.index(f)))
             return {"url": best[0], "headers": best[1], "subs": list(opts["subs"])}
         except CDPError:
             return None

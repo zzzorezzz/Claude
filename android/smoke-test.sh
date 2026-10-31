@@ -20,5 +20,5 @@ if [ "$ok" = 1 ]; then
   adb shell input keyevent 82 || true
   timeout 600 bash android/torrent-test.sh || true
 fi
-adb logcat -d | grep -iE "python|chaquopy|jlibtorrent|libtorrent|watchanything|AndroidRuntime|FATAL" | tail -120
+timeout 30 adb logcat -d | grep -iE "python|chaquopy|jlibtorrent|libtorrent|watchanything|AndroidRuntime|FATAL" | tail -120
 [ "$ok" = 1 ]
