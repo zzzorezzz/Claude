@@ -21,7 +21,7 @@ mp.register_event("end-file", function() mp.msg.info("POS " .. string.format("%.
 
 def play5(mpv, found, script):
     cmd = [mpv, "--no-config", "--vo=null", "--ao=null", "--length=5", "--msg-level=all=info,ffmpeg=error",
-           f"--script={script}", "--network-timeout=30"]
+           f"--script={script}", "--network-timeout=30", "--demuxer-lavf-o-append=extension_picky=0"]
     if found.get("referer"):
         cmd.append(f"--referrer={found['referer']}")
     cmd += [f"--http-header-fields-append={k}: {v}" for k, v in (found.get("headers") or {}).items()

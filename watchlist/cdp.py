@@ -199,21 +199,13 @@ class Browser:
                 "--window-size=1280,720",
                 # (as an ordinary browser: some sites send a browser that says it's automated home)
                 "--disable-blink-features=AutomationControlled", "about:blank"]
-        kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        self.proc = subprocess.Popen(args, **kwargs)
-        port_file = self.profile / "DevToolsActivePort"
-        for _ in range(150):
-            if port_file.is_file() and len(port_file.read_text().split()) >= 2:
-                break
-            if self.proc.poll() is not None:
+        if not self._launch(args):
+            # One left running on its folder (the app closed without stopping it): a new one
+            # only hands over to it and goes. Stop that one, then start again.
+            _stop_others(self.profile)
+            if not self._launch(args):
                 raise CDPError("the video finder (Chromium) didn't start")
-            time.sleep(0.1)
-        else:
-            self.close()
-            raise CDPError("the video finder (Chromium) didn't start")
-        port, path = port_file.read_text().split()[:2]
+        port, path = (self.profile / "DevToolsActivePort").read_text().split()[:2]
         self.ws = _Socket(f"ws://127.0.0.1:{port}{path}")
         self.ids, self.waiting, self.handlers = 0, {}, []
         self.lock = threading.Lock()
@@ -223,6 +215,23 @@ class Browser:
             self.ua = self.call("Browser.getVersion")["userAgent"].replace("HeadlessChrome", "Chrome")
         except (CDPError, KeyError):
             self.ua = UA
+
+    def _launch(self, args):
+        kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        port_file = self.profile / "DevToolsActivePort"
+        port_file.unlink(missing_ok=True)
+        self.proc = subprocess.Popen(args, **kwargs)
+        for _ in range(150):
+            if port_file.is_file() and len(port_file.read_text().split()) >= 2:
+                return True
+            if self.proc.poll() is not None:
+                return False
+            time.sleep(0.1)
+        if self.proc.poll() is None:
+            self.proc.kill()
+        return False
 
     def alive(self):
         return self.proc.poll() is None and not getattr(self, "dead", False)
@@ -281,6 +290,33 @@ class Browser:
             pass
         if self.proc.poll() is None:
             self.proc.kill()
+
+
+def _stop_others(profile):
+    """Stop browsers still running on the video finder's own folder (none but its own use it)."""
+    mark = str(profile)
+    try:
+        if sys.platform == "win32":
+            out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                  "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }"],
+                                 capture_output=True, text=True, timeout=30,
+                                 creationflags=subprocess.CREATE_NO_WINDOW).stdout
+        else:
+            out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return
+    for line in out.splitlines():
+        pid, _, cmd = line.strip().partition(" ")
+        if mark in cmd and "--remote-debugging-port" in cmd and pid.isdigit() and int(pid) != os.getpid():
+            try:
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True, timeout=15,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                else:
+                    os.kill(int(pid), 9)
+            except (OSError, subprocess.SubprocessError):
+                pass
+    time.sleep(1)
 
 
 def _get_browser():

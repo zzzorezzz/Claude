@@ -230,7 +230,10 @@ class Session:
         cmd = base + [f"--input-ipc-server={self.address}", "--force-window=immediate",
                "--keep-open=no", "--idle=no", "--save-position-on-quit=no", "--terminal=no",
                "--sub-auto=fuzzy", "--slang=en,eng,english", "--autofit-larger=90%x90%",
-               "--title=${media-title} - Watch Anything"]
+               "--title=${media-title} - Watch Anything",
+               # Video sites' chunks can be named like pictures (.image, .jpg...): newer FFmpeg
+               # (the Mac's) turns those down unless told not to.
+               "--demuxer-lavf-o-append=extension_picky=0"]
         if self.audio_langs:
             cmd.append(f"--alang={self.audio_langs}")
         cmd += self.extra_args
