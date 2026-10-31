@@ -67,6 +67,23 @@ final class Pages {
     Pages(Activity activity, FrameLayout root) {
         this.activity = activity;
         this.root = root;
+        // A page's background workers ask for things too (a player's playlist, sometimes):
+        // told to every page being watched.
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_BASIC_USAGE)
+                    && WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_SHOULD_INTERCEPT_REQUEST)) {
+                androidx.webkit.ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(
+                        new androidx.webkit.ServiceWorkerClientCompat() {
+                            @Override
+                            public WebResourceResponse shouldInterceptRequest(WebResourceRequest req) {
+                                String url = req.getUrl().toString();
+                                if (url.startsWith("http")) for (Hidden h : pages.values()) tell(h, url, req);
+                                return null;
+                            }
+                        });
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     /** On the UI thread, waiting for it (up to `seconds`). */

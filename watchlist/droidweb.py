@@ -119,8 +119,12 @@ class Page:
 
     def _peek(self, u, headers):
         import urllib.request
+        import urllib.parse
         h = {k: v for k, v in headers.items() if k in ("User-Agent", "Referer", "Origin", "Cookie")}
         h.setdefault("User-Agent", self.ua)
+        if h.get("Referer") and not h.get("Origin"):
+            # (the phone's browser doesn't tell the Origin it sends: the page's, as browsers do)
+            h["Origin"] = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(h["Referer"]))
         try:
             req = urllib.request.Request(u, headers=dict(h, Range="bytes=0-511"))
             with urllib.request.urlopen(req, timeout=10) as r:
