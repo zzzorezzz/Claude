@@ -1665,7 +1665,15 @@ body.pick-window #nav, body.pick-window #view, body.pick-window #party-dock { di
 
 /* Settings → Downloads: its folders; the Extra files window */
 .folder-btns { margin-top: 6px; flex-wrap: wrap; }
-.xf-list { display: grid; gap: 8px; margin-top: 14px; max-height: 60vh; overflow: auto; }
+.xf-tree { margin-top: 14px; max-height: 62vh; overflow: auto; display: grid; gap: 6px; }
+.xf-root { padding: 2px 4px 6px; overflow-wrap: anywhere; }
+.xf-dir > summary { display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 8px 10px; border-radius: 8px;
+  background: var(--panel-2); border: 1px solid var(--line); list-style: none; }
+.xf-dir > summary::-webkit-details-marker { display: none; }
+.xf-dir > summary::before { content: "▸"; color: var(--muted); transition: transform .15s; }
+.xf-dir[open] > summary::before { transform: rotate(90deg); }
+.xf-dir-name { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.xf-in { display: grid; gap: 6px; padding: 6px 0 2px 18px; border-left: 1px dashed var(--line); margin-left: 12px; }
 .xf-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px;
   border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); }
 .xf-name { min-width: 0; overflow-wrap: anywhere; }

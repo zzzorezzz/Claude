@@ -3222,8 +3222,13 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.library.state()
 
     def api_library_extra(self, body):
-        return {"files": self.app.library.extra_files(), "ai": bool(ai.available(self.app.settings.get()))
-                if hasattr(ai, "available") else True}
+        """Your downloads no title plays from: not matched to a title, not in a title's own folder
+        (the folder chosen on its page), not one of a title's torrent's files."""
+        folders = [i["local_folder"] for i in self.app.store.list() if i.get("local_folder")]
+        files = [f for f in self.app.library.extra_files()
+                 if not any(_inside(f["path"], d) for d in folders) and not self.app.torrents.find_file(f["path"])]
+        return {"files": files, "folder": self.app.settings.get().get("downloads_folder") or "",
+                "ai": bool(ai.available(self.app.settings.get()))}
 
     def api_library_extra_ai(self, body):
         """Extra files matched again by the app (with your AI helper): each back in Sort your

@@ -4302,33 +4302,68 @@ function openTitleFiles(item, local) {
 }
 
 // Move one file: to another title or episode, out of its title, or ignore it.
-// Downloads no title uses (you took them out of a title, told the app to ignore them, or it
-// couldn't tell what they are): linked again by the app with your AI helper, or by you.
+// Your downloads folder as you'd browse it, showing only the videos no title plays from
+// (not matched to a title, not in a title's own folder, not a torrent's): you took them out,
+// told the app to ignore them, or it couldn't tell what they are. Link them again: the app
+// (with your AI helper) works out what they are, or you choose.
 async function openExtraFiles() {
+  const withAi = (S.status.ai || []).length ? 'AI' : 'the app';
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>Extra files</h2>
-    <p class="sub">Videos in your downloads folder that no title uses right now. Link them again: let the app${(S.status.ai || []).length ? ' and your AI helper' : ''} work out what they are, or choose yourself.</p>
-    <div class="btns"><button class="btn btn-white btn-sm" data-xf="ai-all">✨ Link all with ${(S.status.ai || []).length ? 'AI' : 'the app'}</button></div>
-    <div class="xf-list"><div class="spinner"></div></div></div>`, 'xf-modal');
-  const list = $('.xf-list', wrap);
+    <p class="sub">Your downloads folder, showing only the videos no title plays from. Link them again: let ${withAi === 'AI' ? 'the app and your AI helper' : 'the app'} work out what they are, or choose yourself.</p>
+    <div class="btns xf-top"></div>
+    <div class="xf-tree"><div class="spinner"></div></div></div>`, 'xf-modal');
+  const tree = $('.xf-tree', wrap);
   let files = [];
+  const open = new Set(wrap.st?.open || []);
   const draw = async () => {
-    try { files = (await api('GET', '/api/library/extra')).files; } catch (e) { fail(e); return; }
+    let d;
+    try { d = await api('GET', '/api/library/extra'); } catch (e) { fail(e); return; }
     if (!wrap.isConnected) return;
-    list.innerHTML = files.length ? files.map((f, i) => `<div class="xf-row">
-        <div class="xf-name"><b title="${esc(f.rel)}">${esc(f.name)}</b>
-          <div class="muted small">${esc(f.why)}${f.size ? ` · ${fmtBytes(f.size)}` : ''} · ${esc(f.rel)}</div></div>
-        <div class="btns"><button class="btn btn-ghost btn-sm" data-xf="ai" data-i="${i}">✨ Link with ${(S.status.ai || []).length ? 'AI' : 'the app'}</button>
-          <button class="btn btn-ghost btn-sm" data-xf="choose" data-i="${i}">Choose…</button></div></div>`).join('')
-      : '<p class="muted">Every video in your downloads is used by a title.</p>';
+    files = d.files;
+    $('.xf-top', wrap).innerHTML = files.length
+      ? `<button class="btn btn-white btn-sm" data-xf="ai-all">✨ Link all ${files.length} with ${withAi}</button>` : '';
+    if (!files.length) { tree.innerHTML = '<p class="muted">Every video in your downloads folder is used by a title.</p>'; return; }
+    // The folders, as they are on disk, with the files in each.
+    const root = { dirs: {}, files: [] };
+    files.forEach((f, i) => {
+      const parts = f.rel.split('/');
+      let node = root;
+      parts.slice(0, -1).forEach((p) => { node = node.dirs[p] = node.dirs[p] || { dirs: {}, files: [] }; });
+      node.files.push(i);
+    });
+    const count = (node) => node.files.length + Object.values(node.dirs).reduce((n, x) => n + count(x), 0);
+    const all = (node) => [...node.files, ...Object.values(node.dirs).flatMap(all)];
+    const row = (i) => {
+      const f = files[i];
+      return `<div class="xf-row"><div class="xf-name">🎞️ <b title="${esc(f.rel)}">${esc(f.name)}</b>
+          <div class="muted small">${esc(f.why)}${f.size ? ` · ${fmtBytes(f.size)}` : ''}</div></div>
+        <div class="btns"><button class="btn btn-ghost btn-sm" data-xf="ai" data-i="${i}">✨ Link with ${withAi}</button>
+          <button class="btn btn-ghost btn-sm" data-xf="choose" data-i="${i}">Choose…</button></div></div>`;
+    };
+    const folder = (name, node, path) => `<details class="xf-dir" data-path="${esc(path)}" ${open.has(path) ? 'open' : ''}>
+        <summary><span class="xf-dir-name">📁 ${esc(name)}</span><span class="muted small">${count(node)} file${count(node) === 1 ? '' : 's'}</span>
+          <button class="btn btn-ghost btn-sm" data-xf="ai-dir" data-rels="${esc(JSON.stringify(all(node).map((i) => files[i].rel)))}">✨ Link these</button></summary>
+        <div class="xf-in">${branch(node, path)}</div></details>`;
+    const branch = (node, path) => Object.keys(node.dirs).sort((a, b) => a.localeCompare(b))
+      .map((name) => folder(name, node.dirs[name], path ? `${path}/${name}` : name)).join('')
+      + node.files.map(row).join('');
+    tree.innerHTML = `<div class="xf-root muted small">📂 ${esc(d.folder || 'Downloads')}</div>${branch(root, '')}`;
   };
+  tree.addEventListener('toggle', (e) => {
+    const dir = e.target.closest('.xf-dir');
+    if (!dir) return;
+    if (dir.open) open.add(dir.dataset.path); else open.delete(dir.dataset.path);
+  }, true);
   wrap.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-xf]');
     if (!b) return;
+    if (b.closest('summary')) e.preventDefault();             // (a button on a folder's line: not opening it)
     const f = files[Number(b.dataset.i)];
     try {
       if (b.dataset.xf === 'choose') { openMoveFile(null, f, draw); return; }
-      const rels = b.dataset.xf === 'ai-all' ? files.map((x) => x.rel) : [f.rel];
+      const rels = b.dataset.xf === 'ai-all' ? files.map((x) => x.rel)
+        : b.dataset.xf === 'ai-dir' ? JSON.parse(b.dataset.rels) : [f.rel];
       if (!rels.length) return;
       S.library = await api('POST', '/api/library/extra/ai', { rels });
       toast(`Linking ${rels.length} file${rels.length === 1 ? '' : 's'} - what's still unclear waits in Sort your downloads`);
