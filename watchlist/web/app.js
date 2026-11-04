@@ -4631,7 +4631,7 @@ async function drawEpisodes(wrap) {
     const bar = (at ? `<div class="ep-bar" title="Stopped at ${fmtTime(at.pos)}"><i style="width:${at.dur ? Math.min(100, (at.pos / at.dur) * 100).toFixed(1) : 0}%"></i></div>
       <div class="small muted">Stopped at ${fmtTime(at.pos)}${at.dur ? ` of ${fmtTime(at.dur)}` : ''}</div>` : '')
       + (f ? `<div class="ep-file" title="${f.stream ? 'In the torrent' : esc(f.path)}"><span>${esc(f.name)}</span>${f.rel ? `<button class="ep-move" data-move="${esc(key)}" title="This file is in the wrong place? Move it">Move…</button>` : ''}
-        ${f.torrent && !f.torrent.complete ? `<button class="ep-move" data-whole="${esc(key)}" title="Download this episode whole now, without playing it (faster than while streaming) - it's kept">⤓ Download</button>` : ''}
+        ${f.torrent && !f.torrent.complete ? `<button class="ep-move" data-whole="${esc(key)}" title="Download this episode whole now, without playing it (faster than while streaming). It's deleted like the others unless Keep downloaded episodes is ticked">⤓ Download</button>` : ''}
         ${!f.stream || (f.torrent && f.torrent.progress > 0) ? `<button class="ep-move ep-del" data-del="${esc(key)}" title="${f.torrent ? 'Delete what\'s downloaded of this episode' : 'Move this file to the Recycle Bin / Trash'}">${ICON.trash}</button>` : ''}</div>` : '');
     if (d) {
       rows.push(`<div class="ep ${current ? 'current' : ''} ${watched ? 'watched' : ''}" data-ep="${key}">

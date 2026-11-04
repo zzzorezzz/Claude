@@ -631,7 +631,8 @@ class Torrents:
 
     def download_whole(self, h, index):
         """A file downloaded whole, now, without playing it: every part as it comes (not from
-        the start in order, as for watching - that's slower), at full priority, and kept."""
+        the start in order, as for watching - that's slower), at full priority. It's deleted by
+        the same rules as any other (after watching, or unplayed) unless the title keeps its."""
         with self.lock:
             rec = self._rec(h)
             handle = self.handles.get(h)
@@ -1025,8 +1026,8 @@ class Torrents:
                 except TorrentError:
                     rec["finished"].pop(index, None)
                     continue
-                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]) or (rec.get("whole") or {}).get(index):
-                    continue                 # (kept: the title's are kept, or you downloaded this one whole)
+                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]):
+                    continue                 # (kept: "Keep downloaded episodes" is ticked for the title)
                 if self.path_of(rec, f) in playing or self.stream_url(h, f["index"], f["path"]) in playing:
                     continue
                 self.delete_file(h, int(index))
@@ -1091,8 +1092,8 @@ class Torrents:
                 if now - (rec.get("used") or {}).get(str(index), 0) < OLD_AFTER:
                     continue
                 f = self._file(rec, index)
-                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]) or self.keep.get(rec["item_id"])                         or (rec.get("whole") or {}).get(str(index)):
-                    continue                 # (kept: the title's are, or you downloaded this one whole)
+                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]) or self.keep.get(rec["item_id"]):
+                    continue
                 if self.stream_url(h, index, f["path"]) in playing:
                     continue
                 todo.append((p, found))

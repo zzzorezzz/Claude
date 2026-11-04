@@ -208,7 +208,7 @@ class TorrentTest(test_server.ServerBase):
         self.assertEqual(status, 200, r)
         rec = tor.records[h]
         self.assertEqual(rec["priorities"][str(index)], 7)
-        self.assertTrue(rec["whole"][str(index)], "kept: not deleted after watching")
+        self.assertTrue(rec["whole"][str(index)])
 
     def test_the_subtitle_comes_first(self):
         h = self.add()

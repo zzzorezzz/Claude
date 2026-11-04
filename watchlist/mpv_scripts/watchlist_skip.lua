@@ -186,8 +186,9 @@ mp.register_script_message("prev", function() step("playlist-prev", "previous ep
 -- click on the box) asks the app, which plays the episode from the site's next server.
 local stuck = { overlay = mp.create_osd_overlay("ass-events"), since = nil, shown = false, quiet_until = 0, last = nil }
 local function from_site()
+    -- (a video from one of your sites - not a torrent's stream or a file: those have no other source)
     local path = mp.get_property("path") or ""
-    return path:find("^https?://") ~= nil
+    return path:find("^https?://") ~= nil and not path:find("^https?://127%.0%.0%.1:%d+/stream/")
 end
 local function stuck_hide()
     if stuck.shown then
@@ -229,19 +230,45 @@ local function stuck_box()
     end
     stuck.shown = true
 end
+-- When to offer it: only when the video is really stuck, not just loading. What counts is
+-- whether data is still arriving: an episode opening gets 30 seconds (and only then if nothing
+-- has come for 10), one that stops mid-way gets 10 seconds of nothing coming; one that's slow
+-- but moving says "Loading slowly…" and is offered another source only after a minute.
+local flow = { last = mp.get_time(), opening = true, since = nil, slow = false }
+mp.observe_property("cache-speed", "number", function(_, v)
+    if v and v > 0 then flow.last = mp.get_time() end
+end)
 mp.add_periodic_timer(1, function()
+    local now = mp.get_time()
     local t = mp.get_property_number("playback-time")
-    local waiting = mp.get_property_bool("paused-for-cache") or (mp.get_property_bool("idle-active") == false and t == nil)
+    local cache_wait = mp.get_property_bool("paused-for-cache")
     local moving = t ~= nil and stuck.last ~= nil and math.abs(t - stuck.last) > 0.2
     stuck.last = t
-    if not from_site() or mp.get_property_bool("pause") and not mp.get_property_bool("paused-for-cache")
-            or moving or not waiting or mp.get_time() < stuck.quiet_until then
-        stuck.since = nil
+    if moving then flow.opening = false end
+    local waiting = cache_wait or (flow.opening and mp.get_property_bool("idle-active") == false)
+    if not from_site() or (mp.get_property_bool("pause") and not cache_wait)
+            or moving or not waiting or now < stuck.quiet_until then
+        flow.since, flow.slow = nil, false
         stuck_hide()
         return
     end
-    stuck.since = stuck.since or mp.get_time()
-    if mp.get_time() - stuck.since >= 5 then stuck_box() end
+    flow.since = flow.since or now
+    local waited, nothing_for = now - flow.since, now - flow.last
+    local offer
+    if flow.opening then
+        offer = (waited >= 30 and nothing_for >= 10) or waited >= 60
+    else
+        offer = (waited >= 10 and nothing_for >= 10) or waited >= 60
+    end
+    if waited >= 10 and nothing_for < 10 and loading.busy and not flow.slow then
+        flow.slow = true
+        loading.text = "Loading slowly…"        -- (still coming, just slowly: not stuck)
+    end
+    if offer then stuck_box() end
 end)
-mp.register_event("start-file", function() stuck.since, stuck.last = nil, nil; stuck_hide() end)
+mp.register_event("start-file", function()
+    stuck.last = nil
+    flow.opening, flow.since, flow.slow, flow.last = true, nil, false, mp.get_time()
+    stuck_hide()
+end)
 mp.register_event("end-file", stuck_hide)

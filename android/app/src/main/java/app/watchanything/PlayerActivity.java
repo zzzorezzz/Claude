@@ -87,9 +87,45 @@ public class PlayerActivity extends Activity {
                 })
                 .show();
     }
-    private final Runnable offerOtherSource = () -> {
-        if (otherSource != null && !this.session.isEmpty()) otherSource.setVisibility(View.VISIBLE);
+    // "Not working?" only when it's really stuck, not loading: an episode opening gets 30 seconds
+    // (and only if nothing has come for 10), one stopping mid-way 10 seconds of nothing coming;
+    // one that's slow but moving says "Loading slowly…" and is offered another source after a minute.
+    private long waitSince, lastData, lastBuffered;
+    private boolean opened, slowShown;
+    private final Runnable offerOtherSource = new Runnable() {
+        @Override
+        public void run() {
+            checkStuck();
+        }
     };
+
+    private boolean fromSite() {
+        MediaItem item = player.getCurrentMediaItem();
+        String uri = item != null && item.localConfiguration != null ? item.localConfiguration.uri.toString() : "";
+        return uri.startsWith("http") && !uri.contains("/stream/");
+    }
+
+    private void checkStuck() {
+        if (player == null || player.getPlaybackState() != Player.STATE_BUFFERING || !fromSite()) {
+            otherSource.setVisibility(View.GONE);
+            return;
+        }
+        long now = android.os.SystemClock.elapsedRealtime();
+        long buffered = player.getBufferedPosition();
+        if (buffered != lastBuffered) {
+            lastBuffered = buffered;
+            lastData = now;                     // (data still coming in)
+        }
+        long waited = now - waitSince, nothing = now - lastData;
+        boolean offer = opened ? (waited >= 10_000 && nothing >= 10_000) || waited >= 60_000
+                : (waited >= 30_000 && nothing >= 10_000) || waited >= 60_000;
+        if (waited >= 10_000 && nothing < 10_000 && !slowShown) {
+            slowShown = true;
+            show("Loading slowly…", 4000);
+        }
+        if (offer && !session.isEmpty()) otherSource.setVisibility(View.VISIBLE);
+        handler.postDelayed(offerOtherSource, 1000);
+    }
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     private final ExecutorService events = Executors.newSingleThreadExecutor();
@@ -276,6 +312,7 @@ public class PlayerActivity extends Activity {
         player.addListener(new Player.Listener() {
             @Override
             public void onMediaItemTransition(MediaItem item, int reason) {
+                opened = false;                  // (another episode opening)
                 // The one before ended by itself: it counts as watched.
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                     int prev = player.getCurrentMediaItemIndex() - 1;
@@ -288,8 +325,13 @@ public class PlayerActivity extends Activity {
             public void onPlaybackStateChanged(int st) {
                 handler.removeCallbacks(offerOtherSource);
                 loadingBar.setVisibility(st == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
-                if (st == Player.STATE_BUFFERING) handler.postDelayed(offerOtherSource, 5000);
-                else otherSource.setVisibility(View.GONE);
+                if (st == Player.STATE_READY) opened = true;
+                if (st == Player.STATE_BUFFERING) {
+                    waitSince = lastData = android.os.SystemClock.elapsedRealtime();
+                    lastBuffered = player.getBufferedPosition();
+                    slowShown = false;
+                    handler.postDelayed(offerOtherSource, 1000);
+                } else otherSource.setVisibility(View.GONE);
                 if (st == Player.STATE_ENDED) {
                     reportNow(true);
                     if (!keepOpen) finish();
@@ -390,6 +432,7 @@ public class PlayerActivity extends Activity {
                 .build());
         long start = (long) (play.optDouble("start", 0) * 1000);
         int first = Math.max(0, Math.min(items.size() - 1, play.optInt("index", 0)));
+        opened = false;                          // (a new list: opening, not stopped mid-way)
         player.setMediaItems(items, first, start);
         player.prepare();
         player.setPlayWhenReady(!play.optBoolean("paused", false));
