@@ -472,6 +472,8 @@ def open_app_window(url, browser="", storage=None):
         webview = None
     if webview is not None:
         try:
+            from . import webtools
+            webtools.patch()             # (its engine looked after: a crashed one is loaded again)
             dialogs.window = webview.create_window(
                 "Watch Anything", url, width=1440, height=900, min_size=(900, 600),
                 background_color="#0d0f1a")

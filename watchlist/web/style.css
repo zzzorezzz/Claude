@@ -1686,3 +1686,13 @@ body.pick-window #nav, body.pick-window #view, body.pick-window #party-dock { di
 .own-server pre { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
   white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; margin: 6px 0; user-select: text; }
 .party-help p { margin: 8px 0; }
+
+/* The party panel: "Make host", on someone the host points at */
+.pd-person { position: relative; }
+.pd-make-host { margin-left: auto; opacity: 0; transition: opacity .15s; }
+.pd-person:hover .pd-make-host, .pd-make-host:focus-visible { opacity: 1; }
+@media (hover: none) { .pd-make-host { opacity: 1; } }
+
+/* A title's magnets in order; Get magnet's season choice */
+.tor-order { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+.season-pick { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }

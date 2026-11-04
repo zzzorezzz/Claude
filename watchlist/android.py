@@ -51,6 +51,13 @@ def other_source(session_id):
         threading.Thread(target=_app._other_source, args=(session,), daemon=True).start()
 
 
+def switch_version(session_id):
+    """The phone player: Sub to Dub (or back), from where it is - as on a computer."""
+    session = phone_player._sessions.get(session_id)
+    if session and _app is not None:
+        threading.Thread(target=_app._switch_version, args=(session,), daemon=True).start()
+
+
 def player_event(session_id, data):
     """The phone player: what it's doing now (JSON: index, pos, dur, paused, ended)."""
     phone_player.event(session_id, data)

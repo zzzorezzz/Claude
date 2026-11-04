@@ -266,6 +266,11 @@ def patch():
                 _hook(_options(self.pywebview_window), sender.CoreWebView2)
         except Exception:  # noqa: BLE001 - the window works anyway, just without the extras
             pass
+        try:
+            if args.IsSuccess:
+                _recover(sender.CoreWebView2)
+        except Exception:  # noqa: BLE001
+            pass
 
     def on_new_window_request(self, sender, args):
         opts = _options(self.pywebview_window)
@@ -276,6 +281,19 @@ def patch():
 
     edge.on_webview_ready = on_webview_ready
     edge.on_new_window_request = on_new_window_request
+
+
+def _recover(core):
+    """The app's own window: if Edge's engine behind it crashes or stops answering (the window
+    goes blank), its page is loaded again - the app itself carries on."""
+    def failed(sender, args):
+        try:
+            source = str(sender.Source or "")
+            if source.startswith(("http://127.0.0.1", "http://localhost")):
+                sender.Reload()
+        except Exception:  # noqa: BLE001
+            pass
+    core.ProcessFailed += failed
 
 
 def _hook(opts, core):

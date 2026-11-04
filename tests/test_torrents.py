@@ -171,6 +171,45 @@ class TorrentTest(test_server.ServerBase):
         self.assertFalse(tor.records[h].get("held"))
         self.assertFalse(tor.handles[h].status().paused)
 
+    def test_at_start_whats_left_of_removed_torrents_goes(self):
+        h = self.add()
+        tor = self.app.torrents
+        folder = Path(tor._folders()[0])
+        stray = folder / "Old Show" / "Old.Show.E01.mkv"
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_bytes(b"x" * 10)
+        (tor.dir / ("0" * 40 + ".torrent")).write_bytes(b"d")
+        self.assertGreaterEqual(tor.clean_leftovers(), 2)
+        self.assertFalse(stray.exists(), "a removed torrent's file goes")
+        self.assertFalse(stray.parent.exists(), "and its folder, left empty")
+        self.assertFalse((tor.dir / ("0" * 40 + ".torrent")).exists())
+        self.assertIn(h, tor.records, "a torrent you have stays")
+
+    def test_delete_connections_keeps_finished_episodes_when_kept(self):
+        h = self.add()
+        tor = self.app.torrents
+        index = tor.episodes(self.item)["1:1"]["index"]
+        tor.prepare(h, index)
+        self.connect(h)
+        rec = tor.records[h]
+        f = tor._file(rec, index)
+        self.assertTrue(wait_for(lambda: tor.complete(rec, f, tor._progress(h)), 60), "episode 1 downloaded")
+        tor.set_keep(self.item["id"], True)
+        self.call("POST", f"/api/items/{self.item['id']}/connections/clear")
+        self.assertNotIn(h, tor.records)
+        kept = list((tor.dir / "kept").rglob("*01*.mkv")) + list(Path(self.app.settings.get()["downloads_folder"] or "/nonexistent").rglob("*01*.mkv"))
+        self.assertTrue(kept, "episode 1 was kept")
+
+    def test_downloading_an_episode_whole(self):
+        h = self.add()
+        tor = self.app.torrents
+        index = tor.episodes(self.item)["1:3"]["index"]
+        status, r = self.call("POST", f"/api/items/{self.item['id']}/download-full", {"season": 1, "episode": 3})
+        self.assertEqual(status, 200, r)
+        rec = tor.records[h]
+        self.assertEqual(rec["priorities"][str(index)], 7)
+        self.assertTrue(rec["whole"][str(index)], "kept: not deleted after watching")
+
     def test_the_subtitle_comes_first(self):
         h = self.add()
         subs = self.app.torrents.subtitles(h, self._index(h, "02 [1080p].mkv"), wait=15)

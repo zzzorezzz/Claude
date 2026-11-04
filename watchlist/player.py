@@ -316,7 +316,8 @@ class Session:
             conn = _Connection(self.address)
             self.connected = True
             conn.send(["observe_property", 1, "time-pos"], ["observe_property", 2, "duration"],
-                      ["observe_property", 3, "playlist-pos"], ["observe_property", 4, "pause"])
+                      ["observe_property", 3, "playlist-pos"], ["observe_property", 4, "pause"],
+                      ["observe_property", 5, "path"])
             for msg in conn.messages():
                 event = msg.get("event")
                 if event == "property-change":
@@ -339,8 +340,13 @@ class Session:
                             self._swapping = None
                         self.pos, self.dur = None, None
                     elif name == "playlist-pos" and isinstance(data, int) and data >= 0 and data != self.index:
-                        self._wrap_up_current()
-                        self.index, self.pos, self.dur, self.loaded = data, None, None, False
+                        self._moved_to(data)
+                    elif name == "path" and isinstance(data, str) and getattr(self, "_swapping", None) is None:
+                        # The file opening says which episode it is, for sure (the playlist's
+                        # position can come late, or not at all, while a site's episode is found).
+                        at = next((i for i, e in enumerate(self.entries) if e.get("path") == data), None)
+                        if at is not None and at != self.index:
+                            self._moved_to(at)
                 elif event == "end-file" and msg.get("reason") == "eof":
                     self._wrap_up_current(reached_end=True)
                 elif event == "file-loaded":
@@ -395,6 +401,21 @@ class Session:
             return False
         finally:
             conn.close()
+
+    def _moved_to(self, index):
+        """Another entry of the playlist is opening: the one before is wrapped up, and its title
+        shows straight away (not the last one's while this one loads)."""
+        self._wrap_up_current()
+        self.index, self.pos, self.dur, self.loaded = index, None, None, False
+        entry = self.current()
+        if entry and entry.get("label") and (self.playlist or entry.get("appended")):
+            threading.Thread(target=self.send, args=(["set_property", "force-media-title", entry["label"]],),
+                             daemon=True).start()
+        for listener in list(self.listeners):
+            try:
+                listener(self, {"event": "property-change", "name": "playlist-pos", "data": index})
+            except Exception:  # noqa: BLE001
+                pass
 
     def _loaded(self):
         """A file opened: its subtitles and other versions (added later) go in."""

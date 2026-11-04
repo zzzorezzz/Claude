@@ -176,6 +176,8 @@ local function step(command, what)
     end
     mp.command(command)
 end
+-- A watch party's host moved to another episode: it's on its way (the app says when it's here).
+mp.register_script_message("show-loading", function(text) loading_start(text or "Loading…") end)
 mp.register_script_message("next", function() step("playlist-next", "next episode") end)
 mp.register_script_message("prev", function() step("playlist-prev", "previous episode") end)
 

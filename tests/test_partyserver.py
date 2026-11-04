@@ -89,6 +89,21 @@ class PartyServerTest(unittest.TestCase):
         self.assertTrue(wait_for(lambda: sorted(guest.people) == ["Guest", "Host"]))
         self.assertEqual(guest.leader_name(), "Host")
 
+    def test_the_host_hands_the_party_to_someone_who_keeps_it_going(self):
+        port = self.srv.listen(0, "127.0.0.1")
+        host = party.Party(f"127.0.0.1:{port}", "room", "Ann", "host").connect()
+        guest = party.Party(f"127.0.0.1:{port}", "room", "Ben", "guest").connect()
+        self.addCleanup(guest.leave)
+        self.assertTrue(wait_for(lambda: sorted(host.people) == ["Ann", "Ben"]))
+        host.make_host("Ben")
+        self.assertTrue(wait_for(lambda: guest.role == "host"), "Ben leads now")
+        self.assertEqual((host.role, host.leader_name()), ("guest", "Ben"))
+        self.assertTrue(wait_for(lambda: guest.leader_name() == "Ben"))
+        host.leave()
+        time.sleep(1)
+        self.assertTrue(guest.active, "the party carries on without Ann")
+        self.assertEqual(sorted(guest.people), ["Ben"])
+
 
 if __name__ == "__main__":
     unittest.main()

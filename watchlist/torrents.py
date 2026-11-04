@@ -24,6 +24,7 @@ download sorting skips), or in the app's data folder without one.
 """
 
 import os
+import random
 import secrets
 import shutil
 import threading
@@ -176,7 +177,11 @@ class _Peeker:
 
 class Torrents:
     SETTINGS = {"user_agent": "WatchAnything", "listen_interfaces": "0.0.0.0:6881,[::]:6881",
-                "enable_dht": True, "enable_lsd": True, "enable_upnp": True, "enable_natpmp": True}
+                "enable_dht": True, "enable_lsd": True, "enable_upnp": True, "enable_natpmp": True,
+                # As fast as the big torrent apps: more people at once, found quicker, and the
+                # ones that don't answer given up on sooner.
+                "connections_limit": 500, "connection_speed": 50, "peer_connect_timeout": 7,
+                "max_peerlist_size": 4000, "active_downloads": 8, "active_limit": 30}
 
     def __init__(self, app, data_dir):
         self.app = app
@@ -189,6 +194,7 @@ class Torrents:
         # When each file in the torrents folder was first seen there (its path -> time):
         # the time it arrived, not the file's own dates.
         self.seen = state.get("seen", {}) if isinstance(state, dict) else {}
+        self.port_in = int(state.get("port") or 0) if isinstance(state, dict) else 0     # (the port others reach it on)
         self._last_clean = time.time() - CLEAN_EVERY + 120      # the first look, two minutes after starting
         self.lock = threading.RLock()
         self.handles = {}
@@ -217,7 +223,15 @@ class Torrents:
     def _start(self):
         if self.ses or not lt:
             return
-        self.ses = lt.session(dict(self.SETTINGS, alert_mask=lt.alert_category.error | lt.alert_category.status
+        settings = dict(self.SETTINGS)
+        if settings.get("listen_interfaces", "").endswith(":6881"):
+            # A port of its own, picked once: 6881 is the one internet providers slow down most.
+            port = self.port_in or random.randint(49160, 65000)
+            if port != self.port_in:
+                self.port_in = port
+                self._save_soon()
+            settings["listen_interfaces"] = f"0.0.0.0:{port},[::]:{port}"
+        self.ses = lt.session(dict(settings, alert_mask=lt.alert_category.error | lt.alert_category.status
                                    | lt.alert_category.storage))
         for h, rec in list(self.records.items()):
             try:
@@ -261,7 +275,8 @@ class Torrents:
 
     def _save(self):
         with self.lock:
-            write_json(self.state_path, {"torrents": self.records, "keep": self.keep, "seen": self.seen})
+            write_json(self.state_path, {"torrents": self.records, "keep": self.keep, "seen": self.seen,
+                                         "port": self.port_in})
             self._dirty = False
 
     # ---- the background loop: alerts, newly found file lists, cleaning up
@@ -391,12 +406,50 @@ class Torrents:
             self._save()
         return self.view(h)
 
-    def replace_for(self, item_id, keep):
-        """A new magnet for a title: its other torrents go (one connection per title)."""
+    def replace_for(self, item_id, keep, keep_done=False):
+        """A new magnet for a title: its other torrents go (one connection per title).
+        `keep_done`: their fully downloaded files stay (moved out, as your downloads)."""
         with self.lock:
             old = [h for h, rec in self.records.items() if rec["item_id"] == item_id and h != keep]
         for h in old:
-            self.remove(h)
+            if keep_done:
+                self.remove_keeping(h)
+            else:
+                self.remove(h)
+
+    def remove_keeping(self, h):
+        """A torrent taken away, but what it downloaded whole is kept: moved into your downloads
+        folder (or the app's own "kept" folder without one), where it's a download like any other.
+        What it hadn't finished goes."""
+        with self.lock:
+            rec = self.records.get(h)
+            if rec is None:
+                return {"ok": False}
+            progress = self._progress(h)
+            done = [(self.path_of(rec, f), f["path"]) for f in rec.get("files") or [] if self.complete(rec, f, progress)]
+            folder = self.app.settings.get()["downloads_folder"]
+            target = Path(folder) if folder and os.path.isdir(folder) else self.dir / "kept"
+        self.remove(h, delete_files=False)
+        for path, rel in done:
+            dest = target / rel
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if os.path.exists(path) and not dest.exists():
+                    shutil.move(path, dest)
+            except OSError:
+                pass
+        threading.Timer(2, self._tidy_all, args=(rec,)).start()
+        return {"ok": True, "kept": len(done)}
+
+    def _tidy_all(self, rec):
+        """After a torrent kept its finished files: what's left of it (unfinished ones) goes."""
+        root = Path(rec["save_path"])
+        for f in rec.get("files") or []:
+            try:
+                (root / f["path"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._tidy(rec)
 
     def remove(self, h, delete_files=True):
         with self.lock:
@@ -534,6 +587,7 @@ class Torrents:
                 whole = self.complete(rec, f, progress)
                 v.update(path=self.path_of(rec, f) if whole else self.stream_url(rec["hash"], f["index"], f["path"]),
                          torrent={"hash": rec["hash"], "index": f["index"], "complete": whole,
+                                  "rank": self._rank(rec),
                                   "progress": round(done / f["size"], 3) if f["size"] else 0},
                          stream=not whole, dl=False)
                 out.append(v)
@@ -555,8 +609,48 @@ class Torrents:
     def episodes(self, item):
         """{"s:e": {"hash", "index", "complete", "progress", "name"}} for the
         episodes a show's torrents have."""
-        found = scanner.episode_map(item, self.videos(item)) if item.get("format") == "series" else {}
+        vids = sorted(self.videos(item), key=lambda v: v["torrent"].get("rank", 0)) if item.get("format") == "series" else []
+        found = scanner.episode_map(item, vids) if vids else {}           # (the first magnet's file for one both have)
         return {f"{s}:{e}": dict(v["torrent"], name=v["name"]) for (s, e), v in found.items()}
+
+    @staticmethod
+    def _rank(rec):
+        return rec.get("rank", rec.get("added", 0))
+
+    def move(self, h, step):
+        """One of a title's magnets earlier (-1) or later (+1) in its order."""
+        with self.lock:
+            rec = self._rec(h)
+            mine = sorted((self.records[x] for x in self._records_of(rec["item_id"])), key=self._rank)
+            for n, r in enumerate(mine):
+                r["rank"] = n
+            i = mine.index(rec)
+            j = max(0, min(len(mine) - 1, i + step))
+            mine[i]["rank"], mine[j]["rank"] = j, i
+            self._save()
+
+    def download_whole(self, h, index):
+        """A file downloaded whole, now, without playing it: every part as it comes (not from
+        the start in order, as for watching - that's slower), at full priority, and kept."""
+        with self.lock:
+            rec = self._rec(h)
+            handle = self.handles.get(h)
+            if handle is None:
+                raise TorrentError("that torrent isn't loaded")
+            self._wait_for_files(h, rec)
+            self._file(rec, index)
+            rec["priorities"][str(index)] = 7
+            rec.setdefault("whole", {})[str(index)] = True
+            rec["finished"].pop(str(index), None)
+            if rec.get("paused") or rec.pop("held", None):
+                rec["paused"] = False
+                handle.resume()
+            self._wake(h, rec)
+            handle.file_priority(index, 7)
+            now = time.time()
+            if not any(now - at < 120 for (rh, _), at in self.reading.items() if rh == h):
+                handle.unset_flags(lt.torrent_flags.sequential_download)      # (nothing streaming from it)
+            self._save_soon()
 
     def stream_url(self, h, index, path):
         return (f"http://127.0.0.1:{self.port}/stream/{self.token}/{h}/{index}/"
@@ -931,8 +1025,8 @@ class Torrents:
                 except TorrentError:
                     rec["finished"].pop(index, None)
                     continue
-                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]):
-                    continue
+                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]) or (rec.get("whole") or {}).get(index):
+                    continue                 # (kept: the title's are kept, or you downloaded this one whole)
                 if self.path_of(rec, f) in playing or self.stream_url(h, f["index"], f["path"]) in playing:
                     continue
                 self.delete_file(h, int(index))
@@ -959,7 +1053,7 @@ class Torrents:
 
     def clean_old(self, now=None):
         """Every so often, in the background: files in the torrents folder that
-        arrived at least 48 hours ago and haven't been played since are deleted,
+        arrived at least 12 hours ago and haven't been played since are deleted,
         unless they're a show's with "Keep downloaded episodes" on. Files of no
         torrent (left over) go the same way. Returns how many were deleted."""
         now = now or time.time()
@@ -997,8 +1091,8 @@ class Torrents:
                 if now - (rec.get("used") or {}).get(str(index), 0) < OLD_AFTER:
                     continue
                 f = self._file(rec, index)
-                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]) or self.keep.get(rec["item_id"]):
-                    continue
+                if self.keep.get(self._owner(rec, f)[0] or rec["item_id"]) or self.keep.get(rec["item_id"])                         or (rec.get("whole") or {}).get(str(index)):
+                    continue                 # (kept: the title's are, or you downloaded this one whole)
                 if self.stream_url(h, index, f["path"]) in playing:
                     continue
                 todo.append((p, found))
@@ -1022,6 +1116,48 @@ class Torrents:
         if deleted:
             self._save_soon()
         return deleted
+
+    def clean_leftovers(self):
+        """When the app starts: what's left of torrents that are gone (removed in the Torrents
+        window, or with a title) - their downloaded files in the torrents folders, their saved
+        .torrent files, peeks at torrents never added - is deleted now, not some hours later.
+        Only the app's own torrents folders are looked in. Returns how many things went."""
+        gone = 0
+        playing = self._playing_paths()
+        with self.lock:
+            known = {os.path.normcase(self.path_of(rec, f)) for rec in self.records.values() for f in rec.get("files") or []}
+            hashes = set(self.records)
+            waiting = any(not rec.get("files") for rec in self.records.values())     # (a list of files not here yet)
+            folders = self._folders()
+        if not waiting:
+            for folder in folders:
+                for root, _dirs, names in os.walk(folder):
+                    for name in names:
+                        p = os.path.join(root, name)
+                        if os.path.normcase(p) in known or p in playing:
+                            continue
+                        if name.startswith(".") and name.endswith(".parts") and any(name[1:].startswith(h) for h in hashes):
+                            continue                         # (a torrent's own bookkeeping)
+                        try:
+                            os.remove(p)
+                            gone += 1
+                        except OSError:
+                            pass
+                for root, _dirs, _names in sorted(os.walk(folder), key=lambda x: -len(x[0])):
+                    if root != folder and not os.listdir(root):
+                        try:
+                            os.rmdir(root)
+                        except OSError:
+                            pass
+        for saved in self.dir.glob("*.torrent"):
+            if saved.stem not in hashes:
+                saved.unlink(missing_ok=True)
+                gone += 1
+        for peek in (self.dir / "peek").glob("*"):
+            if time.time() - peek.stat().st_mtime > 3600 and peek.stem not in hashes:
+                peek.unlink(missing_ok=True)
+                gone += 1
+        return gone
 
     def _playing_paths(self):
         session = self.app.player.session

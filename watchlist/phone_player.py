@@ -157,6 +157,8 @@ class PhoneSession:
                 out.append({"do": "speed", "to": float(c[2])})
             elif c[0] == "show-text":
                 out.append({"do": "text", "text": str(c[1]), "ms": int(c[2]) if len(c) > 2 else 3000})
+            elif c[0] == "script-message-to" and len(c) > 3 and c[2] == "show-loading":
+                out.append({"do": "text", "text": str(c[3]), "ms": 60000})     # (until the next episode comes)
         if out:
             _bridge.playerCommand(self.id, json.dumps(out))
 

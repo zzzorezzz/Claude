@@ -56,6 +56,19 @@ const savedPos = (item, ep) => {
 const sectionFolders = (type) => S.collections.filter((c) => c.type === type);
 const globalCollections = () => S.collections.filter((c) => !c.type);
 
+function partyGuestNote(text) {
+  if ($('.party-guest-note')) return;
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad party-guest-note">
+    <h2>The host chooses what plays</h2><p class="sub">${esc(text)}</p>
+    <div class="btns"><button class="btn btn-white" data-pg="ok">OK</button><button class="btn btn-ghost" data-pg="leave">Leave the party</button></div></div>`);
+  wrap.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-pg]');
+    if (!b) return;
+    if (b.dataset.pg === 'leave') { try { await api('POST', '/api/party/leave'); await pollParty(); toast('You left the watch party'); } catch (er) { fail(er); } }
+    closeModal(wrap);
+  });
+}
+
 async function api(method, path, body) {
   const opts = { method, headers: { 'X-Watchlist': '1' } };
   if (body !== undefined) {
@@ -72,6 +85,11 @@ async function api(method, path, body) {
   if (!res.ok) {
     const err = new Error(data.error || `request failed (${res.status})`);
     err.code = data.code || '';
+    if (err.code === 'party_guest') {
+      // In someone's watch party: a popup saying who chooses (whatever button was pressed).
+      partyGuestNote(err.message);
+      err.shown = true;
+    }
     throw err;
   }
   if (method === 'POST' && path === '/api/items') sfx('add');
@@ -85,7 +103,7 @@ function toast(message, kind = '') {
   $('#toasts').append(el);
   setTimeout(() => el.remove(), kind === 'error' ? 6000 : 3500);
 }
-const fail = (e) => toast(e.message || String(e), 'error');
+const fail = (e) => { if (!e?.shown) toast(e.message || String(e), 'error'); };
 
 // Small sounds for small things (Settings → Look → Sounds): made on the spot, no files.
 let audioCtx = null;
@@ -2453,7 +2471,8 @@ function partyPersonHTML(p, st) {
     <span class="pd-avatar">${p.avatar ? `<img src="${esc(p.avatar)}" alt="">` : esc((p.name || '?').slice(0, 1).toUpperCase())}</span>
     <div class="pd-who"><b>${esc(p.name)}</b>${p.leader ? '<span class="pd-tag">host</span>' : ''}${p.me ? '<span class="pd-tag you">you</span>' : ''}
       <div class="pd-state ${cls}">${busy ? '<span class="spin-dot"></span> ' : ''}${word}${busy && pct != null ? ` · ${pct}%${eta}` : ''}${p.state === 'watching' && p.label && !p.leader ? '' : p.label && p.state !== 'idle' && !p.leader ? ` · ${esc(p.label)}` : ''}</div>
-      ${busy ? `<div class="pd-bar"><i style="width:${pct || 0}%"></i></div>` : ''}</div></div>`;
+      ${busy ? `<div class="pd-bar"><i style="width:${pct || 0}%"></i></div>` : ''}</div>
+    ${st.role === 'host' && !p.me ? `<button class="btn btn-ghost btn-sm pd-make-host" data-pd="make-host" data-name="${esc(p.name)}" title="${st.via && st.via !== 'syncplay' ? 'They lead from now on - but this party runs through your app, so it ends if you leave' : 'They lead from now on - the party carries on even if you leave'}">Make host</button>` : ''}</div>`;
 }
 
 function drawPartyDock() {
@@ -2524,6 +2543,12 @@ async function partyDockClick(e) {
     else if (a === 'popout') {
       await api('POST', '/api/window', { kind: 'party' });
       party.open = false; drawPartyDock();
+    } else if (a === 'make-host') {
+      const name = e.target.closest('[data-name]').dataset.name;
+      const own = party.st?.via && party.st.via !== 'syncplay';
+      if (!(await confirmModal(`Make ${name} the host?`, `${name} chooses what plays from now on, and everyone follows them - you too.${own
+        ? ' This party runs through your app (the backup way), so it ends if you leave it.' : ' The party carries on even if you leave.'}`, 'Make host'))) return;
+      try { party.st = await api('POST', '/api/party/host', { name }); drawPartyDock(); toast(`${name} is the host now`); } catch (err) { fail(err); }
     } else if (a === 'copy') {
       const code = party.st.invite;
       navigator.clipboard?.writeText(code).then(() => toast('Invite copied - send it to them'), () => toast(code));
@@ -2596,7 +2621,7 @@ async function openStartParty(item = null) {
       </div>` : '';
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>${ICON.people} ${item ? `Host a watch party: ${esc(item.title)}` : 'Join a watch party'}</h2>
-    ${S.status.mpv ? '' : '<div class="warn">This needs the built-in player, which is missing.</div>'}
+    ${S.status.mpv || onPhone() ? '' : '<div class="warn">This needs the built-in player, which is missing.</div>'}
     ${srcPicker}
     ${item && series && avail.length ? `<label class="field" id="party-ep-field"><span>Episode</span><select class="select" id="party-ep">${options}</select></label>` : ''}
     ${onlineFields}
@@ -3594,6 +3619,17 @@ async function titleClick(wrap, e) {
     deleteEpisodeFile(wrap, item, del.dataset.del);
     return;
   }
+  const whole = e.target.closest('[data-whole]');
+  if (whole) {
+    e.stopPropagation();
+    const [season, episode] = whole.dataset.whole.split(':').map(Number);
+    try {
+      await api('POST', `/api/items/${item.id}/download-full`, { season, episode });
+      toast(`Downloading ${isSeries(item) ? epLabel({ season, episode }) : item.title} whole - see it in the Torrents window`);
+      loadLocal(wrap);
+    } catch (err) { fail(err); }
+    return;
+  }
   const torBtn = e.target.closest('[data-t^="tor-"], [data-t="add-magnet"], [data-t="torrents-window"], [data-t="get-magnet"]');
   if (torBtn) { await torrentClick(wrap, item, torBtn); return; }
   const ep = e.target.closest('[data-ep]');
@@ -3616,7 +3652,8 @@ async function titleClick(wrap, e) {
     else if (t === 'clear-links') {
       const full = !simpleMode();
       if (!(await confirmModal(`Delete everything ${item.title} is connected to?`,
-        `Its links to your own sites${full ? ', the folder or file you chose for it, and its magnet (with what it downloaded)' : ''} are removed. They're found again the next time you play it.`,
+        `Its links to your own sites${full ? ', the folder or file you chose for it, and its magnet' : ''} are removed. They're found again the next time you play it.${full
+          ? (item.keep_downloads || wrap.st.torrents?.torrents?.some((t) => t.keep) ? ' Its fully downloaded episodes are kept (Keep downloaded episodes is ticked) - they stay in your downloads.' : ' What its magnet downloaded is deleted too (tick Keep downloaded episodes first to keep it).') : ''}`,
         'Delete connections'))) return;
       upsert(await api('POST', `/api/items/${item.id}/connections/clear`));
       toast(`${item.title}'s connections deleted`);
@@ -3691,7 +3728,7 @@ function drawFolderLine(wrap) {
   if (!line) return;
   const local = wrap.st.local;
   const dl = (S.library.items || {})[item.id];
-  const playerName = S.status.player === 'vlc' || !S.status.mpv ? 'VLC' : 'the built-in player';
+  const playerName = onPhone() ? "the phone's player" : S.status.player === 'vlc' || !S.status.mpv ? 'VLC' : 'the built-in player';
   const brokenButtons = item.local_broken ? '<button class="btn btn-white btn-sm" data-t="mark-ok">It works now</button>'
     : '<button class="btn btn-ghost btn-sm" data-t="mark-broken">Not working</button>';
   const statusLine = item.local_broken
@@ -3780,7 +3817,7 @@ function drawTorrentBox(wrap) {
   }
   const mins = Math.round((S.status.torrents?.delete_after || 300) / 60);
   const eps = Object.keys(data.episodes || {}).length;
-  const cards = data.torrents.map((t) => {
+  const cards = data.torrents.map((t, i) => {
     const pct = t.wanted ? Math.round((t.wanted_done / t.wanted) * 100) : 0;
     const vids = t.files.filter((f) => f.kind === 'video').length;
     return `<div class="tor-card" data-hash="${esc(t.hash)}">
@@ -3790,6 +3827,9 @@ function drawTorrentBox(wrap) {
         ${t.wanted ? ` · ${pct}% of what you chose` : ''}${t.down ? ` · ↓ ${fmtBytes(t.down)}/s` : ''}${t.peers ? ` · ${t.peers} peer${t.peers === 1 ? '' : 's'}` : ''}</div>
       ${t.error ? `<div class="bad small">${esc(t.error)}</div>` : ''}
       ${planLine(t, 'data-t')}
+      ${data.torrents.length > 1 ? `<div class="tor-order muted small">${i === 0 ? 'Used first' : `Used after ${i === 1 ? 'the first' : 'the ones above'}`} for an episode more than one magnet has
+        <button class="btn btn-ghost btn-sm" data-t="tor-up" ${i === 0 ? 'disabled' : ''} title="Use this one first">↑</button>
+        <button class="btn btn-ghost btn-sm" data-t="tor-down" ${i === data.torrents.length - 1 ? 'disabled' : ''} title="Use this one later">↓</button></div>` : ''}
       <div class="btns"><button class="btn btn-ghost btn-sm" data-t="tor-manage">Files & downloads…</button>
         <button class="btn btn-ghost btn-sm" data-t="tor-pause">${t.paused ? 'Resume' : 'Pause'}</button>
         <button class="btn btn-ghost btn-sm" data-t="tor-remove">Remove</button></div></div>`;
@@ -3801,7 +3841,9 @@ function drawTorrentBox(wrap) {
     : '<p class="muted small">Add your own torrent sites in <button class="linkish" data-t="tor-settings">Settings</button> and <b>Get magnet</b> finds it there for you.</p>';
   box.innerHTML = `${cards}${finder}
     <div class="magnet-row"><input class="input" id="magnet-in" placeholder="Paste a magnet link (magnet:?xt=…)" autocomplete="off" spellcheck="false">
-      <button class="btn btn-white btn-sm" data-t="add-magnet">${data.torrents.length ? 'Replace' : 'Add'}</button></div>
+      ${data.torrents.length ? `<button class="btn btn-white btn-sm" data-t="add-magnet" data-how="add" title="Keep the one it has too: useful when one magnet has only some of the episodes">+ Add another</button>
+        <button class="btn btn-ghost btn-sm" data-t="add-magnet" data-how="replace" title="Instead of the one it has (that one and what it downloaded go)">Replace</button>`
+    : '<button class="btn btn-white btn-sm" data-t="add-magnet" data-how="add">Add</button>'}</div>
     <p class="muted small">Only the list of files is fetched now. An episode downloads when you play it, while you watch.</p>
     ${data.torrents.length ? `<div class="ol-row keep-magnet"><label class="check-line"><input type="checkbox" data-t="keep-magnet" ${item.keep_magnet ? 'checked' : ''}> Keep magnet connected</label>
       <button class="btn btn-ghost btn-sm danger" data-t="forget-magnet" title="Take the torrent off this title (what it downloaded goes too)">Remove magnet</button></div>` : ''}
@@ -3839,8 +3881,9 @@ async function torrentClick(wrap, item, btn) {
       if (!magnet) { input.focus(); toast('Paste a magnet link first'); return; }
       btn.disabled = true;
       btn.textContent = 'Adding…';
-      await api('POST', `/api/items/${item.id}/torrents`, { magnet, replace: true });
-      toast('Torrent added - getting its list of files…');
+      const replace = btn.dataset.how === 'replace';
+      await api('POST', `/api/items/${item.id}/torrents`, { magnet, replace });
+      toast(replace ? 'Torrent replaced - getting its list of files…' : 'Magnet added - getting its list of files…');
       S.status.torrents = { ...(S.status.torrents || {}), count: (S.status.torrents?.count || 0) + 1 };
       renderNavButtons();
       await loadLocal(wrap);
@@ -3852,6 +3895,9 @@ async function torrentClick(wrap, item, btn) {
     } else if (t === 'forget-magnet') {
       if (!(await confirmModal('Delete the torrent connection?', `The torrent is taken off ${item.title}, and what it downloaded is deleted.`, 'Delete'))) return;
       for (const tor of wrap.st.torrents.torrents) await api('DELETE', `/api/torrents/${tor.hash}`);
+      await loadLocal(wrap);
+    } else if (t === 'tor-up' || t === 'tor-down') {
+      await api('POST', `/api/torrents/${hash}/move`, { dir: t === 'tor-up' ? 'up' : 'down' });
       await loadLocal(wrap);
     } else if (t === 'tor-manage') openTorrents(hash);
     else if (t === 'tor-plan') openPlan(hash, () => loadLocal(wrap));
@@ -4049,7 +4095,28 @@ function planLine(t, attr) {
 
 /* Get magnet: your own site searched for this anime, the best torrent found.
    One clear winner is added; when several are as good, you choose. */
-function openFinder(item, onAdded = () => {}) {
+// Get magnet: a show with more than one season on its page asks which (or the whole series) first.
+async function openFinder(item, onAdded = () => {}, opts = {}) {
+  const seasons = isSeries(item) && item.source !== 'mal' ? (item.seasons || []).filter((x) => (x.number || 0) > 0) : [];
+  if (seasons.length > 1 && opts.season === undefined) {
+    const w = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+      <h2>${ICON.search} Get magnet</h2><p class="sub">${esc(item.title)} - which season?</p>
+      <div class="season-pick">${seasons.map((x) => `<button class="btn btn-ghost btn-sm" data-season="${x.number}">Season ${x.number}</button>`).join('')}</div>
+      <div class="btns"><button class="btn btn-white btn-sm" data-season="all">The whole series</button></div></div>`);
+    w.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-season]');
+      if (!b) return;
+      closeModal(w);
+      openFinder(item, onAdded, { ...opts, season: b.dataset.season });
+    });
+    return;
+  }
+  let has = 0;
+  try { has = ((await api('GET', `/api/items/${item.id}/torrents`)).torrents || []).length; } catch { /* none */ }
+  openFinderWindow(item, onAdded, { ...opts, has });
+}
+
+function openFinderWindow(item, onAdded = () => {}, opts = {}) {
   const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>${ICON.search} Get magnet</h2><p class="sub">${esc(item.title)}</p>
     <div id="finder-body"><div class="spinner"></div></div></div>`, 'finder-modal');
@@ -4118,9 +4185,21 @@ function openFinder(item, onAdded = () => {}) {
         if (m.st.open.has(key)) m.st.open.delete(key); else m.st.open.add(key);
         draw(m.st.last);
       } else if (b.dataset.f === 'use') {
+        let how = '';
+        if (opts.has) {
+          // It has a magnet already: this one too, or instead?
+          how = await new Promise((done) => {
+            const q = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+              <h2>It has a magnet already</h2><p class="sub">Add this one as another magnet (each episode still plays from one of them), or use it instead?</p>
+              <div class="btns"><button class="btn btn-white" data-h="add">+ Add as another</button><button class="btn btn-ghost" data-h="replace">Replace the old one</button></div></div>`);
+            q.onClose = () => done('');
+            q.addEventListener('click', (ev) => { const h = ev.target.closest('[data-h]'); if (h) { q.onClose = null; closeModal(q); done(h.dataset.h); } });
+          });
+          if (!how) return;
+        }
         b.disabled = true;
         b.textContent = 'Adding…';
-        const st = await api('POST', `/api/items/${item.id}/find-torrent/use`, { key });
+        const st = await api('POST', `/api/items/${item.id}/find-torrent/use`, { key, how });
         S.status.torrents = { ...(S.status.torrents || {}), count: (S.status.torrents?.count || 0) + 1 };
         renderNavButtons();
         toast('Torrent added - its episodes are on the page now');
@@ -4128,11 +4207,11 @@ function openFinder(item, onAdded = () => {}) {
         onAdded();
       } else if (b.dataset.f === 'again') {
         m.st.seen = new Set();
-        draw(await api('POST', `/api/items/${item.id}/find-torrent`));
+        draw(await api('POST', `/api/items/${item.id}/find-torrent`, { season: opts.season || '' }));
       }
     } catch (err) { fail(err); b.disabled = false; }
   });
-  api('POST', `/api/items/${item.id}/find-torrent`).then((st) => {
+  api('POST', `/api/items/${item.id}/find-torrent`, { season: opts.season || '' }).then((st) => {
     draw(st);
   }).catch((err) => { fail(err); closeModal(m); });
   m.st.notify = true;
@@ -4552,6 +4631,7 @@ async function drawEpisodes(wrap) {
     const bar = (at ? `<div class="ep-bar" title="Stopped at ${fmtTime(at.pos)}"><i style="width:${at.dur ? Math.min(100, (at.pos / at.dur) * 100).toFixed(1) : 0}%"></i></div>
       <div class="small muted">Stopped at ${fmtTime(at.pos)}${at.dur ? ` of ${fmtTime(at.dur)}` : ''}</div>` : '')
       + (f ? `<div class="ep-file" title="${f.stream ? 'In the torrent' : esc(f.path)}"><span>${esc(f.name)}</span>${f.rel ? `<button class="ep-move" data-move="${esc(key)}" title="This file is in the wrong place? Move it">Move…</button>` : ''}
+        ${f.torrent && !f.torrent.complete ? `<button class="ep-move" data-whole="${esc(key)}" title="Download this episode whole now, without playing it (faster than while streaming) - it's kept">⤓ Download</button>` : ''}
         ${!f.stream || (f.torrent && f.torrent.progress > 0) ? `<button class="ep-move ep-del" data-del="${esc(key)}" title="${f.torrent ? 'Delete what\'s downloaded of this episode' : 'Move this file to the Recycle Bin / Trash'}">${ICON.trash}</button>` : ''}</div>` : '');
     if (d) {
       rows.push(`<div class="ep ${current ? 'current' : ''} ${watched ? 'watched' : ''}" data-ep="${key}">
@@ -5522,7 +5602,7 @@ function drawLocal(wrap, { choose = false } = {}) {
       <button class="btn btn-ghost" data-w="reveal">Show in folder</button></div>
     ${info.videos.length > 1 ? `<details style="margin-top:16px" ${choose ? 'open' : ''}><summary>All files in the folder (${info.videos.length}) - click one to pick it</summary>${videoList}</details>` : ''}
     ${footer}`);
-  if (!S.status.mpv && !S.status.vlc) {
+  if (!S.status.mpv && !S.status.vlc && !onPhone()) {
     body.insertAdjacentHTML('afterbegin', `<div class="warn" style="margin-bottom:16px">No player was found on this ${pcName()}. Install VLC from videolan.org, or set its location in Settings.</div>`);
   }
   body.addEventListener('click', (e) => localAction(wrap, e));
@@ -5964,6 +6044,8 @@ function openCropper(file) {
 }
 
 async function openSettings(focus = '') {
+  // On a phone or narrow window the setup guide would cover Settings: it shrinks to its tab.
+  if (S.guide && !S.guide.min && innerWidth < 900) { S.guide.min = true; drawGuideBox(); }
   let data;
   try { data = await api('GET', '/api/settings'); } catch (e) { fail(e); return; }
   const s = data.settings;
@@ -6106,7 +6188,8 @@ async function openSettings(focus = '') {
   api('GET', '/api/services/presets').then(({ presets }) => { wrap.presets = presets; drawServicePicker(wrap); }).catch(() => {});
   if (focus === 'svc') $('#svc-picker', wrap).classList.remove('hidden');
   const spot = { svc: '#svc-field', tmdb: '[name=tmdb_api_key]', mal: '[name=mal_client_id]', sync: '[name=sync_folder]',
-    downloads: '[name=downloads_folder]', ai: '#ai-list', country: '[name=region]', sites: '#site-list', video: '#vsite-list' }[focus];
+    downloads: '[name=downloads_folder]', ai: '#ai-list', country: '[name=region]', sites: '#site-list', video: '#vsite-list',
+    browser: '[data-s="browser"]' }[focus];
   if (spot) {
     setTimeout(() => {
       const el = $(spot, wrap);
@@ -6484,6 +6567,31 @@ function drawGuideBox() {
       <button class="btn btn-red btn-sm" data-gd="next" ${!step.optional && !done ? 'disabled title="Do this step first"' : ''}>${i === steps.length - 1 ? 'Finish' : 'Next'}</button></div>`);
 }
 
+// The setup guide's first link: where links open - asked once.
+function guideBrowserQuestion(url) {
+  prefSet('guide-browser-asked', '1');
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Where should links open?</h2>
+    <p class="sub">Links (like this one) can open in the app's own built-in browser - it blocks ads and pop-ups - or in another browser you choose. You can change this any time in Settings.</p>
+    <div class="choices">
+      <button class="choice" data-gb="builtin"><b>Built-in browser</b><span>Opens inside Watch Anything</span></button>
+      <button class="choice" data-gb="change"><b>Choose another…</b><span>Pick your browser in Settings</span></button></div></div>`);
+  wrap.addEventListener('click', async (e) => {
+    const c = e.target.closest('[data-gb]');
+    if (!c) return;
+    closeModal(wrap);
+    try {
+      if (c.dataset.gb === 'builtin') {
+        await api('PUT', '/api/settings', { browser_path: 'builtin' });
+        api('POST', '/api/open', { url }).catch(fail);
+      } else {
+        $$('#modal-root .settings-modal').forEach((m) => closeModal(m.closest('.overlay')));
+        openSettings('browser');
+      }
+    } catch (err) { fail(err); }
+  });
+}
+
 function guideClick(e) {
   const b = e.target.closest('[data-gd]');
   if (S.guide?.min && (!b || b.dataset.gd === 'min')) { S.guide.min = false; drawGuideBox(); return; }
@@ -6496,7 +6604,12 @@ function guideClick(e) {
   if (g === 'close') { closeGuide(); return; }
   if (g === 'back') { S.guide.i = Math.max(0, S.guide.i - 1); S.guide.at = null; drawGuideBox(); return; }
   if (g === 'next' || g === 'skip') { S.guide.i += 1; S.guide.at = null; drawGuideBox(); return; }
-  if (g === 'link') { api('POST', '/api/open', { url: step.links[Number(b.dataset.n)][1] }).catch(fail); return; }
+  if (g === 'link') {
+    const url = step.links[Number(b.dataset.n)][1];
+    if (prefGet('guide-browser-asked') !== '1') { guideBrowserQuestion(url); return; }
+    api('POST', '/api/open', { url }).catch(fail);
+    return;
+  }
   if (g === 'action') { step.action[1](); return; }
   if (g === 'settings') {
     $$('#modal-root .settings-modal').forEach((m) => closeModal(m.closest('.overlay')));

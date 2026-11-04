@@ -192,15 +192,40 @@ public class PlayerActivity extends Activity {
         episodes.setBackgroundColor(0xB3141826);
         episodes.setPadding(pad * 2, pad, pad * 2, pad);
         episodes.setOnClickListener(v -> chooseEpisode());
+        // Sub / Dub, as on a computer: the other version of what's playing, from where it is.
+        TextView version = new TextView(this);
+        version.setText("Sub / Dub");
+        version.setTextColor(Color.WHITE);
+        version.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        version.setBackgroundColor(0xB3141826);
+        version.setPadding(pad * 2, pad, pad * 2, pad);
+        version.setOnClickListener(v -> {
+            show("Finding the other version…", 4000);
+            final String sid = session;
+            new Thread(() -> {
+                try {
+                    Python.getInstance().getModule("watchlist.android").callAttr("switch_version", sid);
+                } catch (Throwable ignored) {
+                }
+            }).start();
+        });
+        android.widget.LinearLayout tools = new android.widget.LinearLayout(this);
+        tools.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        android.widget.LinearLayout.LayoutParams gap = new android.widget.LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        gap.leftMargin = pad;
+        tools.addView(version, gap);
+        tools.addView(episodes, gap);
         FrameLayout.LayoutParams corner = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.END);
         corner.topMargin = pad * 2;
         corner.rightMargin = pad * 2;
-        root.addView(episodes, corner);
-        view.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility ->
-                episodes.setVisibility(visibility == View.VISIBLE && player != null && player.getMediaItemCount() > 1
-                        ? View.VISIBLE : View.GONE));
-        episodes.setVisibility(View.GONE);
+        root.addView(tools, corner);
+        view.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility -> {
+            tools.setVisibility(visibility == View.VISIBLE ? View.VISIBLE : View.GONE);
+            episodes.setVisibility(player != null && player.getMediaItemCount() > 1 ? View.VISIBLE : View.GONE);
+        });
+        tools.setVisibility(View.GONE);
         setContentView(root);
         hideBars(view);
 
@@ -393,9 +418,11 @@ public class PlayerActivity extends Activity {
                         show(c.optString("text"), c.optInt("ms", 3000));
                         break;
                     case "replace":
+                        message.setVisibility(View.GONE);        // (the episode that was on its way is here)
                         load(c.getJSONObject("launch"));
                         break;
                     case "index":
+                        message.setVisibility(View.GONE);
                         if (c.optInt("to", 0) < player.getMediaItemCount()) player.seekTo(c.optInt("to", 0), 0);
                         break;
                     case "close":

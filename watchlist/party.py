@@ -47,6 +47,8 @@ TICK = 0.2                       # how often the player is checked
 WAITING_STATUSES = ("idle", "finding", "preparing", "needs-file")
 # A chat message from the host's app asking the guests' apps to open a link.
 OPEN_LINK = "[Watch Anything] open: "
+# ...and one making someone else the host (everyone follows them from then on).
+NEW_HOST = "[Watch Anything] host: "
 
 
 class PartyError(Exception):
@@ -154,6 +156,7 @@ class Party:
         self.invite = invite
         self.avatar = avatar             # a small picture of you ("data:image/jpeg;base64,..."), shown to the others
         self.open_link = open_link       # a guest: opens a link the host shared (Watch online)
+        self.on_role = None              # the app: told when you become the host or a guest
         self._following = None           # a guest: the key of what the host plays that's being followed
         self.mine = {"status": "idle"}   # a guest getting ready: what it's doing, how far along
         self._mine_sent = 0.0
@@ -240,6 +243,38 @@ class Party:
             self._set_file({"name": label, "duration": 0, "size": 0,
                             "watchlist": dict(meta, label=label, status="preparing")})
 
+    def make_host(self, name):
+        """The host hands the party to `name`: everyone follows them from now on (you too)."""
+        if self.role != "host" or name == self.me or name not in self.people:
+            raise PartyError("only the host can do that, for someone in the party")
+        try:
+            self.conn.send({"Chat": f"{NEW_HOST}{name}"})
+        except OSError as e:
+            raise PartyError(f"couldn't tell the party ({e})") from e
+        self._become("guest", name)
+
+    def _become(self, role, leader=None):
+        """You're the host now, or a guest following `leader`."""
+        with self.lock:
+            self.role, self.leader = role, (None if role == "host" else leader)
+            self._last_leader_key = self._following = None
+            mine = dict(self.people.get(self.me) or {"name": "", "duration": 0, "size": 0})
+            meta = dict(mine.get("watchlist") or {})
+            meta.pop("host", None)
+            self._set_file(dict(mine, watchlist=meta))            # (the room learns who's host now)
+            if role == "guest":
+                self._init_pending = True
+        if self.on_role:
+            try:
+                self.on_role(self)
+            except Exception:  # noqa: BLE001
+                pass
+        if role == "guest":
+            self.osd(f"{leader} is the host now", 5)
+            self._follow_leader()
+        else:
+            self.osd("You're the host now - what you play, everyone watches", 6)
+
     def share_link(self, url, label=""):
         """The host opened a link (Watch online): the guests' apps open it too."""
         if self.role != "host" or not self.active:
@@ -320,7 +355,8 @@ class Party:
                     "host_playing": lead_meta.get("label") if lead_state == "watching" else "",
                     "playing": (entry or {}).get("label", ""), "player_open": bool(entry),
                     "missing": self.missing, "mine": dict(self.mine),
-                    "ended": self.ended, "encrypted": bool(self.conn and self.conn.tls)}
+                    "ended": self.ended, "encrypted": bool(self.conn and self.conn.tls),
+                    "via": getattr(self, "via", "syncplay")}
 
     def report(self, status, progress=None, eta=None, label=None):
         """A guest getting ready: tell the room (so the host sees it next to your name)."""
@@ -380,6 +416,12 @@ class Party:
                 self._handle_state(value or {})
             elif command == "Chat":
                 msg, who = str((value or {}).get("message") or ""), (value or {}).get("username")
+                if msg.startswith(NEW_HOST):
+                    name = msg[len(NEW_HOST):].strip()
+                    if who == self.leader_name() and who != self.me and name:
+                        role = "host" if name == self.me else "guest"
+                        threading.Thread(target=self._become, args=(role, name), daemon=True).start()
+                    return
                 if msg.startswith(OPEN_LINK):
                     if self.role == "guest" and who == self.leader_name() and self.open_link:
                         url = msg[len(OPEN_LINK):].split(" ")[0]
@@ -468,6 +510,16 @@ class Party:
     def _switch_to(self, file_, gen):
         label = (file_.get("watchlist") or {}).get("label") or file_.get("name", "that episode")
         self.report("finding", label=label)
+        session = self.session
+        if session and not session.ended:
+            # The host moved on: what's playing here waits (it isn't the room's any more), and
+            # says the host's episode is on its way - not two people on different episodes.
+            current = session.current() or {}
+            wanted = (file_.get("watchlist") or {}).get("key")
+            if not wanted or (current.get("party") or {}).get("key") != wanted:
+                session.send(["set_property", "pause", True],
+                             ["script-message-to", "watchlist_skip", "show-loading",
+                              f"{self.leader_name()} moved to {label} - getting it ready…"])
         try:
             entry = self.resolve(file_, report=lambda *a, **k: gen == self._switch_gen and self.report(*a, **k),
                                  at=self.wanted_position() / file_["duration"] if file_.get("duration") else 0)

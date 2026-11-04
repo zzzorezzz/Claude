@@ -496,8 +496,9 @@ def _entry_fit(name, entry, common):
 class Finder:
     """One "Get magnet" run for a title, in the background, followed by the page."""
 
-    def __init__(self, app, item):
+    def __init__(self, app, item, season=None):
         self.app, self.item = app, item
+        self.season = season           # a season of a show with several on its page, "all", or None (the one you're on)
         self.state = {"running": True, "stage": "Starting…", "error": "", "choices": [], "added": None,
                       "searched": [], "log": [], "at": time.time()}
 
@@ -537,7 +538,7 @@ class Finder:
         item_names = list(dict.fromkeys(n for n in [item["title"], item.get("original_title"), *(item.get("aliases") or [])]
                                         if n))[:6]
         common = packs._common_words(ents) if len(ents) > 1 else set()
-        queries = self._queries(item, item_names, common)
+        queries = self._queries(item, item_names, common, self.season)
         # 1. Searching: every site, for every name, at once.
         self.stage(f'Searching {", ".join(s["name"] for s in sites)}…')
 
@@ -602,7 +603,9 @@ class Finder:
         full = [r for r in checked if r.get("complete")]
         clear = (best in full and (len(full) == 1 or best["final"] - max(
             (r["final"] for r in full if r is not best), default=0) >= 15))
-        if clear:
+        has = bool(getattr(self.app, "torrents", None) and self.app.torrents._records_of(item["id"]))
+        if clear and not has:
+            # (a title with a magnet already: you choose - another one, or instead of it)
             self.stage("Adding it…")
             self.state["added"] = self.use(best)
         elif not checked:
@@ -685,7 +688,7 @@ class Finder:
                    if waiting else "Comparing them…")
 
     @staticmethod
-    def _queries(item, names, common):
+    def _queries(item, names, common, season=None):
         out = []
         romaji = item.get("original_title") or ""
         for q in [romaji, item["title"], *(item.get("aliases") or [])[:2]]:
@@ -701,9 +704,11 @@ class Finder:
         title = " ".join(re.sub(r"[^\w\s'-]", " ", item["title"]).split())
         if item.get("format") == "movie" and item.get("year"):
             out.insert(0, f"{title} {item['year']}")          # films: with the year, then without
-        elif item.get("source") != "mal" and item.get("format") == "series":
-            season = (item.get("progress") or {}).get("season") or 1
-            out.insert(1, f"{title} S{season:02d}")           # the season you're on, then the whole show
+        elif item.get("source") != "mal" and item.get("format") == "series" and season != "all":
+            season = season or (item.get("progress") or {}).get("season") or 1
+            out.insert(1, f"{title} S{season:02d}")           # the season asked for, then the whole show
+        elif season == "all":
+            out.insert(1, f"{title} complete")                # the whole series
         return list(dict.fromkeys(out))[:4]
 
     @staticmethod
@@ -773,7 +778,9 @@ class Finder:
         item = self.item
         if item.get("format") == "movie" or item.get("source") == "mal":
             return None, None
-        season = (item.get("progress") or {}).get("season") or 1
+        if self.season == "all":
+            return None, sum(x.get("episodes") or 0 for x in item.get("seasons") or [] if x.get("number"))
+        season = self.season or (item.get("progress") or {}).get("season") or 1
         count = next((x["episodes"] for x in item.get("seasons") or [] if x["number"] == season), None)
         return season, count
 
@@ -887,14 +894,16 @@ class Finder:
                 "why": r.get("why", ""), "score": r.get("final"), "magnet": r.get("magnet") or "",
                 "files": [{"path": f["path"], "size": f["size"]} for f in (r.get("files") or [])][:400]}
 
-    def use(self, r):
+    def use(self, r, how=""):
+        """Attach it: as another magnet ("add"), instead of the title's ("replace"), or (not
+        said) instead unless "Keep magnet connected" is ticked."""
         view = r if "key" in r else self._view(r)
         t = self.app.torrents.add(self.item["id"], view["magnet"])
         try:
             keep = self.app.store.get(self.item["id"]).get("keep_magnet")
         except KeyError:
             keep = False
-        if not keep:
+        if how == "replace" or (how != "add" and not keep):
             # One torrent per title: the one it had goes (unless "Keep magnet connected").
             self.app.torrents.replace_for(self.item["id"], t["hash"])
         return {"hash": t["hash"], "name": view["name"]}
@@ -908,12 +917,12 @@ class Jobs:
         self.jobs = {}
         self.lock = threading.Lock()
 
-    def start(self, item):
+    def start(self, item, season=None):
         with self.lock:
             job = self.jobs.get(item["id"])
-            if job and job.state["running"]:
+            if job and job.state["running"] and job.season == season:
                 return job.state
-            job = Finder(self.app, item)
+            job = Finder(self.app, item, season)
             self.jobs[item["id"]] = job
         threading.Thread(target=job.run, daemon=True).start()
         return job.state
@@ -922,7 +931,7 @@ class Jobs:
         job = self.jobs.get(item_id)
         return job.state if job else None
 
-    def use(self, item_id, key):
+    def use(self, item_id, key, how=""):
         job = self.jobs.get(item_id)
         if not job:
             raise SiteError("search again: that list is gone")
@@ -931,7 +940,7 @@ class Jobs:
             raise SiteError("that torrent isn't in the list any more")
         if not choice["magnet"]:
             raise SiteError("its magnet link isn't read yet - a moment")
-        job.state["added"] = job.use(choice)
+        job.state["added"] = job.use(choice, how)
         return job.state
 
 

@@ -108,6 +108,10 @@ class App:
         self._tried_sources = {}         # (title, episode) -> sources that didn't play there
         # What you showed the app on each site, finding a video yourself (picker.py).
         phone_player.on_closed = self._player_exited          # (the phone's player closed)
+        # What's left of torrents that are gone, cleared once the app is up.
+        tidy = threading.Timer(30, self._clean_leftovers)
+        tidy.daemon = True
+        tidy.start()
         self._learned_path = self.data_dir / "learned-sites.json"
         webtools.LEARNED.update(read_json(self._learned_path, {}))
         # Sub or dub, switched in the player (the episodes after it follow); subtitle searches.
@@ -394,6 +398,14 @@ class App:
     def _party_server(self):
         return self.settings.get()["party_server"] or syncplay.DEFAULT_SERVER
 
+    def party_guest_of(self):
+        """The host's name, when you're a guest in someone's watch party; else ""."""
+        with self._party_lock:
+            party = self.party
+        if party and party.active and party.role == "guest":
+            return party.leader_name() or "the host"
+        return ""
+
     def _party_name(self):
         return self.settings.get()["party_name"] or syncplay.default_name()
 
@@ -416,7 +428,24 @@ class App:
                 self.party = None
                 self.party_last = {"ended": reason, "at": time.time(), "room": party.room}
 
+    def _party_role(self, party):
+        """You became a guest (someone else is the host now): you follow them, as a guest does."""
+        if party.role == "guest":
+            party.resolve, party.open_player, party.open_link = self.party_resolve, self._party_open, self.open_link
+
+    def party_make_host(self, name):
+        with self._party_lock:
+            party = self.party
+        if not party or not party.active:
+            raise ApiError("there's no watch party on")
+        try:
+            party.make_host(name)
+        except party_mod.PartyError as e:
+            raise ApiError(str(e)) from e
+        return self.party_status()
+
     def _start_party(self, party):
+        party.on_role = self._party_role
         with self._party_lock:
             old, self.party = self.party, party
         if old and old.active:
@@ -1307,7 +1336,8 @@ class App:
         # Episode order; when there are two copies of an episode, the better one
         # first, and a file on your computer before a torrent's.
         videos.sort(key=lambda v: (v["season"] if v["season"] is not None else 1, v["episodes"][:1] or [0],
-                                   bool(v.get("torrent")), [-x for x in library.quality(v)],
+                                   bool(v.get("torrent")), (v.get("torrent") or {}).get("rank", 0),
+                                   [-x for x in library.quality(v)],
                                    scanner.natural_key(v["rel"])))
         in_folder = {v["path"] for v in folder_videos}
 
@@ -2497,6 +2527,12 @@ class App:
                 self._online_found.pop(k, None)
         return self.store.update(item["id"], patch) if patch else item
 
+    def _clean_leftovers(self):
+        try:
+            self.torrents.clean_leftovers()
+        except Exception:  # noqa: BLE001 - tried again next start
+            pass
+
     def _player_exited(self, session, *_):
         """The player was closed: its torrents stop downloading - unless another player is
         already playing (you went straight on to something else)."""
@@ -2521,7 +2557,9 @@ class App:
         for k in [k for k in self._online_found if k[0] == item["id"]]:
             self._online_found.pop(k, None)
         self._online_track.pop(item["id"], None)
-        self.torrents.replace_for(item["id"], "")
+        # Its torrents go - and what they downloaded, unless "Keep downloaded episodes" is ticked
+        # (then the finished episodes stay, as your downloads).
+        self.torrents.replace_for(item["id"], "", keep_done=bool(self.torrents.keep.get(item["id"])))
         return self.store.update(item["id"], {"online_links": {}, "online_site_eps": {}, "local_folder": "",
                                               "local_file": "", "local_broken": False, "picked": {}})
 
@@ -2921,6 +2959,8 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/torrent-keep", "torrent_keep"),
         ("POST", r"/api/items/(\w+)/delete-file", "delete_file"),
         ("POST", r"/api/torrents/(\w+)/pause", "torrent_pause"),
+        ("POST", r"/api/torrents/(\w+)/move", "torrent_move"),
+        ("POST", r"/api/items/(\w+)/download-full", "download_full"),
         ("POST", r"/api/torrents/(\w+)/folder", "torrent_folder"),
         ("POST", r"/api/torrents/(\w+)/files/(\d+)", "torrent_file"),
         ("POST", r"/api/torrents/(\w+)/files/(\d+)/delete", "torrent_file_delete"),
@@ -2973,6 +3013,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/window", "open_window"),
         ("GET", r"/api/party", "party_status"),
         ("POST", r"/api/party/leave", "party_leave"),
+        ("POST", r"/api/party/host", "party_host"),
         ("GET", r"/api/settings", "get_settings"),
         ("PUT", r"/api/settings", "put_settings"),
         ("POST", r"/api/settings/test", "test_settings"),
@@ -3039,6 +3080,12 @@ class Handler(BaseHTTPRequestHandler):
         for route_method, pattern, name in self.ROUTES:
             m = re.fullmatch(pattern, url.path)
             if m and route_method == method:
+                guest = self.app.party_guest_of()
+                if guest and name in self.HOST_PLAYS:
+                    # In someone's watch party: what plays is the host's choice.
+                    return self._json({"error": f"You're in {guest}'s watch party - {guest} chooses what plays. "
+                                                "Leave the party to play something yourself.", "code": "party_guest"},
+                                      HTTPStatus.CONFLICT)
                 try:
                     body = self._body() if method in ("POST", "PUT") else {}
                     return self._json(getattr(self, "api_" + name)(body, *m.groups()))
@@ -3522,6 +3569,9 @@ class Handler(BaseHTTPRequestHandler):
     def api_party_leave(self, body):
         return self.app.party_leave()
 
+    def api_party_host(self, body):
+        return self.app.party_make_host(str(body.get("name") or ""))
+
     def api_party_peek(self, body):
         """What an invite is for, before joining."""
         invite = syncplay.read_invite(body.get("code"))
@@ -3675,6 +3725,25 @@ class Handler(BaseHTTPRequestHandler):
         self.app.torrents.set_keep(item_id, bool(body.get("keep")))
         return {"keep": bool(body.get("keep"))}
 
+    def api_torrent_move(self, body, h):
+        """A title's magnets in order: the first one's file is used for an episode both have."""
+        self.app.torrents.move(h, -1 if body.get("dir") == "up" else 1)
+        return self.app.torrents.all(self.app.torrents.records[h]["item_id"]) if h in self.app.torrents.records else {}
+
+    def api_download_full(self, body, item_id):
+        """An episode (or the film) downloaded whole now, without playing it."""
+        item = self.app.item(item_id)
+        key = f'{int(body.get("season") or 1)}:{int(body.get("episode") or 1)}' if item["format"] == "series" else "movie"
+        if item["format"] == "series":
+            ep = self.app.torrents.episodes(item).get(key)
+        else:
+            vids = [v for v in self.app.torrents.videos(item)]
+            ep = vids[0]["torrent"] if vids else None
+        if not ep:
+            raise ApiError("its torrent doesn't have that one")
+        self.app.torrents.download_whole(ep["hash"], ep["index"])
+        return {"ok": True, "name": ep.get("name") or ""}
+
     def api_torrent_pause(self, body, h):
         self.app.torrents.pause(h, bool(body.get("paused", True)))
         return self.app.torrents.view(h)
@@ -3693,7 +3762,9 @@ class Handler(BaseHTTPRequestHandler):
         item = self.app.item(item_id)
         if not torrents_mod.available():
             raise ApiError(self.app.torrents.error)
-        return self.app.site_jobs.start(item)
+        season = body.get("season")
+        season = "all" if season == "all" else (int(season) if str(season or "").isdigit() else None)
+        return self.app.site_jobs.start(item, season)
 
     def api_find_torrent_state(self, body, item_id):
         self.app.item(item_id)
@@ -3702,7 +3773,7 @@ class Handler(BaseHTTPRequestHandler):
     def api_find_torrent_use(self, body, item_id):
         self.app.item(item_id)
         try:
-            return self.app.site_jobs.use(item_id, str(body.get("key") or ""))
+            return self.app.site_jobs.use(item_id, str(body.get("key") or ""), str(body.get("how") or ""))
         except (sites.SiteError, torrents_mod.TorrentError) as e:
             raise ApiError(str(e)) from e
 
@@ -3834,6 +3905,9 @@ class Handler(BaseHTTPRequestHandler):
                            "goes through the backup relay by itself")
         self.app.settings.update({"party_server": addr})          # (kept: used from now on)
         return {"server": addr, "saved": True}
+
+    # What a guest in someone's watch party can't start (the host chooses what plays).
+    HOST_PLAYS = {"play", "play_scraped", "online", "player_vlc"}
 
     def api_pick_start(self, body, item_id):
         return self.app.pick_start(self.app.item(item_id), body)
