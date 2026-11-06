@@ -133,9 +133,6 @@ class App:
         self._probes = {}                # a video -> what's in it (ffprobe)
         # Shared collections that stay up to date: yours put on the relays, others' looked at.
         self._live_lock, self._live_sent, self._live_status = threading.Lock(), {}, {}
-        live = threading.Timer(20, self._live_loop)
-        live.daemon = True
-        live.start()
         self._learned_path = self.data_dir / "learned-sites.json"
         webtools.LEARNED.update(read_json(self._learned_path, {}))
         # Sub or dub, switched in the player (the episodes after it follow); subtitle searches.
@@ -5031,5 +5028,9 @@ def make_server(app: App, port: int):
 def start_background_refresh(app: App):
     app.fill_pending()
     app.remote.start()
+    # Shared collections that stay up to date: yours put on the relays, others' looked at.
+    live = threading.Timer(20, app._live_loop)
+    live.daemon = True
+    live.start()
     threading.Thread(target=app.refresh_stale, daemon=True).start()
     threading.Thread(target=library.watch, args=(app,), daemon=True).start()

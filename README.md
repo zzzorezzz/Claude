@@ -278,7 +278,7 @@ The Windows/Mac-only settings (VLC, the player choice, the built-in browser and 
 
 ## Use it on your iPhone or iPad
 
-Your iPhone, iPad (or any phone or tablet with a browser) can use the app running on your PC or Mac: your whole list, your downloads, your sites, watch parties, and it **plays on the phone itself**. Nothing is installed on the phone; nothing is opened to the internet.
+Your iPhone, iPad (or any phone or tablet with a browser) can use the app running on your PC or Mac: your whole list, your downloads, your sites, watch parties, and it **plays on the phone itself**. Nothing is installed on the phone; nothing is opened to the internet. (In the Windows and Mac apps; the Android app is already the whole app on the phone.)
 
 **Set it up (once):**
 1. On the PC: **Settings → Use on your phone → Let my phone use this app**. A QR code appears for each of the PC's addresses (Wi-Fi, Ethernet, Tailscale).
