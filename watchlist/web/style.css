@@ -1788,3 +1788,67 @@ body.touch .ep-set { opacity: 1; }
 .fs-row:hover, .fs-row:focus-visible { background: rgba(127,127,127,.14); }
 .fs-row .muted { margin-left: auto; }
 .fs-row.up { color: var(--muted); }
+
+/* ---------- The phone's own player (player.js) ---------- */
+.wp { position: fixed; inset: 0; z-index: 2500; background: #000; color: #fff; display: block; user-select: none; -webkit-user-select: none;
+  touch-action: manipulation; }
+.wp.hidden { display: none; }
+body.wp-open { overflow: hidden; }
+.wp-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.wp-tap { position: absolute; inset: 0; }
+.wp-ui { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .25s; }
+.wp.wp-ui-on .wp-ui { opacity: 1; }
+.wp.wp-ui-on .wp-ui > * { pointer-events: auto; }
+.wp-top, .wp-bottom { position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 6px;
+  padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left)); }
+.wp-top { top: 0; background: linear-gradient(rgba(0,0,0,.7), transparent); }
+.wp-bottom { bottom: 0; flex-direction: column; align-items: stretch; gap: 4px; background: linear-gradient(transparent, rgba(0,0,0,.75));
+  padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+.wp-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 15px; }
+.wp-title .wp-ep { color: rgba(255,255,255,.75); }
+.wp-mid { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; gap: 34px; align-items: center; }
+.wp-btn { min-width: 44px; min-height: 44px; display: inline-grid; place-items: center; background: none; border: 0; color: #fff;
+  font: 700 13px/1 inherit; border-radius: 22px; padding: 0 8px; cursor: pointer; }
+.wp-btn svg { width: 24px; height: 24px; fill: currentColor; }
+.wp-btn:disabled { opacity: .3; }
+.wp-btn.on { color: var(--accent, #7c5cff); }
+.wp-big { width: 64px; height: 64px; background: rgba(0,0,0,.35); border-radius: 50%; }
+.wp-big svg { width: 34px; height: 34px; }
+.wp-play { width: 78px; height: 78px; }
+.wp-play svg { width: 44px; height: 44px; }
+.wp-src { border: 1px solid rgba(255,255,255,.45); border-radius: 22px; padding: 0 12px; font-weight: 600; }
+.wp-bar { position: relative; height: 28px; display: flex; align-items: center; }
+.wp-bar::before { content: ""; position: absolute; left: 0; right: 0; height: 4px; border-radius: 2px; background: rgba(255,255,255,.25); }
+.wp-buffered, .wp-played { position: absolute; height: 4px; border-radius: 2px; left: 0; }
+.wp-buffered { background: rgba(255,255,255,.45); }
+.wp-played { background: var(--accent, #7c5cff); }
+.wp-seek { position: absolute; inset: 0; width: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.wp-row { display: flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; font-size: 13px; }
+.wp-spacer { flex: 1; }
+.wp-time { min-width: 52px; }
+.wp-cc { position: absolute; left: 6%; right: 6%; bottom: calc(14% + env(safe-area-inset-bottom)); text-align: center; pointer-events: none;
+  font-size: clamp(16px, 4.6vw, 30px); line-height: 1.3; font-weight: 600; transition: bottom .25s; }
+.wp.wp-ui-on .wp-cc { bottom: calc(26% + env(safe-area-inset-bottom)); }
+.wp-cc span { background: rgba(0,0,0,.6); padding: 2px 8px; border-radius: 4px; -webkit-box-decoration-break: clone; box-decoration-break: clone;
+  text-shadow: 0 1px 2px #000; }
+.wp-loading { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; }
+.wp-loading.hidden, .wp-osd.hidden, .wp-error.hidden, .wp-upnext.hidden, .wp-sheet.hidden { display: none; }
+.wp-loading-text { margin-top: 10px; color: rgba(255,255,255,.85); font-size: 14px; }
+.wp.wp-ui-on .wp-loading { top: 64%; }
+.wp-osd { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); background: rgba(0,0,0,.7); padding: 8px 14px;
+  border-radius: 10px; font-size: 14px; max-width: 86%; text-align: center; pointer-events: none; }
+.wp-error { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(420px, 90%); background: rgba(20,20,28,.95);
+  border-radius: 16px; padding: 18px; text-align: center; }
+.wp-error .btns { justify-content: center; margin-top: 12px; }
+.wp-upnext { position: absolute; right: max(14px, env(safe-area-inset-right)); bottom: calc(90px + env(safe-area-inset-bottom)); background: rgba(20,20,28,.92);
+  border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; max-width: 300px; }
+.wp-upnext b { display: block; }
+.wp-sheet { position: absolute; left: 0; right: 0; bottom: 0; max-height: 72%; overflow: auto; background: rgba(18,18,26,.97);
+  border-radius: 18px 18px 0 0; padding: 12px 16px max(16px, env(safe-area-inset-bottom)); animation: sheet-up .2s ease-out; }
+.wp-sheet-head { display: flex; align-items: center; justify-content: space-between; }
+.wp-sheet h5 { margin: 12px 0 6px; color: rgba(255,255,255,.7); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.wp-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.wp-opts button { min-height: 40px; padding: 0 12px; border-radius: 20px; border: 1px solid rgba(255,255,255,.25); background: none; color: #fff; font: inherit; }
+.wp-opts button.on { background: #fff; color: #000; border-color: #fff; }
+.wp-how { margin-top: 12px; }
+@media (min-width: 900px) { .wp-sheet { left: auto; right: 16px; bottom: 90px; width: 380px; border-radius: 16px; } }

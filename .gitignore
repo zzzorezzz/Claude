@@ -22,3 +22,4 @@ android/app/src/main/python/
 android/.gradle/
 android/app/build/
 android/build/
+packaging/ffmpeg/

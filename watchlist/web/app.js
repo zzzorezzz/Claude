@@ -104,6 +104,7 @@ async function api(method, path, body) {
   }
   if (method === 'POST' && path === '/api/items') sfx('add');
   if (data && data.open_here) openHere(data.open_here);
+  if (data && data.player === 'web' && data.session && data.entries) openWebPlayer(data);   // (a phone: its own player)
   return data;
 }
 
@@ -4908,6 +4909,7 @@ async function playFile(wrap, video, sub, player = '', fromStart = false) {
     player: player || undefined, from_start: fromStart,
   });
   if (res.player === 'android') phone()?.play(JSON.stringify(res));
+  if (res.player === 'web') openWebPlayer(res);              // (a phone over the network: its own player)
   closeModal(wrap);
   toast(`Playing ${whatLabel(wrap)}${res.resumed_at ? ` from ${fmtTime(res.resumed_at)}` : ''}`);
   reload();
@@ -5196,6 +5198,7 @@ async function playScraped(wrap, opts = {}) {
     return;
   }
   if (res.player === 'android') phone()?.play(JSON.stringify(res));
+  if (res.player === 'web') openWebPlayer(res);
   closeModal(wrap);
   toast(res.player === 'browser' ? `Opened ${what} from ${res.site}` : `Playing ${what} from ${res.site}`);
   reload();

@@ -4,3 +4,7 @@ qrcode-1.4.4.min.js - qrcode-generator 1.4.4 by Kazuhiko Arase, MIT License.
   From https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js
   https://github.com/kazuhikoarase/qrcode-generator
   "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
+
+hls-1.5.17.min.js - hls.js 1.5.17, Apache License 2.0 (Copyright Dailymotion and the hls.js contributors).
+  From https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js
+  https://github.com/video-dev/hls.js - used where the browser can't play HLS itself (not Safari).

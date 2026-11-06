@@ -14,6 +14,7 @@ import re
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, cdp, dialogs, discover, hlsfix, livecollections, partyserver, remote, picker, relay, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
+from . import ai, cdp, dialogs, discover, hlsfix, livecollections, partyserver, remote, transcode, webplay, picker, relay, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -122,6 +123,13 @@ class App:
         # Your phone or tablet on your own network (Settings → Use on your phone): off until you
         # switch it on; then the app listens on this computer's own addresses too (remote.py).
         self.remote = remote.Access(self, lambda ip, port: remote_listener(self, ip, port))
+        # A phone playing on itself (webplay.py): its player, the tickets its videos come
+        # through, and the videos made playable for it (transcode.py).
+        self.tickets = webplay.Tickets()
+        self.web_jobs = webplay.Jobs(self.data_dir / "phone-cache")
+        self.web_jobs.clear()
+        self.web_sessions = {}           # device -> WebSession
+        self._probes = {}                # a video -> what's in it (ffprobe)
         # Shared collections that stay up to date: yours put on the relays, others' looked at.
         self._live_lock, self._live_sent, self._live_status = threading.Lock(), {}, {}
         live = threading.Timer(20, self._live_loop)
@@ -205,6 +213,155 @@ class App:
                 "catch_videos": webtools.can_catch(), "ytdlp": scrape.has_ytdlp(),
                 "windows": launcher.can_open_windows(), "theme": s["theme"],
                 "phone_access": bool(s["phone_access"])}
+
+    # ---- a phone playing on itself (Use on your phone: webplay.py, transcode.py)
+
+    def _web_device(self):
+        """The phone a request came from, when it plays on itself (not on this computer's screen)."""
+        device = getattr(_request, "device", None)
+        return device if device and device.get("play_on") != "pc" else None
+
+    def web_session(self, device, item, entries, start=0.0, first=0, paused=False):
+        old = self.web_sessions.get(device["id"])
+        if old and not old.ended:
+            old.stop()
+        self.web_jobs.stop(device["id"])
+        session = webplay.WebSession(device["id"], item["id"], entries, start, paused, first,
+                                     anime=item["type"] == "anime", title=item["title"])
+        session.on_end = self._web_ended
+        self.web_sessions[device["id"]] = session
+        return session
+
+    def web_forget(self, device_ids):
+        """Devices taken out: their videos' addresses stop working, their players close."""
+        for d in device_ids:
+            self.tickets.drop_device(d)
+            session = self.web_sessions.pop(d, None)
+            if session and not session.ended:
+                session.stop()
+            self.web_jobs.stop(d)
+
+    def _web_ended(self, session):
+        self.web_jobs.stop(session.device)
+        if not any(s is not session and not s.ended for s in self.web_sessions.values()):
+            self._player_exited(session)
+
+    def _probe(self, source):
+        try:
+            st = os.stat(source)
+            key = (source, st.st_size, st.st_mtime)
+        except OSError:
+            key = (source,)
+        hit = self._probes.get(source)
+        if hit and hit[0] == key:
+            return hit[1]
+        try:
+            info = transcode.probe(source)
+        except RuntimeError as e:
+            raise ApiError(f"the video couldn't be read ({e})") from e
+        self._probes[source] = (key, info)
+        return info
+
+    def _phone_sub(self, device, target, label, lang="", absolute=True, styled=False):
+        t = self.tickets.make(device, dict(target, kind="sub"))
+        return {"label": label, "lang": lang, "url": f"/stream/web/{t}/sub.vtt", "absolute": absolute, "styled": styled}
+
+    def web_media(self, session, index, at=0.0, caps=None, quality=None, burn=None):
+        """What the phone's player opens for an entry: {"src", "type" ("hls" / "mp4"), "offset" (where
+        the video it gets starts, in the episode), "duration", "audio", "subs", "how"}."""
+        if not 0 <= index < len(session.entries):
+            raise ApiError("that episode isn't in the player's list")
+        if not transcode.find()[0]:
+            raise ApiError("playing on a phone needs ffmpeg, which is missing from this copy of the app")
+        entry, device = session.entries[index], session.device
+        item = self.store.get(session.item_id)
+        key = entry.get("key") or ""
+        quality = str(quality or self.settings.get().get("phone_quality") or "1080")
+        out = {"index": index, "key": key, "label": entry.get("label") or "", "offset": 0.0, "duration": None,
+               "audio": [], "subs": [], "how": ""}
+        if entry.get("web") or entry.get("online"):
+            # A site's video: through the app, as the site wants it asked for (its headers stay here).
+            got = self._online_found.get((item["id"], key))
+            if not got or "/online/" in str(entry.get("path") or ""):
+                season, episode = self._key_numbers(key)
+                try:
+                    self.online_video(item["id"], season, episode, entry.get("site") or "", entry.get("track") or "")
+                except (OnlineError, KeyError) as e:
+                    raise ApiError(str(e), code="no_video") from e
+                got = self._online_found.get((item["id"], key))
+            if not got:
+                raise ApiError("couldn't find this episode's video", code="no_video")
+            site, found = got[0], got[1]
+            headers = hlsfix._headers(found.get("headers"), found.get("referer"))
+            kind = phone_player.video_kind({"path": found["url"], "headers": found.get("headers"), "referer": found.get("referer")})
+            if kind == "dash":
+                raise ApiError("this server's video is a kind phones can't play - try another server", code="no_video")
+            hls = kind == "hls" or ".m3u8" in found["url"].lower()
+            t = self.tickets.make(device, {"kind": "remote", "url": found["url"], "headers": headers, "urls": [], "hls": hls})
+            out.update(src=f"/stream/web/{t}/media.{'m3u8' if hls else 'mp4'}", type="hls" if hls else "mp4", how="site",
+                       site=site["name"], track=(found.get("stream") or {}).get("kind") or entry.get("track") or "sub")
+            if found.get("subtitle"):
+                out["subs"].append(self._phone_sub(device, {"url": found["subtitle"], "headers": headers},
+                                                 "English", "en"))
+            saved = self.saved_sub(item, key)
+            if saved and os.path.isfile(saved):
+                out["subs"].append(self._phone_sub(device, {"path": saved}, Path(saved).stem[:40]))
+            return out
+        source = entry["path"]
+        local = os.path.isfile(source)
+        info = self._probe(source)
+        burn_spec = None
+        if burn is not None and burn != "":
+            if str(burn) == "file" and entry.get("sub"):
+                burn_spec = {"path": entry["sub"], "n": None}
+            elif str(burn).isdigit():
+                burn_spec = {"path": source, "n": int(burn)}
+        how = transcode.plan(info, caps, quality, burn=burn_spec, local=local)
+        out["duration"] = info["duration"]
+        if how["direct"]:
+            t = self.tickets.make(device, {"kind": "file", "path": source})
+            out.update(src=f"/stream/web/{t}/video.mp4", type="mp4", how="direct")
+            for s in info["subs"]:
+                if s["text"]:
+                    out["subs"].append(self._phone_sub(device, {"path": source, "stream": s["n"]},
+                                                     transcode.track_name(s, s["n"], "Subtitles"), s["lang"], styled=s["styled"]))
+        else:
+            # Repackaged from the start when only the box changes (fast, from a file here);
+            # converted from where you are otherwise.
+            start = 0.0 if how["video"] == "copy" and local else float(at or 0)
+            if start and info["duration"] and start > info["duration"] - 5:
+                start = max(0.0, info["duration"] - 30)
+            texts = [s for s in info["subs"] if s["text"]][:6]
+            job = self.web_jobs.start(device, source, info, how, start, subs=[s["n"] for s in texts])
+            if not job.wait_for("master.m3u8", 40):
+                why = job.failed()
+                job.stop()
+                raise ApiError(f"the video couldn't be got ready for the phone ({why or 'it took too long'})")
+            t = self.tickets.make(device, {"kind": "job", "job": job})
+            out.update(src=f"/stream/web/{t}/master.m3u8", type="hls", offset=job.start, how=how["video"],
+                       audio=[{"label": a["label"], "lang": a["lang"], "default": a["default"]} for a in job.audio],
+                       encoder=transcode.encoder() if how["video"] == "encode" else "",
+                       burned=burn_spec is not None)
+            for s in texts:
+                out["subs"].append({"label": transcode.track_name(s, s["n"], "Subtitles"), "lang": s["lang"],
+                                    "url": f"/stream/web/{t}/sub{s['n']}.vtt", "absolute": False, "live": True,
+                                    "styled": s["styled"], "n": s["n"]})
+        if entry.get("sub") and os.path.isfile(entry["sub"]):
+            out["subs"].insert(0, self._phone_sub(device, {"path": entry["sub"]}, Path(entry["sub"]).stem[:40]))
+        return out
+
+    def web_seek(self, session, t, caps=None, quality=None, burn=None):
+        """A seek on the phone past what's ready: wait for it (a file here, repackaged, is quickly
+        all there), or start again from there."""
+        job = self.web_jobs.current(session.device)
+        entry = session.current()
+        if not job or not entry or job.source != entry.get("path"):
+            return {"restart": False}
+        if job.start <= t <= job.start + job.ready_until() + 6:
+            return {"restart": False}
+        if job.how["video"] == "copy" and os.path.isfile(job.source) and t >= job.start:
+            return {"restart": False, "wait": True}
+        return dict(self.web_media(session, session.index, at=t, caps=caps, quality=quality, burn=burn), restart=True)
 
     def open_link(self, url):
         here = getattr(_request, "links", None)
@@ -1607,6 +1764,20 @@ class App:
         first = patch.pop("first", 0)
         this = entries[first]
         start = 0 if body.get("from_start") else player.resume_point(item["positions"].get(this["key"]))
+        web = self._web_device()
+        if web:
+            # A phone over the network: its own player plays the list - nothing opens here.
+            with self._party_lock:
+                hosting = self.party if self.party and self.party.active and self.party.role == "host" else None
+            hold = bool(hosting and any(p != hosting.me for p in hosting.people))
+            session = self.web_session(web, item, entries, start, first, paused=bool(body.get("paused") or hold))
+            if hosting:
+                session.party = True
+                hosting.attach(session, hold=hold and not body.get("paused"))
+                self._party_now(hosting, this)
+            self.store.update(item["id"], patch)
+            return dict(session.launch(), ok=True, player="web", file=this.get("name") or Path(path).name,
+                        queued=len(entries) - 1 - first, resumed_at=start, stream=bool(found))
         if launcher.ANDROID:
             # On a phone: the phone app's own player plays the list, and reports back
             # where you are (/api/android/progress). In a party you host, it plays for
@@ -2393,6 +2564,20 @@ class App:
         if hosting:
             self._party_now(hosting, entry, upcoming=True)      # guests start finding it now
         hold = bool(hosting and any(p != hosting.me for p in hosting.people))
+        web = self._web_device()
+        if web:
+            # A phone over the network: the whole season in its own player, each episode found as it opens.
+            entries, first = self._online_playlist(item, site, entry)
+            session = self.web_session(web, item, entries, start, first, paused=hold)
+            self._online_found[(item["id"], key)] = (site, found, time.time())
+            if hosting:
+                session.party = True
+                hosting.attach(session, hold=hold)
+                self._party_now(hosting, entry)
+            self.store.update(item["id"], patch)
+            if series:
+                threading.Thread(target=self._link_around, args=(item["id"], site, key, session), daemon=True).start()
+            return dict(result, **session.launch(), player="web", resumed_at=start)
         if launcher.ANDROID:
             # The whole season in the phone's player too, each episode found as it opens.
             entries, first = self._online_playlist(item, site, entry)
@@ -3074,6 +3259,12 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/state", "state"),
         ("GET", r"/api/version", "version"),
         ("POST", r"/api/pair/request", "pair_request"),
+        ("GET", r"/api/web/current", "web_current"),
+        ("POST", r"/api/web/(\w+)/open", "web_open"),
+        ("POST", r"/api/web/(\w+)/state", "web_state"),
+        ("POST", r"/api/web/(\w+)/seek", "web_seek"),
+        ("POST", r"/api/web/(\w+)/source", "web_source"),
+        ("POST", r"/api/web/(\w+)/version", "web_version"),
         ("GET", r"/api/pair/status", "pair_status"),
         ("POST", r"/api/pair/answer", "pair_answer"),
         ("GET", r"/api/phone", "phone_status"),
@@ -3282,6 +3473,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.FORBIDDEN, b"forbidden", "text/plain")
         url = urllib.parse.urlsplit(self.path)
         self.device, self._out_headers = None, None
+        if url.path.startswith("/stream/web/") and method in ("GET", "HEAD"):
+            return self._web_stream(url)
         if self.remote and self._remote_gate(method, url):
             return None
         if url.path.startswith("/stream/") and method in ("GET", "HEAD"):
@@ -3311,6 +3504,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     body = self._body() if method in ("POST", "PUT") else {}
                     _request.links = [] if self.remote else None
+                    _request.device = self.device
                     result = getattr(self, "api_" + name)(body, *m.groups())
                     if _request.links and isinstance(result, dict):
                         result = dict(result, open_here=list(_request.links))
@@ -3327,7 +3521,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": f"unexpected error: {e}"},
                                       HTTPStatus.INTERNAL_SERVER_ERROR)
                 finally:
-                    _request.links = None
+                    _request.links = _request.device = None
         return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def _online(self, url):
@@ -3454,6 +3648,242 @@ class Handler(BaseHTTPRequestHandler):
             out["pair"] = self.app.remote.devices.waiting()
         return out
 
+    # ---- a phone playing on itself (webplay.py)
+
+    def _web_session(self, sid):
+        session = next((s for s in self.app.web_sessions.values() if s.id == sid), None)
+        if not session or (self.device and session.device != self.device["id"]):
+            raise ApiError("that player has closed", HTTPStatus.NOT_FOUND, code="closed")
+        return session
+
+    def api_web_current(self, body):
+        """The player this phone had open (the page was reloaded): opened again."""
+        session = self.app.web_sessions.get((self.device or {}).get("id"))
+        if not session or session.ended:
+            return {"launch": None}
+        return {"launch": dict(session.launch(), start=session.position() or session.start_at)}
+
+    def api_web_open(self, body, sid):
+        session = self._web_session(sid)
+        try:
+            index = int(body.get("index", session.index))
+        except (TypeError, ValueError):
+            raise ApiError("which episode?") from None
+        return self.app.web_media(session, index, float(body.get("at") or 0), body.get("caps") or {},
+                                  body.get("quality"), body.get("burn"))
+
+    def api_web_state(self, body, sid):
+        """The phone's player: what it's doing (where it is, paused, which episode) - your place
+        is saved from it - and, back, what it's asked to do (a watch party: pause, seek...)."""
+        session = self._web_session(sid)
+        session.event(body)
+        entry = session.current()
+        if entry and session.dur and (body.get("ended") or (session.pos is not None and (
+                time.time() - session.saved_at > 10 or body.get("paused") or body.get("closed")))):
+            session.saved_at = time.time()
+            if body.get("ended"):
+                self.app._finished_entry(session.item_id, entry)
+            else:
+                self.app._save_position(session.item_id, entry, float(session.pos), float(session.dur))
+        try:
+            after = int(body.get("after") or 0)
+        except (TypeError, ValueError):
+            after = 0
+        seq, cmds = session.take(after)
+        out = {"seq": seq, "commands": cmds, "ended": session.ended}
+        job = self.app.web_jobs.current(session.device)
+        if job and entry and job.source == entry.get("path"):
+            job.used = time.time()
+            out["ready"] = job.ready_until()        # (how far the video made for it goes, from where it starts)
+        return out
+
+    def api_web_seek(self, body, sid):
+        session = self._web_session(sid)
+        return self.app.web_seek(session, float(body.get("t") or 0), body.get("caps") or {}, body.get("quality"),
+                                 body.get("burn"))
+
+    def api_web_source(self, body, sid):
+        """Not working? Try another server (or your next site) - as in the computer's player."""
+        session = self._web_session(sid)
+        threading.Thread(target=self.app._other_source, args=(session,), daemon=True).start()
+        return {"ok": True}
+
+    def api_web_version(self, body, sid):
+        session = self._web_session(sid)
+        threading.Thread(target=self.app._switch_version, args=(session,), daemon=True).start()
+        return {"ok": True}
+
+    # ---- the phone's videos (/stream/web/<ticket>/...)
+
+    MEDIA_TYPES = {".m3u8": "application/vnd.apple.mpegurl", ".m4s": "video/iso.segment", ".mp4": "video/mp4",
+                   ".vtt": "text/vtt; charset=utf-8", ".ts": "video/mp2t", ".aac": "audio/aac", ".key": "application/octet-stream",
+                   ".m4a": "audio/mp4", ".mp3": "audio/mpeg"}
+
+    def _web_stream(self, url):
+        m = re.fullmatch(r"/stream/web/([\w.-]+)/(.+)", url.path)
+        target = self.app.tickets.check(m.group(1)) if m else None
+        if not target:
+            return self._send(HTTPStatus.FORBIDDEN, b"this video's address has run out - open it again", "text/plain")
+        self.app.remote.awake.poke()
+        rest = m.group(2)
+        try:
+            if target["kind"] == "file":
+                size = os.path.getsize(target["path"])
+
+                def read(start, end):
+                    with open(target["path"], "rb") as f:
+                        f.seek(start)
+                        left = end - start + 1
+                        while left > 0:
+                            chunk = f.read(min(1 << 20, left))
+                            if not chunk:
+                                return
+                            left -= len(chunk)
+                            yield chunk
+                return self._send_ranges(size, read, "video/mp4")
+            if target["kind"] == "job":
+                return self._web_job(target["job"], rest)
+            if target["kind"] == "remote":
+                return self._web_remote(target, m.group(1), rest)
+            if target["kind"] == "sub":
+                return self._web_subtitle(target)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return None
+        return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+
+    def _send_ranges(self, size, read, ctype):
+        """A file's bytes, with byte ranges (206) so the phone's player can seek."""
+        start, end = 0, size - 1
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range", "").strip())
+        ranged = bool(m and (m.group(1) or m.group(2)))
+        if ranged:
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2)))
+            if start >= size or start > end:
+                return self._send(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, b"", "text/plain",
+                                  {"Content-Range": f"bytes */{size}"})
+        self.send_response(HTTPStatus.PARTIAL_CONTENT if ranged else HTTPStatus.OK)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if ranged:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if self.command == "HEAD":
+            return None
+        for chunk in read(start, end):
+            self.wfile.write(chunk)
+        return None
+
+    def _web_job(self, job, rest):
+        job.used = time.time()
+        folder = job.folder.resolve()
+        path = (folder / rest).resolve()
+        if not _inside(str(path), str(folder)):
+            return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+        ext = path.suffix.lower()
+        if ext == ".vtt" and not path.is_file():
+            return self._send(HTTPStatus.OK, b"WEBVTT\n\n", self.MEDIA_TYPES[".vtt"])
+        if not job.wait_for(rest, 40 if ext == ".m3u8" else 25):
+            why = job.failed()
+            return self._send(HTTPStatus.SERVICE_UNAVAILABLE if not why else HTTPStatus.BAD_GATEWAY,
+                              (why or "not ready yet").encode("utf-8", "replace"), "text/plain")
+        data = path.read_bytes()
+        if ext == ".m3u8" and b"#EXT-X-START" not in data:
+            # (still being made, it'd look live: players start it from the beginning, not its end)
+            data = data.replace(b"#EXTM3U", b"#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES", 1)
+        if rest == "master.m3u8":
+            # (ffmpeg's names for the audio tracks, and its Windows slashes, put right)
+            text = data.decode("utf-8", "replace").replace("\\", "/")
+            names = iter(a["label"] for a in job.audio)
+            text = re.sub(r'(#EXT-X-MEDIA:TYPE=AUDIO[^\n]*?)NAME="[^"]*"',
+                          lambda mm: f'{mm.group(1)}NAME="{next(names, "Audio").replace(chr(34), "")}"', text)
+            data = text.encode("utf-8")
+        return self._send(HTTPStatus.OK, data, self.MEDIA_TYPES.get(ext, "application/octet-stream"))
+
+    def _web_remote(self, target, ticket, rest):
+        """A site's video through the app: playlists pointed at the ticket, pieces passed on (any
+        picture in front of them taken off), MP4s with byte ranges."""
+        rm = re.fullmatch(r"r/(\d+)\.(\w+)", rest)
+        if rm:
+            n = int(rm.group(1))
+            if n >= len(target["urls"]):
+                return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+            url, kind = target["urls"][n], rm.group(2)
+        elif rest in ("media.m3u8", "media.mp4"):
+            url, kind = target["url"], rest.rsplit(".", 1)[1]
+        else:
+            return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+
+        def remember(u):
+            urls = target["urls"]
+            if u not in urls:
+                urls.append(u)
+            return urls.index(u)
+        try:
+            upstream = webplay.open_remote(url, target["headers"], self.headers.get("Range") if kind == "mp4" else None)
+        except urllib.error.HTTPError as e:
+            return self._send(HTTPStatus.BAD_GATEWAY, f"the site said {e.code}".encode(), "text/plain")
+        except (OSError, ValueError) as e:
+            return self._send(HTTPStatus.BAD_GATEWAY, f"the site didn't answer ({e})".encode("utf-8", "replace"), "text/plain")
+        with upstream:
+            if kind == "m3u8":
+                text = upstream.read().decode("utf-8", "replace")
+                if not text.lstrip().startswith("#EXTM3U"):
+                    return self._send(HTTPStatus.BAD_GATEWAY, b"the site didn't send a playlist", "text/plain")
+                body = webplay.rewrite(text, upstream.geturl(), ticket, remember).encode("utf-8")
+                return self._send(HTTPStatus.OK, body, self.MEDIA_TYPES[".m3u8"])
+            if kind == "mp4" and not rm:
+                # (the whole video from the site: its byte ranges passed through)
+                self.send_response(upstream.status)
+                self.send_header("Content-Type", "video/mp4")
+                for h in ("Content-Length", "Content-Range", "Accept-Ranges"):
+                    if upstream.headers.get(h):
+                        self.send_header(h, upstream.headers[h])
+                self.end_headers()
+                while True:
+                    chunk = upstream.read(1 << 16)
+                    if not chunk:
+                        return None
+                    self.wfile.write(chunk)
+            head = upstream.read(65536)
+            fixed = webplay.strip_picture(head) if kind in ("ts", "m4s") else head
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", self.MEDIA_TYPES.get("." + kind, "application/octet-stream"))
+            length = upstream.headers.get("Content-Length")
+            if length and fixed is head:
+                self.send_header("Content-Length", length)
+            self.end_headers()
+            self.wfile.write(fixed)
+            while True:
+                chunk = upstream.read(1 << 16)
+                if not chunk:
+                    return None
+                self.wfile.write(chunk)
+
+    def _web_subtitle(self, target):
+        if target.get("vtt") is None:
+            try:
+                if target.get("url"):
+                    with webplay.open_remote(target["url"], target.get("headers")) as r:
+                        raw = r.read().decode("utf-8", "replace")
+                    text = transcode.clean_vtt(raw) if "-->" in raw and "[Script Info]" not in raw \
+                        else transcode.to_vtt(target["url"], headers=target.get("headers"))
+                elif target.get("stream") is not None:
+                    text = transcode.to_vtt(target["path"], stream=target["stream"])
+                elif str(target["path"]).lower().endswith((".srt", ".vtt")):
+                    raw = Path(target["path"]).read_text(encoding="utf-8", errors="replace")
+                    text = transcode.clean_vtt(raw)
+                else:
+                    text = transcode.to_vtt(target["path"])
+            except (OSError, RuntimeError, ValueError) as e:
+                return self._send(HTTPStatus.BAD_GATEWAY, f"the subtitles couldn't be read ({e})".encode("utf-8", "replace"), "text/plain")
+            target["vtt"] = text
+        return self._send(HTTPStatus.OK, target["vtt"].encode("utf-8"), self.MEDIA_TYPES[".vtt"])
+
     # ---- your phone or tablet (remote.py)
 
     def api_pair_request(self, body):
@@ -3502,9 +3932,11 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError("that device isn't connected", HTTPStatus.NOT_FOUND) from None
 
     def api_phone_device_remove(self, body, device_id):
+        self.app.web_forget([device_id])
         return {"removed": self.app.remote.devices.remove(device_id)}
 
     def api_phone_remove_all(self, body):
+        self.app.web_forget([d["id"] for d in self.app.remote.devices.list()])
         return {"removed": self.app.remote.devices.remove(None)}
 
     def api_player_status(self, body):

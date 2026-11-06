@@ -61,6 +61,20 @@ def _self_test(path):
         report["yt_dlp"] = bool(yt_dlp.version.__version__)
     except Exception as e:  # noqa: BLE001
         report["yt_dlp"] = f"{type(e).__name__}: {e}"
+    # ffmpeg, for playing on a phone (Use on your phone): it runs, and turns a tiny clip into HLS.
+    try:
+        import subprocess
+        from .transcode import find
+        ffmpeg, ffprobe = find()
+        if not ffmpeg:
+            report["ffmpeg"] = "missing"
+        else:
+            r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=160x120",
+                                "-c:v", "mpeg4", "-f", "null", "-"], capture_output=True, timeout=60,
+                               **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}))
+            report["ffmpeg"] = r.returncode == 0 or (r.stderr or b"").decode("utf-8", "replace")[-200:]
+    except Exception as e:  # noqa: BLE001
+        report["ffmpeg"] = f"{type(e).__name__}: {e}"
     # Torrent streaming (libtorrent, with the libraries it needs).
     try:
         import libtorrent
