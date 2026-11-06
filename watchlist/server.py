@@ -5,6 +5,7 @@ stop DNS-rebinding tricks) and changes need an X-Watchlist header, which
 other websites can't add to requests they send to your PC.
 """
 
+import hashlib
 import json
 import mimetypes
 import os
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, cdp, dialogs, discover, hlsfix, partyserver, picker, relay, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
+from . import ai, cdp, dialogs, discover, hlsfix, livecollections, partyserver, picker, relay, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -112,6 +113,11 @@ class App:
         tidy = threading.Timer(30, self._clean_leftovers)
         tidy.daemon = True
         tidy.start()
+        # Shared collections that stay up to date: yours put on the relays, others' looked at.
+        self._live_lock, self._live_sent, self._live_status = threading.Lock(), {}, {}
+        live = threading.Timer(20, self._live_loop)
+        live.daemon = True
+        live.start()
         self._learned_path = self.data_dir / "learned-sites.json"
         webtools.LEARNED.update(read_json(self._learned_path, {}))
         # Sub or dub, switched in the player (the episodes after it follow); subtitle searches.
@@ -310,7 +316,8 @@ class App:
 
     def read_shared(self, body):
         """A shared collection from a pasted code or a chosen file, each title marked
-        with whether it's in your list already."""
+        with whether it's in your list already. One that stays up to date (a WLC3 link, or a
+        file holding one) is read as it is now; "live" is its key, followed once it's added."""
         text = str(body.get("code") or "")
         path = str(body.get("file") or "")
         if path:
@@ -320,8 +327,26 @@ class App:
                 text = Path(path).read_text(encoding="utf-8", errors="replace")
             except OSError as e:
                 raise ApiError(f"couldn't open that file ({e})") from e
+        live = None
+        if text.strip().startswith("{"):
+            try:
+                live = livecollections.read_code(str(json.loads(text).get("live") or ""))
+            except (ValueError, AttributeError):
+                live = None
+        else:
+            live = livecollections.read_code(text)
         try:
-            data = share.read(text)
+            if live:
+                try:
+                    version = livecollections.fetch(live)
+                    data = dict(share.from_data(version["data"]), at=version.get("at") or 0)
+                except livecollections.LiveError as e:
+                    if not text.strip().startswith("{"):
+                        raise ApiError(str(e)) from e
+                    data = dict(share.read(text), at=0)         # (the file's titles, as it was saved)
+                data["live"] = livecollections.key_text(live)
+            else:
+                data = share.read(text)
         except share.ShareError as e:
             raise ApiError(str(e)) from e
         for r in data["items"]:
@@ -343,6 +368,12 @@ class App:
             final = f"{name} (shared)" if n == 2 else f"{name} (shared {n - 1})"
         col = self.store.add_collection(final)
         listed = bool(body.get("add_to_list"))
+        if data.get("live"):
+            # Kept up to date: what's added to it (or taken out) later comes here too.
+            col = self.store.update_collection(col["id"], {
+                "follow_key": data["live"], "follow_at": data.get("at") or 0, "follow_listed": listed,
+                "follow_by": data.get("by") or "", "follow_checked": time.time(),
+                "follow_ids": [[r["source"], r["source_id"]] for r in data["items"]]})
         ok = 0
         for r in data["items"]:
             try:
@@ -351,7 +382,129 @@ class App:
             except (metadata.MetadataError, ApiError, ValueError, KeyError):
                 pass
         return {"collection": col, "titles": ok, "new": sum(1 for r in data["items"] if not r["in_list"]),
-                "failed": len(data["items"]) - ok, "listed": listed}
+                "failed": len(data["items"]) - ok, "listed": listed, "live": bool(data.get("live"))}
+
+    # ---- shared collections that stay up to date (livecollections.py)
+
+    LIVE_REPOST = 6 * 3600       # the sharer's app puts its collection back this often (relays forget)
+    LIVE_CHECK = 30 * 60         # an app that has someone's collection looks for changes this often
+
+    def _collection(self, col_id):
+        col = next((c for c in self.store.collections() if c["id"] == col_id), None)
+        if not col:
+            raise ApiError("collection not found", HTTPStatus.NOT_FOUND)
+        return col
+
+    def live_share(self, col_id):
+        """The collection's link that never changes (made the first time), put on the relays now."""
+        self.share_collection(col_id)                 # (an empty one can't be shared)
+        col = self._collection(col_id)
+        if not col.get("share_key"):
+            col = self.store.update_collection(col_id, {"share_key": livecollections.key_text(livecollections.new_key())})
+        self._live_publish(col_id, True)              # (the link works as soon as it's copied)
+        return livecollections.to_code(livecollections.key_bytes(col["share_key"]))
+
+    def live_stop(self, col_id):
+        """Stop sharing it: the link stops working, and those who have it keep what they have."""
+        col = self._collection(col_id)
+        if col.get("share_key"):
+            key = livecollections.key_bytes(col["share_key"])
+            gone = {"v": 1, "name": col["name"], "by": "", "items": [], "stopped": True}
+            threading.Thread(target=livecollections.publish, args=(key, gone), daemon=True).start()
+        self._live_sent.pop(col_id, None)
+        return self.store.update_collection(col_id, {"share_key": ""})
+
+    def _live_publish(self, col_id, force=False):
+        """Your shared collection on the relays: when it changed, or once in a while (they forget)."""
+        with self._live_lock:
+            col = next((c for c in self.store.collections() if c["id"] == col_id), None)
+            if not col or not col.get("share_key"):
+                return 0
+            items = [i for i in self.store.list() if col_id in i["collections"]]
+            data = share.pack(col["name"], items, self.settings.get()["party_name"])
+            sig = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+            last = self._live_sent.get(col_id)
+            if not force and last and last[0] == sig and time.time() - last[1] < self.LIVE_REPOST:
+                return 0
+            n = livecollections.publish(livecollections.key_bytes(col["share_key"]), data)
+            if n:
+                self._live_sent[col_id] = (sig, time.time())
+            self._live_status[col_id] = {"relays": n, "at": time.time()}
+            return n
+
+    def live_follow(self, col_id, version=None):
+        """A collection added from someone's link: what they added to it since is added here
+        (in your list too if you chose that), what they took out leaves it. Titles you took
+        out of it yourself stay out."""
+        col = self._collection(col_id)
+        if not col.get("follow_key"):
+            raise ApiError("this collection isn't one that's kept up to date")
+        if version is None:
+            try:
+                version = livecollections.fetch(livecollections.key_bytes(col["follow_key"]))
+            except livecollections.LiveError as e:
+                self.store.update_collection(col_id, {"follow_checked": time.time()})
+                raise ApiError(str(e)) from e
+        if (version.get("at") or 0) <= (col.get("follow_at") or 0):
+            self.store.update_collection(col_id, {"follow_checked": time.time()})
+            return {"added": 0, "removed": 0, "stopped": False}
+        if version["data"].get("stopped"):
+            self.store.update_collection(col_id, {"follow_key": "", "follow_stopped": True, "follow_checked": time.time()})
+            return {"added": 0, "removed": 0, "stopped": True}
+        try:
+            rows = share.from_data(version["data"])["items"]
+        except share.ShareError as e:
+            raise ApiError(str(e)) from e
+        wanted = {(r["source"], r["source_id"]): r for r in rows}
+        before = {tuple(x) for x in col.get("follow_ids") or []}
+        added = removed = 0
+        for k in [k for k in wanted if k not in before]:
+            mine = self.store.find_source(*k)
+            if mine and col_id in mine["collections"]:
+                continue
+            try:
+                if mine:
+                    self.store.set_item_collections(mine["id"], mine["collections"] + [col_id])
+                else:
+                    r = wanted[k]
+                    self.add_title(r["type"], r["source"], r["source_id"], [col_id], hint=r,
+                                   listed=bool(col.get("follow_listed")))
+                added += 1
+            except (metadata.MetadataError, ApiError, ValueError, KeyError):
+                pass
+        for k in before - set(wanted):
+            mine = self.store.find_source(*k)
+            if not mine or col_id not in mine["collections"]:
+                continue
+            rest = [c for c in mine["collections"] if c != col_id]
+            if not rest and mine.get("listed") is False and not mine.get("last_played"):
+                self.store.delete(mine["id"])          # (only ever in their collection, never watched)
+            else:
+                self.store.set_item_collections(mine["id"], rest)
+            removed += 1
+        self.store.update_collection(col_id, {"follow_at": version.get("at") or 0, "follow_checked": time.time(),
+                                              "follow_ids": [list(k) for k in wanted]})
+        return {"added": added, "removed": removed, "stopped": False}
+
+    def _live_loop(self):
+        checked = 0.0
+        while True:
+            try:
+                cols = self.store.collections()
+                for col in cols:
+                    if col.get("share_key"):
+                        self._live_publish(col["id"])
+                if time.time() - checked >= self.LIVE_CHECK:
+                    checked = time.time()
+                    for col in cols:
+                        if col.get("follow_key"):
+                            try:
+                                self.live_follow(col["id"])
+                            except ApiError:
+                                pass             # (the relays didn't have it just now: next time)
+            except Exception:  # noqa: BLE001 - never the app's end
+                pass
+            time.sleep(60)
 
     def use_mal(self, item, mal_id):
         """Switch a title whose info came from TMDB to its MyAnimeList entry (anime
@@ -2925,6 +3078,7 @@ class Handler(BaseHTTPRequestHandler):
         ("PUT", r"/api/collections/(\w+)", "rename_collection"),
         ("DELETE", r"/api/collections/(\w+)", "delete_collection"),
         ("POST", r"/api/collections/(\w+)/share", "share_collection"),
+        ("POST", r"/api/collections/(\w+)/follow", "follow_check"),
         ("POST", r"/api/collections/(\w+)/save", "save_collection"),
         ("POST", r"/api/shared/peek", "shared_peek"),
         ("POST", r"/api/shared/import", "shared_import"),
@@ -3273,8 +3427,18 @@ class Handler(BaseHTTPRequestHandler):
         """Your downloads no title plays from: not matched to a title, not in a title's own folder
         (the folder chosen on its page), not one of a title's torrent's files."""
         folders = [i["local_folder"] for i in self.app.store.list() if i.get("local_folder")]
+        # Every file a title plays from, worked out as the player does (downloads, the title's
+        # own folder, its torrents): none of those is "extra", whatever the reason.
+        used = set()
+        for item in self.app.store.list():
+            try:
+                videos, _ = self.app._sources(item)
+            except Exception:  # noqa: BLE001 - a title whose files can't be read: nothing of it counted
+                continue
+            used.update(os.path.normcase(os.path.realpath(v["path"])) for v in videos if v.get("path"))
         files = [f for f in self.app.library.extra_files()
-                 if not any(_inside(f["path"], d) for d in folders) and not self.app.torrents.find_file(f["path"])]
+                 if os.path.normcase(os.path.realpath(f["path"])) not in used
+                 and not any(_inside(f["path"], d) for d in folders) and not self.app.torrents.find_file(f["path"])]
         return {"files": files, "folder": self.app.settings.get().get("downloads_folder") or "",
                 "ai": bool(ai.available(self.app.settings.get()))}
 
@@ -3314,8 +3478,15 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.library.state()
 
     def api_share_collection(self, body, col_id):
+        """Its link (the same every time, kept up to date) and a code of the titles as they are now."""
+        if body.get("stop"):
+            return {"collection": self.app.live_stop(col_id)}
         data = self.app.share_collection(col_id)
-        return {"code": share.to_code(data), "name": data["name"], "count": len(data["items"])}
+        return {"code": self.app.live_share(col_id), "snapshot": share.to_code(data), "name": data["name"],
+                "count": len(data["items"]), "status": self.app._live_status.get(col_id)}
+
+    def api_follow_check(self, body, col_id):
+        return dict(self.app.live_follow(col_id), collection=self.app._collection(col_id))
 
     def api_save_collection(self, body, col_id):
         """Save a collection as a file (in your Downloads folder) and show it."""
@@ -3324,7 +3495,7 @@ class Handler(BaseHTTPRequestHandler):
         folder = folder if folder.is_dir() else Path.home()
         path = folder / share.file_name(data["name"])
         try:
-            path.write_text(share.to_file_text(data), encoding="utf-8")
+            path.write_text(share.to_file_text(data, live=self.app.live_share(col_id)), encoding="utf-8")
         except OSError as e:
             raise ApiError(f"couldn't save the file ({e})") from e
         launcher.reveal(str(path))
@@ -3653,6 +3824,10 @@ class Handler(BaseHTTPRequestHandler):
         if "watched" in body:
             # "Watched": kept as part of your collection, out of the everyday rows.
             patch["in_watched"] = (item.get("in_watched") or time.time()) if body["watched"] else None
+            if body["watched"]:
+                patch["watching"] = False                # (finished: off Currently watching)
+        if "watching" in body:
+            patch["watching"] = bool(body["watching"])
         if "review" in body:
             r = body["review"]
             if r is None or (isinstance(r, dict) and not r.get("stars") and not str(r.get("text") or "").strip()):

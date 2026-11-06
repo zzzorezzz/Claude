@@ -83,6 +83,9 @@ def _blank_item() -> dict:
         "positions": {},
         "added": now,
         "last_played": None,
+        # "Currently watching" on Home: True (playing anything puts it there, or you added it),
+        # False (you took it off), None (never played).
+        "watching": None,
         "in_watched": None,  # in your Watched list since then
         "watched_at": None,  # a film: when it was last played to the end
         # Your own review, only in this app: {"stars": 1-5, "text", "at"}.
@@ -332,6 +335,8 @@ class Store:
         with self._lock:
             self._check()
             item = self._find(item_id)
+            if "last_played" in patch and "watching" not in patch:
+                patch = dict(patch, watching=True)       # (played: it's one you're watching)
             local = {k: v for k, v in patch.items() if k in LOCAL_DEFAULTS}
             shared = {k: v for k, v in patch.items() if k not in LOCAL_DEFAULTS}
             if local:
@@ -373,6 +378,18 @@ class Store:
             col = {"id": uuid.uuid4().hex[:10], "name": name, "type": kind, "created": time.time()}
             self._touch(col)
             self._collections[col["id"]] = col
+            self._save()
+            return copy.deepcopy(col)
+
+    def update_collection(self, col_id, patch: dict):
+        """Change a collection's other fields (how it's shared, or followed)."""
+        with self._lock:
+            self._check()
+            col = self._collections.get(col_id)
+            if col is None:
+                raise KeyError(col_id)
+            col.update(copy.deepcopy({k: v for k, v in patch.items() if k not in ("id", "name", "type")}))
+            self._touch(col)
             self._save()
             return copy.deepcopy(col)
 

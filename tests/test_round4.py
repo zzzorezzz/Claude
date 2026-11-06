@@ -98,9 +98,10 @@ class ShareTest(test_server.ServerBase):
         col, bb, frieren = self.make_collection()
         status, r = self.call("POST", f"/api/collections/{col['id']}/share")
         self.assertEqual(status, 200, r)
-        self.assertTrue(r["code"].startswith("WLC2."))
+        self.assertTrue(r["code"].startswith("WLC3."))                         # (the link that stays up to date)
+        self.assertTrue(r["snapshot"].startswith("WLC2."))                     # (the titles as they are now)
         self.assertEqual(r["count"], 2)
-        data = share.read(f"here you go: {r['code']} enjoy")                  # pasted with other words
+        data = share.read(f"here you go: {r['snapshot']} enjoy")              # pasted with other words
         self.assertEqual(data["name"], "Weekend")
         self.assertEqual({(i["source"], i["source_id"]) for i in data["items"]}, {("tmdb", "tv/1396"), ("mal", "52991")})
         self.assertNotIn("progress", str(data))

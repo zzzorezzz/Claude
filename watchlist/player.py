@@ -238,6 +238,7 @@ class Session:
         self.pos_at = 0.0            # when pos was last reported (time.monotonic())
         self.listeners = []          # called with every message from mpv (watch parties)
         self._pending_sub = None
+        self._swapping = None        # the path of the episode's other file coming in (swap)
         self.loaded = False          # the current entry's file is open (its extra tracks can be added)
         self.connected, self.error, self.ended = False, "", False
         self.done = set()
@@ -334,19 +335,23 @@ class Session:
                         self.paused = bool(data)
                         if self.paused:
                             self._save(force=True)
-                    elif name == "playlist-pos" and getattr(self, "_swapping", None) is not None and isinstance(data, int):
-                        # (a file of the same episode coming in: still that episode)
-                        if data == self._swapping:
-                            self._swapping = None
-                        self.pos, self.dur = None, None
                     elif name == "playlist-pos" and isinstance(data, int) and data >= 0 and data != self.index:
-                        self._moved_to(data)
-                    elif name == "path" and isinstance(data, str) and getattr(self, "_swapping", None) is None:
+                        # (while another file of the episode comes in, the positions shift for a
+                        # moment - and mpv may never report them: the file opening decides)
+                        if self._swapping is None:
+                            self._moved_to(data)
+                    elif name == "path" and isinstance(data, str):
                         # The file opening says which episode it is, for sure (the playlist's
-                        # position can come late, or not at all, while a site's episode is found).
-                        at = next((i for i, e in enumerate(self.entries) if e.get("path") == data), None)
-                        if at is not None and at != self.index:
-                            self._moved_to(at)
+                        # position can come late, not at all, or be off while a file is swapped).
+                        cur = self.current()
+                        if self._swapping is not None and data == self._swapping:
+                            self._swapping = None        # (the same episode's other file: still it)
+                            self.pos, self.dur = None, None
+                        elif not (cur and cur.get("path") == data):
+                            at = next((i for i, e in enumerate(self.entries) if e.get("path") == data), None)
+                            if at is not None:
+                                self._swapping = None
+                                self._moved_to(at)
                 elif event == "end-file" and msg.get("reason") == "eof":
                     self._wrap_up_current(reached_end=True)
                 elif event == "file-loaded":
@@ -413,7 +418,7 @@ class Session:
                              daemon=True).start()
         for listener in list(self.listeners):
             try:
-                listener(self, {"event": "property-change", "name": "playlist-pos", "data": index})
+                listener(self, {"event": "property-change", "name": "playlist-pos", "data": index, "moved": True})
             except Exception:  # noqa: BLE001
                 pass
 
@@ -458,7 +463,7 @@ class Session:
         """The episode playing, swapped for another file of it (its dub, say) from where it is."""
         i = self.index
         entry = dict(entry, appended=True)
-        self._swapping = i
+        self._swapping = entry["path"]
         self.entries[i] = entry
         self.loaded = False
         return self.send(["loadfile", entry["path"], "insert-next-play", -1, f"start={max(0, int(at))}"],

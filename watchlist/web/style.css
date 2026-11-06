@@ -1696,3 +1696,20 @@ body.pick-window #nav, body.pick-window #view, body.pick-window #party-dock { di
 /* A title's magnets in order; Get magnet's season choice */
 .tor-order { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
 .season-pick { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+
+/* Currently watching: adding a title by hand */
+.aw-modal .modal { max-width: 520px; }
+.aw-list { display: flex; flex-direction: column; gap: 4px; max-height: 55vh; overflow: auto; margin-top: 10px; }
+.aw-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; background: none; border: 0;
+  color: inherit; text-align: left; cursor: pointer; font: inherit; min-height: 44px; }
+.aw-row:hover, .aw-row:focus-visible { background: rgba(127,127,127,.15); }
+.aw-row[hidden] { display: none; }
+.aw-row img, .aw-noimg { width: 34px; height: 50px; object-fit: cover; border-radius: 4px; flex: none; background: rgba(127,127,127,.2); }
+.aw-row > span { display: flex; flex-direction: column; }
+.where-modal .modal { max-width: 460px; }
+
+/* Shared collections that stay up to date */
+.live-note { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -6px 0 14px; }
+.share-once { margin-top: 14px; }
+.share-once summary { cursor: pointer; }
+.share-once textarea { margin-top: 8px; }

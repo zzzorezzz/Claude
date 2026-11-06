@@ -66,10 +66,13 @@ def _from_short(body):
                        "i": r[1][1:], "p": _poster_long(r[4])} for r in rows if isinstance(r, list) and len(r) >= 5]}
 
 
-def to_file_text(data):
-    """A file you can open in any text editor; the code inside is what's read."""
-    return json.dumps({"watchlist_collection": to_code(data), "name": data["name"],
-                       "titles": [r["t"] for r in data["items"]]}, ensure_ascii=False, indent=1)
+def to_file_text(data, live=""):
+    """A file you can open in any text editor; the code inside is what's read. `live`: the
+    link that keeps it up to date (followed when it's opened), the titles there as they are now."""
+    out = {"watchlist_collection": to_code(data), "name": data["name"], "titles": [r["t"] for r in data["items"]]}
+    if live:
+        out["live"] = live
+    return json.dumps(out, ensure_ascii=False, indent=1)
 
 
 def read(text):
@@ -92,6 +95,12 @@ def read(text):
             data = json.loads(zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)), bufsize=1 << 20))
     except (ValueError, zlib.error, TypeError, IndexError) as e:
         raise ShareError("that share code is incomplete - copy the whole thing") from e
+    return from_data(data)
+
+
+def from_data(data):
+    """What a share code (or an up-to-date shared collection) holds, checked: its name, who
+    shared it and its titles."""
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ShareError("that share code is damaged")
     items = []

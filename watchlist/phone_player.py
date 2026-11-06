@@ -113,7 +113,7 @@ class PhoneSession:
         for name, data in changed:
             for listener in list(self.listeners):
                 try:
-                    listener(self, {"event": "property-change", "name": name, "data": data})
+                    listener(self, {"event": "property-change", "name": name, "data": data, "moved": True})
                 except Exception:  # noqa: BLE001 - a listener's problem isn't the player's
                     pass
 

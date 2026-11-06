@@ -583,16 +583,22 @@ function cardHTML(item, opts = {}) {
   return `<div class="card${opts.resume ? ' card-resume' : ''}" data-id="${esc(item.id)}" ${opts.resume ? 'data-resume="1"' : ''} data-sig="${hashText(item.id + inner)}" tabindex="0">${inner}</div>`;
 }
 
-// Continue watching: what you were in the middle of, most recent first.
+// Currently watching: every title you're on, most recently played first. Playing anything puts a
+// title here; you can add one yourself or take it off. (Before this was kept: titles you were in
+// the middle of - a saved place, or a series not finished - count.)
 function continueItems() {
   const cutoff = Date.now() / 1000 - 90 * 86400;
-  return listed().filter((i) => i.last_played && i.last_played > cutoff && hasFiles(i)).filter((i) => {
+  const finishedFilm = (i) => !isSeries(i) && i.watched_at && i.watched_at >= (i.last_played || 0);
+  return listed().filter((i) => !i.in_watched && !finishedFilm(i)).filter((i) => {
+    if (i.watching === true) return true;
+    if (i.watching === false || !i.last_played || i.last_played < cutoff) return false;
     if (savedPos(i)) return true;
     if (!isSeries(i)) return false;
     const total = i.seasons.filter((s) => s.number > 0).reduce((n, s) => n + (s.episodes || 0), 0) || i.episodes_total || 0;
     return !total || absoluteIndex(i, i.progress) <= total;
-  }).sort((a, b) => b.last_played - a.last_played).slice(0, 10);
+  }).sort((a, b) => (b.last_played || b.modified || 0) - (a.last_played || a.modified || 0));
 }
+const isWatching = (item) => continueItems().some((i) => i.id === item.id);
 
 function resumeBarHTML(item) {
   const pos = savedPos(item);
@@ -932,6 +938,14 @@ function viewAction(name, data) {
   else if (name === 'pick-folder') { S.folderSel[data.type] = data.id; render(); }
   else if (name === 'rename-collection') renameCollection(data.id);
   else if (name === 'share-collection') openShareCollection(data.id);
+  else if (name === 'follow-check') {
+    toast('Looking for changes…');
+    api('POST', `/api/collections/${data.id}/follow`).then(async (r) => {
+      await reload();
+      toast(r.stopped ? "It isn't shared any more - the titles stay yours"
+        : r.added || r.removed ? `${r.added} added, ${r.removed} taken out` : 'Up to date - nothing new');
+    }).catch(fail);
+  }
   else if (name === 'open-shared') openSharedCollection();
   else if (name === 'delete-collection') deleteCollection(data.id);
   else if (name === 'search-online') openAdd(data.type, S.query.trim());
@@ -1057,10 +1071,77 @@ document.addEventListener('click', (e) => {
 
 function continueRowHTML() {
   const items = continueItems();
-  if (!items.length || S.genre) return '';
-  return `<section class="row row-continue"><div class="row-head"><h2>Continue watching</h2></div>
-    <div class="row-track">${items.map((i) => cardHTML(i, { resume: true })).join('')}</div></section>`;
+  if (S.genre) return '';
+  return `<section class="row row-continue"><div class="row-head"><h2>Currently watching</h2>
+      <span class="muted small">${items.length ? 'added when you play something · ⋯ on a poster to change where you are or take it off' : 'what you play shows up here'}</span></div>
+    <div class="row-track"><button class="tile tile-add" data-cw="add" title="Add a title you're watching"><span class="plus">+</span><span>Add one</span></button>
+      ${items.map((i) => cardHTML(i, { resume: true })).join('')}</div></section>`;
 }
+
+// Currently watching, by hand: add a title (and where you are in it), change where you are, take it off.
+async function setWatching(item, on) {
+  upsert(await api('PUT', `/api/items/${item.id}`, { watching: on }));
+  render(); refreshOpenTitle();
+  toast(on ? `${item.title} is in Currently watching` : `${item.title} is off Currently watching`);
+}
+
+function openWhereAmI(item, { adding = false } = {}) {
+  const series = isSeries(item);
+  const seasons = (item.seasons || []).filter((x) => x.number > 0);
+  const p = item.progress || { season: 1, episode: 1 };
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>${adding ? 'Add to Currently watching' : 'Where you are'}</h2><p class="sub">${esc(item.title)}</p>
+    ${series ? `<div class="mv-row"><label class="field"><span>Season</span>${seasons.length > 1
+      ? `<select class="select" id="wa-season">${seasons.map((x) => `<option value="${x.number}" ${x.number === p.season ? 'selected' : ''}>Season ${x.number}${x.episodes ? ` (${x.episodes} episodes)` : ''}</option>`).join('')}</select>`
+      : `<input class="input q-num" id="wa-season" type="number" min="1" value="${p.season}">`}</label>
+      <label class="field"><span>Next episode to watch</span><input class="input q-num" id="wa-episode" type="number" min="1" value="${p.episode}"></label></div>` : ''}
+    <div class="btns"><button class="btn btn-red" data-wa="save">${adding ? 'Add it' : 'Save'}</button>
+      ${adding ? '' : '<button class="btn btn-ghost" data-wa="off">Take it off Currently watching</button>'}</div></div>`, 'where-modal');
+  wrap.addEventListener('click', async (e) => {
+    const a = e.target.closest('[data-wa]')?.dataset.wa;
+    if (!a) return;
+    try {
+      if (a === 'off') { closeModal(wrap); await setWatching(item, false); return; }
+      const body = { watching: true };
+      if (series) {
+        body.progress = { season: Math.max(1, Number($('#wa-season', wrap).value) || 1),
+          episode: Math.max(1, Number($('#wa-episode', wrap).value) || 1) };
+      }
+      upsert(await api('PUT', `/api/items/${item.id}`, body));
+      closeModal(wrap); render(); refreshOpenTitle();
+      toast(series ? `${item.title}: ${epLabel(body.progress)} next` : `${item.title} is in Currently watching`);
+    } catch (err) { fail(err); }
+  });
+}
+
+function openAddWatching() {
+  const on = new Set(continueItems().map((i) => i.id));
+  const titles = listed().filter((i) => !on.has(i.id) && !i.in_watched).sort((a, b) => a.title.localeCompare(b.title));
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Add to Currently watching</h2><p class="sub">Choose a title from your list.</p>
+    <input class="input" id="aw-q" placeholder="Search your list" autocomplete="off">
+    <div class="aw-list">${titles.map((t) => `<button class="aw-row" data-aw="${esc(t.id)}">
+      ${t.poster ? `<img src="${esc(t.poster)}" alt="" loading="lazy">` : '<span class="aw-noimg"></span>'}
+      <span><b>${esc(t.title)}</b><span class="muted small">${esc(TYPE_ONE[t.type])}${t.year ? ` · ${t.year}` : ''}</span></span></button>`).join('')
+      || '<p class="muted">Everything in your list is already here.</p>'}</div></div>`, 'aw-modal');
+  const search = $('#aw-q', wrap);
+  const filter = () => {
+    const q = search.value.trim().toLowerCase();
+    wrap.querySelectorAll('.aw-row').forEach((r) => { r.hidden = !!q && !r.textContent.toLowerCase().includes(q); });
+  };
+  search.addEventListener('input', filter);
+  filter();                                  // (a search kept from last time)
+  search.focus();
+  wrap.addEventListener('click', (e) => {
+    const id = e.target.closest('[data-aw]')?.dataset.aw;
+    if (!id) return;
+    closeModal(wrap);
+    openWhereAmI(findItem(id), { adding: true });
+  });
+}
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-cw="add"]')) openAddWatching();
+});
 
 // Sort now, with the small "with AI" button sitting on top of it.
 const sortButtonsHTML = (small = true) => `<span class="sort-group">
@@ -1188,6 +1269,11 @@ function renderCollection(view, id) {
   if (!col) { location.hash = '#/collections'; return; }
   if (col.type) { S.folderSel[col.type] = col.id; location.hash = `#/${col.type}`; return; }
   const items = sortItems(applyGenre(S.items.filter((i) => i.collections.includes(id))));
+  const live = col.follow_key
+    ? `<div class="live-note muted small">🔄 Kept up to date with ${col.follow_by ? `${esc(col.follow_by)}'s` : 'the shared'} collection${col.follow_checked ? ` · looked ${esc(ago(col.follow_checked))}` : ''}
+        <button class="btn btn-ghost btn-sm" data-do="follow-check" data-id="${esc(id)}">Look now</button></div>`
+    : col.follow_stopped ? '<div class="live-note muted small">It isn\'t shared any more - these titles stay yours.</div>'
+      : col.share_key ? '<div class="live-note muted small">🔗 Shared - what you add here reaches everyone who has the link.</div>' : '';
   view.innerHTML = `<div class="page">
     <div class="page-head"><h1>${esc(col.name)}</h1><span class="count">${items.length} title${items.length === 1 ? '' : 's'}</span>${filterNote()}
       <span class="spacer"></span>
@@ -1195,6 +1281,7 @@ function renderCollection(view, id) {
       <button class="btn btn-ghost btn-sm" data-do="share-collection" data-id="${esc(id)}">${ICON.people} Share</button>
       <button class="btn btn-ghost btn-sm" data-do="rename-collection" data-id="${esc(id)}">Rename</button>
       <button class="btn btn-ghost btn-sm" data-do="delete-collection" data-id="${esc(id)}">Delete</button></div>
+    ${live}
     ${items.length ? `<div class="grid">${items.map(cardHTML).join('')}</div>`
       : '<div class="empty-state">This collection is empty. Use ⋯ on any title (or right-click it) to add it here.</div>'}
   </div>`;
@@ -1212,17 +1299,32 @@ async function openShareCollection(id) {
     <div id="share-out"><div class="spinner"></div></div></div>`, 'share-modal');
   try {
     const r = await api('POST', `/api/collections/${id}/share`);
-    $('#share-out', wrap).innerHTML = `<h4>Share code <span class="muted small">${r.count} title${r.count === 1 ? '' : 's'}</span></h4>
-      <p class="muted small">Copy it and paste it into any chat.</p>
-      <textarea class="input share-code" rows="4" readonly>${esc(r.code)}</textarea>
-      <div class="btns">${onPhone() ? '<button class="btn btn-red" data-s="phone-share">Share…</button>' : ''}<button class="btn btn-white" data-s="copy">Copy the code</button>
-        <button class="btn btn-ghost desktop-only" data-s="file">Save as a file instead</button></div>
-      <div id="share-file"></div>`;
+    $('#share-out', wrap).innerHTML = `<h4>Share link <span class="muted small">${r.count} title${r.count === 1 ? '' : 's'}</span></h4>
+      <p class="muted small">It's always the same link, and it stays up to date: titles you add to this collection later
+        (or take out) reach everyone who has it, while this app is open now and then.</p>
+      <textarea class="input share-code" rows="1" readonly>${esc(r.code)}</textarea>
+      ${r.status && !r.status.relays ? `<p class="warn small">The relays that keep it couldn't be reached just now, so the link may not open yet -
+        the app tries again by itself. To send it right now, use the code of the titles as they are (below).</p>` : ''}
+      <div class="btns">${onPhone() ? '<button class="btn btn-red" data-s="phone-share">Share…</button>' : ''}<button class="btn btn-white" data-s="copy">Copy the link</button>
+        <button class="btn btn-ghost desktop-only" data-s="file">Save as a file instead</button>
+        <button class="btn btn-ghost" data-s="stop" title="The link stops working; those who have the collection keep what they have">Stop sharing</button></div>
+      <div id="share-file"></div>
+      <details class="share-once"><summary class="muted small">A code of the titles as they are now (doesn't update)</summary>
+        <textarea class="input share-snap" rows="3" readonly>${esc(r.snapshot)}</textarea></details>`;
   } catch (e) { $('#share-out', wrap).innerHTML = `<div class="warn">${esc(e.message)}</div>`; return; }
   wrap.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-s]');
     if (!b) return;
     if (b.dataset.s === 'phone-share') { phone()?.share($('.share-code', wrap).value); return; }
+    if (b.dataset.s === 'stop') {
+      if (!confirm('Stop sharing this collection? The link stops working; those who have it keep what they have.')) return;
+      try {
+        await api('POST', `/api/collections/${id}/share`, { stop: true });
+        closeModal(wrap); await reload();
+        toast('Not shared any more - sharing it again makes a new link');
+      } catch (err) { fail(err); }
+      return;
+    }
     if (b.dataset.s === 'copy') {
       const box = $('.share-code', wrap);
       try { await navigator.clipboard.writeText(box.value); } catch { box.select(); document.execCommand('copy'); }
@@ -1241,8 +1343,8 @@ async function openShareCollection(id) {
 function openSharedCollection() {
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>Open a shared collection</h2>
-    <p class="sub">Paste the share code you were sent (it starts with WLC2.), or choose the file.</p>
-    <textarea class="input shared-paste" rows="3" placeholder="WLC2.…"></textarea>
+    <p class="sub">Paste the link you were sent (it starts with WLC3. or WLC2.), or choose the file.</p>
+    <textarea class="input shared-paste" rows="3" placeholder="WLC3.…"></textarea>
     <div class="btns"><button class="btn btn-white" data-s="peek" disabled>Open</button>
       <button class="btn btn-ghost" data-s="choose">Choose a file…</button></div>
     <div id="shared-view"></div></div>`, 'shared-modal');
@@ -1256,7 +1358,7 @@ function openSharedCollection() {
       const data = await api('POST', '/api/shared/peek', source);
       const fresh = data.items.filter((x) => !x.in_list).length;
       out.innerHTML = `<div class="shared-head"><h3>${esc(data.name)}</h3>
-          <span class="muted small">${data.items.length} title${data.items.length === 1 ? '' : 's'}${data.by ? ` · shared by ${esc(data.by)}` : ''} · ${fresh} not in your list</span></div>
+          <span class="muted small">${data.items.length} title${data.items.length === 1 ? '' : 's'}${data.by ? ` · shared by ${esc(data.by)}` : ''} · ${fresh} not in your list${data.live ? ' · stays up to date' : ''}</span></div>
         <div class="shared-grid">${data.items.map((x) => `<div class="shared-card${x.in_list ? ' in' : ''}">
           <div class="shared-poster"><span>${esc(x.title)}</span>${x.poster ? `<img src="${esc(x.poster)}" alt="" loading="lazy">` : ''}</div>
           <b title="${esc(x.title)}">${esc(x.title)}</b>
@@ -1283,7 +1385,7 @@ function openSharedCollection() {
         const r = await api('POST', '/api/shared/import', { ...source, add_to_list: $('#shared-to-list', wrap)?.checked });
         closeModal(wrap);
         await reload();
-        toast(`Added "${r.collection.name}" - ${r.titles} title${r.titles === 1 ? '' : 's'}${r.listed ? ', also in your list' : ''}. Their full info fills in in the background.`);
+        toast(`Added "${r.collection.name}" - ${r.titles} title${r.titles === 1 ? '' : 's'}${r.listed ? ', also in your list' : ''}. Their full info fills in in the background.${r.live ? ' Titles added to it later come by themselves.' : ''}`);
         location.hash = `#/collections/${r.collection.id}`;
       } catch (err) { fail(err); b.disabled = false; b.textContent = 'Add the collection'; }
     }
@@ -1332,6 +1434,9 @@ function openItemMenu(item, anchor, { inTitle = false } = {}) {
     <button data-m="new-folder"><span class="check">+</span>New folder…</button><hr>
     <div class="menu-label">Collections</div>${cols}
     <button data-m="new-col"><span class="check">+</span>New collection…</button><hr>
+    ${isWatching(item) ? `<button data-m="where">✎&nbsp; Where I am${isSeries(item) ? ` (${esc(epLabel(item.progress))})` : ''}…</button>
+      <button data-m="cw-off">⊖&nbsp; Take off Currently watching</button>`
+    : '<button data-m="cw-on">⊕&nbsp; Add to Currently watching…</button>'}
     <button data-m="watched">${item.in_watched ? '↩&nbsp; Move back to my list' : '✓&nbsp; Mark as watched'}</button>
     ${maybeAnimeOnTmdb(item) ? '<button data-m="use-mal">⇄&nbsp; Use MyAnimeList info</button>' : ''}
     <button data-m="refresh">↻&nbsp; Refresh info</button>
@@ -1378,6 +1483,8 @@ function openItemMenu(item, anchor, { inTitle = false } = {}) {
         render(); refreshOpenTitle();
         toast('Info updated');
       } else if (m === 'watched') await toggleWatched(item.id);
+      else if (m === 'where' || m === 'cw-on') openWhereAmI(findItem(item.id), { adding: m === 'cw-on' });
+      else if (m === 'cw-off') await setWatching(findItem(item.id), false);
       else if (m === 'use-mal') openUseMal(findItem(item.id));
       else if (m === 'remove') removeItem(item.id);
     } catch (err) { fail(err); }

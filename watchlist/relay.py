@@ -81,6 +81,7 @@ class Mqtt:
         self.broker, self.topics, self.on_message, self.on_lost = broker, list(topics), on_message, on_lost
         self.timeout = timeout
         self.sock, self.lock, self.alive, self._pid = None, threading.Lock(), True, 0
+        self.acked = threading.Event()      # (the relay took a message: PUBACK)
         self._connect()
         threading.Thread(target=self._read_loop, daemon=True).start()
         threading.Thread(target=self._keepalive, daemon=True).start()
@@ -140,9 +141,10 @@ class Mqtt:
         body = struct.pack(">H", self._next_pid()) + _string(topic) + bytes([1])
         self.sock.sendall(bytes([0x82]) + _varint(len(body)) + body)
 
-    def publish(self, topic, payload: bytes):
+    def publish(self, topic, payload: bytes, retain=False):
+        """`retain`: the relay keeps it and hands it to whoever asks later (the latest one)."""
         body = _string(topic) + struct.pack(">H", self._next_pid()) + payload
-        self._send(bytes([0x32]) + _varint(len(body)) + body)          # (QoS 1: the relay keeps it till it's taken)
+        self._send(bytes([0x32 | (1 if retain else 0)]) + _varint(len(body)) + body)   # (QoS 1: the relay keeps it till it's taken)
 
     def _read_loop(self):
         while self.alive:
@@ -157,6 +159,8 @@ class Mqtt:
                         self.on_lost()
                     return
                 continue
+            if kind == 0x40:
+                self.acked.set()
             if kind == 0x30:
                 first, data = payload
                 tlen = struct.unpack(">H", data[:2])[0]

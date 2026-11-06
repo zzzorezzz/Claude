@@ -2,14 +2,32 @@ import http.client
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from tests import fixtures
 from tests.test_scanner import touch
-from watchlist import launcher, metadata, player
+from watchlist import launcher, livecollections, metadata, player
 from watchlist.server import App, make_server
+
+
+class FakeRelays:
+    """The public relays shared collections are kept on (livecollections.py), in memory."""
+
+    def __init__(self):
+        self.kept, self.last = {}, 0.0
+
+    def publish(self, key, data, brokers=None):
+        self.last = max(time.time(), self.last + 0.001)
+        self.kept[bytes(key)] = {"at": self.last, "data": json.loads(json.dumps(data))}
+        return 2
+
+    def fetch(self, key, brokers=None):
+        if bytes(key) not in self.kept:
+            raise livecollections.LiveError("not on the relays")
+        return json.loads(json.dumps(self.kept[bytes(key)]))
 
 
 class ServerBase(unittest.TestCase):
@@ -29,7 +47,10 @@ class ServerBase(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
 
         self.spawned, self.opened = [], []
+        self.relays = FakeRelays()
         for target, value in [
+            (mock.patch.object(livecollections, "publish", side_effect=self.relays.publish), None),
+            (mock.patch.object(livecollections, "fetch", side_effect=self.relays.fetch), None),
             (mock.patch.object(metadata, "_get_json", side_effect=fixtures.fake_get_json), None),
             (mock.patch.object(launcher, "_spawn", side_effect=self.spawned.append), None),
             (mock.patch.object(launcher.webbrowser, "open", side_effect=lambda url, new=0: self.opened.append(url) or True), None),

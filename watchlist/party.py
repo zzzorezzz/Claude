@@ -568,9 +568,17 @@ class Party:
         if msg.get("event") == "property-change" and msg.get("name") in ("duration", "playlist-pos"):
             with self.lock:
                 if msg.get("name") == "playlist-pos":
+                    if not msg.get("moved"):
+                        return                   # (mpv's own count: the player says when it really moved)
                     self._announced = False
                     if self.role == "guest":
                         self._init_pending = True
+                    elif self.active and any(p != self.me for p in self.people):
+                        # The host moved to another episode: it waits, paused, until everyone has
+                        # it ready (as when it was first played), then plays for all.
+                        self._hold_until = time.time() + 180
+                        threading.Thread(target=session.send, args=(["set_property", "pause", True],),
+                                         daemon=True).start()
 
     def _tick_loop(self):
         while self.active:
