@@ -113,6 +113,7 @@ jobs:
           if ($r.https -ne $true) { throw "secure (HTTPS) connections don't work: $($r.https)" }
           if ($r.player_ui -ne $true) { throw "the built-in player's controls (uosc) are missing from the exe" }
           if ($r.ffmpeg -ne $true) { throw "ffmpeg (playing on a phone) is missing or doesn't work: $($r.ffmpeg)" }
+          if ($r.phone -ne $true) { throw "Use on your phone doesn't work: $($r.phone)" }
 
       - name: Check the built-in player plays and is followed
         shell: pwsh

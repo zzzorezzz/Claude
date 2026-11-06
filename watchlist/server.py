@@ -3505,6 +3505,8 @@ class Handler(BaseHTTPRequestHandler):
         em = re.fullmatch(r"/api/web/(\w+)/events", url.path)
         if em and method == "GET":
             return self._web_events(em.group(1), url)
+        if url.path == "/api/phone/speed" and method == "GET":
+            return self._speed(url)
         if url.path.startswith("/stream/") and method in ("GET", "HEAD"):
             return self._stream(url.path)
         if url.path.startswith("/online/") and method in ("GET", "HEAD"):
@@ -3710,6 +3712,26 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             self.wfile.write(b"event: closed\ndata: {}\n\n")
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        return None
+
+    _NOISE = os.urandom(1 << 20)
+
+    def _speed(self, url):
+        """Settings → Test my phone connection: some megabytes, as fast as they go."""
+        try:
+            mb = max(1, min(32, int(urllib.parse.parse_qs(url.query).get("mb", ["4"])[-1])))
+        except ValueError:
+            mb = 4
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(mb << 20))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            for _ in range(mb):
+                self.wfile.write(self._NOISE)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
         return None
 

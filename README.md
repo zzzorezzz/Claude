@@ -276,6 +276,36 @@ The phone app has everything the computer app has, with a phone layout (a tab ba
 
 The Windows/Mac-only settings (VLC, the player choice, the built-in browser and syncing through a shared folder) are hidden on a phone.
 
+## Use it on your iPhone or iPad
+
+Your iPhone, iPad (or any phone or tablet with a browser) can use the app running on your PC or Mac: your whole list, your downloads, your sites, watch parties, and it **plays on the phone itself**. Nothing is installed on the phone; nothing is opened to the internet.
+
+**Set it up (once):**
+1. On the PC: **Settings → Use on your phone → Let my phone use this app**. A QR code appears for each of the PC's addresses (Wi-Fi, Ethernet, Tailscale).
+2. On the phone (on the same Wi-Fi): scan the code with the camera, or type the address into Safari. Press **Ask to connect**.
+3. On the PC, a window shows a 6-digit code: check the phone shows the same one, and press **Allow**.
+4. On an iPhone: **Share → Add to Home Screen**, then open it from the Home Screen and connect once more there (the Home Screen app keeps its own connection). It then opens full screen, like an app.
+
+If the phone can't connect, Settings says so when the PC's firewall is the cause: on Windows, **Windows Security → Firewall & network protection → Allow an app through firewall → Watch Anything → Private**; on a Mac, allow incoming connections for Watch Anything.
+
+**Away from home:** install Tailscale (free) on the PC and the phone with the same account; a Tailscale address appears in Settings. It works wherever the phone has internet, encrypted, phone to PC directly. (The guide is in Settings.)
+
+**What it does on the phone:**
+- Everything the PC app does, laid out for a phone below 700px: a bar at the bottom (Home, Lists, Find, Party, Settings), menus and dialogs that come up from the bottom, big touch targets. Hold a poster to lift it (move to reorder, let go for its menu); every episode has a ⋯ button. Choosing a file or folder browses the PC ("On your PC"). Links open on the phone. The phone and the PC show the same list (it's the PC's).
+- **Playing:** Settings → This device → **Play on: this phone / the PC's screen**. On the phone, its own player: play/pause, a seek bar, double-tap the sides for ±10 s, previous/next, audio tracks and Sub/Dub, subtitles, quality and speed in the menu, **Not working?** (another server or site), full screen, Picture in Picture, AirPlay, the lock-screen controls, "Up next" in the last 20 s. Your place is saved on the PC as you watch.
+- **How videos get to the phone:** a site's video passes through the PC (the phone never sees its address or the headers it needs). Downloads and torrents: an MP4 the phone plays goes as it is; an MKV is repackaged (picture untouched); 10-bit and other pictures phones can't play are converted by the graphics card (NVENC / Quick Sync / AMF / VideoToolbox, else x264), no bigger than **Phone quality** (Settings, or the player's menu). Every audio track is kept; text subtitles come along (or **Burn in styled subtitles** keeps their look). A jump far ahead starts converting from there. The pieces made for the phone are deleted when you stop (or after an hour), never more than 5 GB.
+- **Watch parties** from the phone: start or join one as on the PC; the phone plays in step with everyone (pause, play, seeking, the next episode), and what the host plays next opens on the phone by itself.
+- **Test my phone connection** (Settings → This device) measures the phone's connection to the PC and suggests the quality that fits.
+- **Keep the PC awake while my phone uses it** (on by default): the PC doesn't go to sleep while the phone is using it, until 10 minutes after it last did something.
+
+**Safety:**
+- It's off until you switch it on, and listens only on the PC's own network addresses (nothing in your router).
+- Every phone asks first and you allow it on the PC. A phone keeps a long random key in a cookie that pages can't read (HttpOnly, SameSite=Strict, for a year); the PC keeps only a hash of it. Asking to connect is limited to a few tries every 10 minutes.
+- Requests with a name that isn't the PC's own (DNS rebinding) are refused. Every request from the network needs a connected phone; the PC itself is as it was.
+- Videos go through short-lived signed tickets per device, never with the real address in them. **Remove** (or **Remove all devices**) in Settings ends a phone's access at once.
+
+**Good to know:** Safari can't keep the app's pages on a phone over plain http, so when the PC is off the phone shows "Your PC isn't reachable" (with Retry) only while the app is open. There's no light colour theme yet. The PC's own player, VLC and the setup guide's computer steps stay on the PC.
+
 ## Syncing between Windows and Mac
 
 Your list can stay in sync between your computers through a folder that both of them sync.
@@ -341,6 +371,11 @@ Back that folder up if you reinstall your computer.
 - **Subtitles:** VLC loads a subtitle automatically when it has the same name as the video, like `Episode.srt` or `Episode.en.srt`. The app also checks `Subs` folders.
 - **Which services have a title** is what TMDB reports for your country (**Settings → Your country**). If you use a VPN, change your country there too.
 - **Streaming services play in your browser:** they use copy protection that only full browsers support, so they can't play inside this app.
+
+## Licences
+
+- **FFmpeg** (playing on a phone) is bundled with the app: on Windows the shared GPL build of FFmpeg 8.1 by BtbN (github.com/BtbN/FFmpeg-Builds), on a Mac the static GPL build of FFmpeg 6.1.1 by eugeneware (github.com/eugeneware/ffmpeg-static). Both are GPL v3 (they include x264); their licence (`LICENSE.txt`) is in the app's `ffmpeg` folder. FFmpeg's source is at ffmpeg.org.
+- **hls.js** 1.5.17 (Apache 2.0) and **qrcode-generator** 1.4.4 (MIT) are bundled in `watchlist/web/vendor` (see `LICENSES.txt` there).
 
 ## For developers
 

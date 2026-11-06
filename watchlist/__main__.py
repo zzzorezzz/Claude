@@ -38,6 +38,54 @@ def _tell(message):
                         "-e", "end run", message], check=False)
 
 
+def _phone_check():
+    """The phone side, end to end on this computer (loopback): True, or what went wrong."""
+    import http.client
+    import subprocess
+    import tempfile
+    import threading
+    import time
+    from pathlib import Path
+    from . import transcode
+    from .server import App, remote_listener
+    folder = Path(tempfile.mkdtemp())
+    app = App(folder / "data")
+    lan = remote_listener(app, "127.0.0.1", 0)
+    port = lan.server_address[1]
+    threading.Thread(target=lan.serve_forever, daemon=True).start()
+    app.remote._allowed = {f"127.0.0.1:{port}"}
+    try:
+        def ask(path, token=""):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            c.request("GET", path, headers={"Host": f"127.0.0.1:{port}", **({"Cookie": f"wa_device={token}"} if token else {})})
+            r = c.getresponse()
+            r.read()
+            c.close()
+            return r.status
+        if ask("/api/state") != 401:
+            return "a phone that isn't connected got in"
+        rid, _ = app.remote.devices.request("check", "127.0.0.1")
+        app.remote.devices.answer(rid, True)
+        _, token = app.remote.devices.poll(rid, "127.0.0.1")
+        if ask("/api/state", token) != 200:
+            return "a connected phone wasn't let in"
+        ffmpeg, _ = transcode.find()
+        clip = folder / "clip.mkv"
+        subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=25",
+                        "-f", "lavfi", "-i", "sine=duration=3", "-c:v", "mpeg4", "-c:a", "mp2", str(clip)], timeout=60,
+                       **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}))
+        info = transcode.probe(str(clip))
+        job = transcode.Job(str(clip), info, transcode.plan(info), folder / "job").run()
+        ok = job.wait_for("video/index.m3u8", 60)
+        why = job.failed()
+        time.sleep(0.5)
+        job.stop()
+        return True if ok else f"no video made for the phone ({why})"
+    finally:
+        lan.shutdown()
+        lan.server_close()
+
+
 def _self_test(path):
     """Used by the Windows and Mac builds to check everything made it into the app."""
     from .server import WEB_DIR
@@ -75,6 +123,11 @@ def _self_test(path):
             report["ffmpeg"] = r.returncode == 0 or (r.stderr or b"").decode("utf-8", "replace")[-200:]
     except Exception as e:  # noqa: BLE001
         report["ffmpeg"] = f"{type(e).__name__}: {e}"
+    # Use on your phone: a phone asks and is let in, its key is needed, a video is made for it.
+    try:
+        report["phone"] = _phone_check()
+    except Exception as e:  # noqa: BLE001
+        report["phone"] = f"{type(e).__name__}: {e}"
     # Torrent streaming (libtorrent, with the libraries it needs).
     try:
         import libtorrent

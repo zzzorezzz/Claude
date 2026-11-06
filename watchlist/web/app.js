@@ -6336,7 +6336,7 @@ async function openSettings(focus = '') {
   if (focus === 'svc') $('#svc-picker', wrap).classList.remove('hidden');
   const spot = { svc: '#svc-field', tmdb: '[name=tmdb_api_key]', mal: '[name=mal_client_id]', sync: '[name=sync_folder]',
     downloads: '[name=downloads_folder]', ai: '#ai-list', country: '[name=region]', sites: '#site-list', video: '#vsite-list',
-    browser: '[data-s="browser"]' }[focus];
+    browser: '[data-s="browser"]', phone: '#set-phone' }[focus];
   if (spot) {
     setTimeout(() => {
       const el = $(spot, wrap);
@@ -6573,7 +6573,23 @@ const GUIDE_STEPS = [
     body: `<p>With torrent sites, <b>Get magnet</b> on a title finds its torrent for you, and episodes stream while they download.</p><ol>
       <li><b>Add recommended</b> adds Nyaa (anime), The Pirate Bay (TV shows and films) and 1337x (films), and goes on.</li>
       <li>Or in Settings → <b>Torrent sites</b>: <b>+ Add a site</b>, its link: ${SITE_FORMAT}</li></ol>` },
+  { id: 'phone', title: 'Watch on your phone too?', optional: true, desktop: true, focus: 'phone', done: () => !!S.status.phone_access,
+    action: ['Let my phone use it', () => phoneAccessOn()],
+    body: `<p>Your iPhone, iPad or any phone or tablet can use this app too - your list, your downloads, your sites, watch parties - and play
+      on the phone itself. It works on your home Wi-Fi (or anywhere, with Tailscale), and each phone asks to connect first.</p><ol>
+      <li>Press <b>Let my phone use it</b> (or Settings → <b>Use on your phone</b>).</li>
+      <li>On your phone, scan the code that appears with the camera, and press <b>Ask to connect</b>.</li>
+      <li>Here, check the code is the same and press <b>Allow</b>.</li>
+      <li>On an iPhone, <b>Share → Add to Home Screen</b> makes it open like an app.</li></ol>` },
 ];
+
+async function phoneAccessOn() {
+  try {
+    await api('PUT', '/api/settings', { phone_access: true });
+    await reload();
+    openSettings('phone');
+  } catch (e) { fail(e); }
+}
 
 // The recommended sites, added to your settings from the guide (then the next step).
 async function addRecommendedNow(kind) {
@@ -6598,7 +6614,7 @@ async function toggleBuiltinBrowser() {
   } catch (e) { fail(e); }
 }
 
-const guideSteps = () => GUIDE_STEPS.filter((x) => !(x.desktop && onPhone()) && !((x.full) && simpleMode()));
+const guideSteps = () => GUIDE_STEPS.filter((x) => !(x.desktop && (onPhone() || REMOTE)) && !((x.full) && simpleMode()));
 
 function maybeAskSetup() {
   if (S.askedSetup || document.body.classList.contains('party-window')) return;

@@ -1,5 +1,20 @@
 # Notes: where we left off, and how the builds work
 
+## Round "Use on your phone" (2026-11-06)
+
+Not built yet (exe/dmg/apk); everything committed on `claude/blissful-mendel-jghzf5`.
+
+**Fixes first:** Home → Currently watching (`watching` on an item: set by any play in `Store.update` when `last_played` is in the patch; ⋯ → Where I am / take off; + Add one). Shared collections: `livecollections.py` (WLC3 link = a 16-byte key; the collection is a retained, encrypted MQTT message on the relay brokers; the sharer re-posts on change and every 6 h, followers look every 30 min; `follow_ids` so titles the follower took out stay out). Watch party Next after a Sub/Dub or other-source swap: `player.Session` now decides the episode from mpv's `path` (the swap latch stuck when mpv coalesced playlist-pos changes); the host is held on every episode change (`moved` events only). Extra files: also skips any file a title plays from (`_sources`); the user's report wasn't reproduced on a copy of their data.
+
+**The phone (Parts 1-5):**
+- `remote.py`: Access (listeners per LAN/Tailscale IP on `phone_port`, refreshed every 30 s; allowed Host names; `_answers` self-check spots a firewall), Devices (pair requests with 6-digit codes, rate limit 5 per 10 min per IP, `devices.json` keeps sha256 of the token), Awake (SetThreadExecutionState / caffeinate). `server.remote_listener` is Handler with `remote=True`; `_remote_gate` lets in only SHELL files, `/api/ping`, `/api/pair/*` and `/stream/web/*` without the `wa_device` cookie; LOCAL_ONLY routes. `_request` (thread-local) carries the device and turns `open_link` into `open_here`.
+- `webplay.py`: Tickets (HMAC, 8 h max, 2 h idle), WebSession (same interface as player.Session; numbered commands, `wait()` for SSE), `rewrite()` for site HLS, Jobs (one per device, idle 2 min, 1 h, 5 GB). `transcode.py`: find/probe/plan/encoder/Job (HLS fMP4 with var_stream_map: video plus one rendition per audio track; WebVTT sidecars; `-ss` restarts reset timestamps with setpts/asetpts).
+- Server: `web_media` (site: remote ticket; file: direct or job), `web_seek`, `/api/web/<sid>/{open,state,seek,source,version,events}`, `_web_stream` (file ranges, job files with `#EXT-X-START`, the remote proxy, subtitles). The play endpoints and party start/join/open branch on `_web_device()`; `party_device`.
+- Front: `phone.js` (REMOTE, pairing and unreachable screens, the PC's Allow/Deny pop-up, the Settings card with QR codes, tab bar, Lists sheet, Add to Home Screen tip, service worker on https only, speed test), `player.js` (the phone's player; hls.js except on Apple's WebKit), `sw.js`, `manifest.webmanifest`, `icons/`.
+- Testing here: Playwright (WebKit iPhone for layout; Edge at phone size for playback, since WebKit on Windows has no H.264), loopback 127.0.0.2/.3 as "the phone's address" (the user's Windows firewall blocks python.exe on Private networks: don't change it). A real iPhone's Safari wasn't tried.
+- ffmpeg: `packaging/ffmpeg` (git-ignored); CI fetches BtbN 8.1 shared (Windows) and eugeneware b6.1.1 arm64 (Mac). The self-test reports `ffmpeg` and `phone`.
+
+
 ## Where we left off (2026-10-30)
 
 Branch: `claude/blissful-mendel-jghzf5`. All work is committed and pushed. No pull request has been opened.

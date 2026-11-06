@@ -273,7 +273,10 @@ async function drawPhoneCard(wrap) {
       <label class="field"><span>This device's name</span><input class="input" id="me-name" maxlength="40" value="${esc(me.name)}"></label>
       <div class="field"><span>Play on</span><div class="seg" role="group">
         <button type="button" class="${me.play_on !== 'pc' ? 'on' : ''}" data-me="phone">This ${esc(deviceGuess())}</button>
-        <button type="button" class="${me.play_on === 'pc' ? 'on' : ''}" data-me="pc">The PC's screen</button></div></div>`;
+        <button type="button" class="${me.play_on === 'pc' ? 'on' : ''}" data-me="pc">The PC's screen</button></div></div>
+      <div class="field"><span>Your connection to the PC</span>
+        <div class="btns"><button class="btn btn-ghost btn-sm" type="button" data-me="speed">Test my phone connection</button></div>
+        <div id="me-speed" class="small" aria-live="polite"></div></div>`;
     box.onchange = async (e) => {
       if (e.target.id !== 'me-name') return;
       try { await api('PUT', `/api/phone/devices/${me.id}`, { name: e.target.value }); toast('Renamed'); } catch (err) { fail(err); }
@@ -281,6 +284,7 @@ async function drawPhoneCard(wrap) {
     box.onclick = async (e) => {
       const where = e.target.closest('[data-me]')?.dataset.me;
       if (!where) return;
+      if (where === 'speed') { speedTest($('#me-speed', wrap)); return; }
       try {
         me = (await api('PUT', `/api/phone/devices/${me.id}`, { play_on: where })).device;
         box.querySelectorAll('[data-me]').forEach((b) => b.classList.toggle('on', b.dataset.me === where));
@@ -362,6 +366,39 @@ async function drawPhoneCard(wrap) {
   // The addresses and devices change (Tailscale coming up, a phone connecting): kept current.
   clearTimeout(wrap.phoneTimer);
   if (st.on) wrap.phoneTimer = setTimeout(() => wrap.isConnected && !box.contains(document.activeElement) && drawPhoneCard(wrap), 15000);
+}
+
+// How good this phone's connection to the PC is: how fast an answer comes (5 tries), and how
+// much a few seconds bring (a download from the PC) - and the phone quality that fits it.
+async function speedTest(out) {
+  out.innerHTML = '<span class="spin-dot"></span> Testing…';
+  const times = [];
+  for (let i = 0; i < 5; i += 1) {
+    const t = performance.now();
+    try { await fetch('/api/ping', { cache: 'no-store' }); } catch { out.innerHTML = '<span class="bad">The PC didn\'t answer.</span>'; return; }
+    times.push(performance.now() - t);
+  }
+  const ping = Math.round(times.sort((a, b) => a - b)[2]);
+  let bytes = 0, secs = 0;
+  for (const mb of [4, 16]) {
+    const t = performance.now();
+    try {
+      const r = await fetch(`/api/phone/speed?mb=${mb}`, { cache: 'no-store' });
+      bytes += (await r.arrayBuffer()).byteLength;
+    } catch { break; }
+    secs += (performance.now() - t) / 1000;
+    if (secs > 2) break;
+  }
+  const mbps = secs ? (bytes * 8) / 1e6 / secs : 0;
+  const fits = mbps >= 25 ? ['original', 'Original quality'] : mbps >= 10 ? ['1080', '1080p'] : mbps >= 5 ? ['720', '720p'] : ['480', '480p'];
+  out.innerHTML = `<b>${mbps >= 100 ? Math.round(mbps) : mbps.toFixed(1)} Mbit/s</b>, answers in ${ping} ms - good for <b>${fits[1]}</b>.
+    ${mbps < 3 ? '<span class="bad">Slow: is the phone far from the Wi-Fi, or on mobile data through Tailscale?</span>' : ''}
+    <button class="btn btn-ghost btn-sm" type="button" data-q-set="${fits[0]}">Use ${fits[1]} for the phone</button>`;
+  out.onclick = async (e) => {
+    const q = e.target.closest('[data-q-set]')?.dataset.qSet;
+    if (!q) return;
+    try { await api('PUT', '/api/settings', { phone_quality: q }); e.target.textContent = 'Done ✓'; } catch (err) { fail(err); }
+  };
 }
 
 function openTailscaleGuide(mac) {
