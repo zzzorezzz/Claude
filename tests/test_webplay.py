@@ -142,10 +142,11 @@ class SessionTest(unittest.TestCase):
         s = webplay.WebSession("d", "item", [{"key": "1:1"}])
         s.send(["seek", 30.5, "absolute"], ["set_property", "pause", True], ["show-text", "Ali paused", 2000])
         seq, cmds = s.take(0)
-        self.assertEqual(cmds, [{"do": "seek", "to": 30.5}, {"do": "pause"}, {"do": "text", "text": "Ali paused", "ms": 2000}])
+        self.assertEqual(cmds, [{"do": "seek", "to": 30.5, "n": 1}, {"do": "pause", "n": 2},
+                                {"do": "text", "text": "Ali paused", "ms": 2000, "n": 3}])     # (numbered: each once)
         self.assertEqual(s.take(seq), (seq, []))
         s.jump(0)
-        self.assertEqual(s.take(seq)[1], [{"do": "index", "to": 0}])
+        self.assertEqual(s.take(seq)[1], [{"do": "index", "to": 0, "n": 4}])
 
     def test_closed(self):
         s = webplay.WebSession("d", "item", [{"key": "1:1"}])
