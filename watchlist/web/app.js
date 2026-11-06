@@ -103,6 +103,7 @@ async function api(method, path, body) {
     throw err;
   }
   if (method === 'POST' && path === '/api/items') sfx('add');
+  if (data && data.open_here) openHere(data.open_here);
   return data;
 }
 
@@ -172,15 +173,15 @@ const phone = () => window.Android;          // the phone app's side (play, open
 
 // Choose a file or folder: the computer's own dialog, or on a phone the app's file browser.
 async function browse(opts) {
-  if (!onPhone()) return api('POST', '/api/browse', opts);
-  if (phone()?.hasFiles && !phone().hasFiles()) {
+  if (!onPhone() && !REMOTE) return api('POST', '/api/browse', opts);
+  if (onPhone() && phone()?.hasFiles && !phone().hasFiles()) {
     const ok = await confirmModal('Allow access to your files?', 'To play your downloads and pick files, Watch Anything needs "All files access". Android opens the setting - switch it on, then come back.', 'Open the setting');
     if (ok) phone().askForFiles();
     return { path: '' };
   }
   return new Promise((resolve) => {
     const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
-      <h2>${esc(opts.title || 'Choose')}</h2><div class="fs-places"></div><div class="fs-path muted small"></div>
+      <h2>${esc(opts.title || 'Choose')}</h2>${REMOTE ? '<p class="fs-where">🖥 On your PC</p>' : ''}<div class="fs-places"></div><div class="fs-path muted small"></div>
       <div class="fs-list"><div class="spinner"></div></div>
       ${opts.kind === 'folder' ? '<div class="btns" style="margin-top:12px"><button class="btn btn-red" data-fs="pick">Use this folder</button></div>' : ''}</div>`, 'fs-modal');
     let here = '';
@@ -254,6 +255,8 @@ async function reload() {
   S.status = data.status;
   applyTheme(S.status.theme);
   document.body.classList.toggle('android', onPhone());
+  document.body.classList.toggle('remote', REMOTE);
+  document.body.classList.toggle('touch', matchMedia('(pointer: coarse)').matches);
   // The simple version: everything about downloads and torrents is out of sight (kept, not lost).
   document.body.classList.toggle('simple', simpleMode());
   S.library = data.library || {};
@@ -808,7 +811,16 @@ document.addEventListener('pointermove', (e) => {
   if (drag.float) { e.preventDefault(); dragMove(e.clientX, e.clientY); }
 }, { passive: false });
 document.addEventListener('touchmove', (e) => { if (drag.float) e.preventDefault(); }, { passive: false });
-document.addEventListener('pointerup', (e) => { if (drag.float) dragEnd(e.clientX, e.clientY); else dragReset(); });
+document.addEventListener('pointerup', (e) => {
+  if (drag.float && drag.start?.touch && (!drag.last || Math.hypot(drag.last.x - drag.start.x, drag.last.y - drag.start.y) < 12)) {
+    // A finger held on a poster and let go where it was: its menu (a phone has no right-click).
+    const item = findItem(drag.card?.dataset.id);
+    dragEnd(null, null, true);
+    if (item) openItemMenu(item, { x: e.clientX, y: e.clientY });
+    return;
+  }
+  if (drag.float) dragEnd(e.clientX, e.clientY); else dragReset();
+});
 document.addEventListener('pointercancel', () => { if (drag.float) dragEnd(null, null); else dragReset(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drag.float) dragEnd(null, null, true); });
 // A drag isn't also a click on the poster.
@@ -3193,7 +3205,17 @@ function drawTitle(wrap) {
     else if (e.target.closest('[data-sb]')) subsBarChange(wrap, e);
     else onlineLinksChange(wrap, e);
   };
-  // Right-click an episode: play it some way, its link to your site, troubleshoot.
+  // Right-click an episode (or its ⋯ on a touch screen): play it some way, its link to your site, troubleshoot.
+  if (!modal.epMore) {
+    modal.epMore = true;
+    modal.addEventListener('click', (e) => {
+      const more = e.target.closest('[data-epmore]');
+      if (!more) return;
+      e.stopPropagation();
+      e.preventDefault();
+      openEpisodeMenu(wrap, more.dataset.epmore, more);
+    }, true);
+  }
   modal.oncontextmenu = (e) => {
     const row = e.target.closest('.ep[data-ep]');
     if (!row) return;
@@ -4756,14 +4778,16 @@ async function drawEpisodes(wrap) {
         ${d.still ? `<img class="ep-thumb" src="${esc(d.still)}" alt="" loading="lazy">` : `<div class="ep-thumb">${ICON.play}</div>`}
         <div><div class="ep-title">${esc(d.name || `Episode ${n}`)}${d.runtime ? `<small>${d.runtime}m</small>` : ''}</div>
           <div class="ep-desc">${esc(d.overview)}</div>${bar}</div>
-        <div class="ep-tags">${tags}</div></div>`);
+        <div class="ep-tags">${tags}${epMore(key, n)}</div></div>`);
     } else {
       rows.push(`<div class="ep compact ${current ? 'current' : ''} ${watched ? 'watched' : ''}" data-ep="${key}">
-        <div class="ep-num">${n}</div><div><div class="ep-title">Episode ${n}</div>${bar}</div><div class="ep-tags">${tags}</div></div>`);
+        <div class="ep-num">${n}</div><div><div class="ep-title">Episode ${n}</div>${bar}</div><div class="ep-tags">${tags}${epMore(key, n)}</div></div>`);
     }
   }
   list.innerHTML = rows.join('');
 }
+
+const epMore = (key, n) => `<button class="ep-more" type="button" data-epmore="${esc(key)}" aria-label="More for episode ${n}">⋯</button>`;
 
 /* ========================================================== watch flow */
 

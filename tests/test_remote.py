@@ -181,3 +181,36 @@ class AllowedNamesTest(unittest.TestCase):
         with mock.patch.object(remote, "interface_addresses", side_effect=AssertionError("looked")):
             access.refresh()
         self.assertEqual(access.listeners, {})
+
+
+class PhoneAppTest(RemoteBase):
+    def test_the_home_screen_files(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.lan_port, timeout=5)
+        for path, kind in (("/manifest.webmanifest", "application/manifest+json"), ("/sw.js", "javascript"),
+                           ("/icons/icon-180.png", "image/png"), ("/phone.js", "javascript")):
+            conn.request("GET", path, headers={"Host": self.host})
+            r = conn.getresponse()
+            r.read()
+            self.assertEqual(r.status, 200, path)
+            self.assertIn(kind, r.getheader("Content-Type"), path)
+        conn.close()
+        manifest = json.loads((remote.Path(__file__).parent.parent / "watchlist/web/manifest.webmanifest").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["display"], "standalone")
+        self.assertEqual({i["sizes"] for i in manifest["icons"]}, {"180x180", "192x192", "512x512"})
+
+    def test_no_file_windows_on_the_pc_from_a_phone(self):
+        token, _ = self.pair()
+        with mock.patch("watchlist.dialogs.choose", side_effect=AssertionError("a window opened on the PC")):
+            status, r, _ = self.phone("POST", "/api/browse", {"kind": "folder"}, cookie=token)
+        self.assertEqual(status, 400, r)
+        status, r, _ = self.phone("GET", "/api/fs?path=&types=video", cookie=token)
+        self.assertEqual(status, 200, r)
+        self.assertTrue(r["places"])
+
+    def test_links_open_on_the_phone(self):
+        token, _ = self.pair()
+        status, r, _ = self.phone("POST", "/api/open", {"url": "https://example.com/show"}, cookie=token)
+        self.assertEqual((status, r["open_here"]), (200, ["https://example.com/show"]))
+        self.assertEqual(self.opened + self.spawned, [])                     # (nothing opened on the PC)
+        status, r = self.call("POST", "/api/open", {"url": "https://example.com/show"})
+        self.assertNotIn("open_here", r)

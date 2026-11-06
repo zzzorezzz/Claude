@@ -37,6 +37,90 @@ function remoteScreen(id, html) {
 const homeScreenTip = () => (isIOS() && !standalone() ? `<p class="rs-tip">Tip: add it to your Home Screen first - press
   <b>Share</b> <span aria-hidden="true">⬆︎</span> then <b>Add to Home Screen</b> - and connect from there. The Home Screen app keeps its own connection.</p>` : '');
 
+// ---- on the phone: links open here (the PC answers with them instead of opening them itself)
+
+function openHere(urls) {
+  const url = (urls || [])[0];
+  if (!url || !/^https?:/i.test(url)) return;
+  const w = window.open(url, '_blank', 'noopener');
+  if (w) return;
+  // (Safari let it through only from a tap: one more tap)
+  const wrap = openModal(`<div class="modal-pad"><h2>Open it here</h2><p class="sub">${esc(new URL(url).host)}</p>
+    <div class="btns"><a class="btn btn-red" href="${esc(url)}" target="_blank" rel="noopener">Open</a></div></div>`, 'open-here');
+  wrap.addEventListener('click', (e) => { if (e.target.closest('a')) setTimeout(() => closeModal(wrap), 300); });
+}
+
+// ---- on the phone: the bottom bar (below 700px wide) - Home, Lists, Find, Party, Settings
+
+const LIST_ROUTES = ['tv', 'anime', 'movie', 'collections', 'collection', 'watched'];
+function phoneTabs() {
+  const bar = document.getElementById('tabbar');
+  if (!bar) return;
+  const ico = (d) => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`;
+  bar.classList.add('tabbar-remote');
+  bar.innerHTML = `<a href="#/" data-route="home">${ico('M12 3 3 10.5V21h6v-6h6v6h6V10.5z')}<span>Home</span></a>
+    <button type="button" data-tab="lists">${ico('M3 5h2v2H3zm4 0h14v2H7zM3 11h2v2H3zm4 0h14v2H7zm-4 6h2v2H3zm4 0h14v2H7z')}<span>Lists</span></button>
+    <a href="#/find" data-route="find">${ico('M10 3a7 7 0 1 0 4.2 12.6l5.1 5.1 1.4-1.4-5.1-5.1A7 7 0 0 0 10 3zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10z')}<span>Find</span></a>
+    <button type="button" data-tab="party">${ico('M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm7.5-1a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM9 13c-3.3 0-7 1.6-7 4v3h14v-3c0-2.4-3.7-4-7-4zm7.5-1c-.5 0-1 0-1.6.1 1.3.9 2.1 2.2 2.1 3.9v3h5v-2.6c0-2.3-3.2-4.4-5.5-4.4z')}<span>Party</span></button>
+    <button type="button" data-tab="settings">${ico('M19.1 12.9a7.3 7.3 0 0 0 0-1.9l2-1.6-1.9-3.3-2.4 1a7 7 0 0 0-1.6-.9L14.8 3h-3.8l-.4 2.5c-.6.2-1.1.5-1.6.9l-2.4-1-1.9 3.3 2 1.6a7.3 7.3 0 0 0 0 1.9l-2 1.6 1.9 3.3 2.4-1c.5.4 1 .7 1.6.9l.4 2.5h3.8l.4-2.5c.6-.2 1.1-.5 1.6-.9l2.4 1 1.9-3.3zM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z')}<span>Settings</span></button>`;
+  bar.addEventListener('click', (e) => {
+    const tab = e.target.closest('[data-tab]')?.dataset.tab;
+    if (!tab) return;
+    e.stopPropagation();                     // (not also the tap that closes menus)
+    if (tab === 'party') document.getElementById('btn-party')?.click();
+    else if (tab === 'settings') document.getElementById('btn-settings')?.click();
+    else if (tab === 'lists') openListsSheet(e.target.closest('[data-tab]'));
+  });
+  const mark = () => {
+    const name = (location.hash.replace(/^#\/?/, '').split('/')[0]) || 'home';
+    bar.querySelector('[data-tab="lists"]').classList.toggle('active', LIST_ROUTES.includes(name));
+  };
+  window.addEventListener('hashchange', mark);
+  mark();
+}
+
+function openListsSheet(anchor) {
+  closeMenu();
+  const menu = document.createElement('div');
+  menu.className = 'menu ctx sheet-menu';
+  menu.innerHTML = [['#/tv', 'TV Shows'], ['#/anime', 'Anime'], ['#/movie', 'Movies'], ['#/collections', 'Collections'], ['#/watched', 'Watched']]
+    .map(([h, l]) => `<button data-go="${h}">${l}</button>`).join('');
+  menu.addEventListener('click', (e) => {
+    const go = e.target.closest('[data-go]')?.dataset.go;
+    if (!go) return;
+    closeMenu();
+    location.hash = go;
+  });
+  placeMenu(menu, anchor);
+}
+
+// ---- on the phone: "Add to Home Screen", said once
+
+function homeScreenOnce() {
+  if (!REMOTE || !isIOS() || standalone()) return;
+  try { if (localStorage.getItem('a2hs-tip')) return; localStorage.setItem('a2hs-tip', '1'); } catch { return; }
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad a2hs">
+    <h2>Put it on your Home Screen</h2>
+    <p class="sub">It then opens like an app, full screen, with its own icon.</p>
+    <ol class="guide-steps"><li>Press <b>Share</b> <span aria-hidden="true">⬆︎</span> at the bottom of Safari.</li>
+      <li>Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li>
+      <li>Open it from your Home Screen and press <b>Ask to connect</b> once more (the Home Screen app keeps its own connection).</li></ol>
+    <div class="btns"><button class="btn btn-red" data-a2hs="ok">Got it</button></div></div>`, 'a2hs-modal');
+  wrap.addEventListener('click', (e) => { if (e.target.closest('[data-a2hs]')) closeModal(wrap); });
+}
+
+// ---- the app's own files kept on the phone (only where browsers allow it: https)
+
+if (REMOTE && 'serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+if (REMOTE) {
+  document.addEventListener('DOMContentLoaded', () => {
+    phoneTabs();
+    setTimeout(() => { if (!document.getElementById('pair-screen') && !document.getElementById('away-screen')) homeScreenOnce(); }, 4000);
+  });
+}
+
 // ---- on the phone: connecting it
 
 function showPairing() {

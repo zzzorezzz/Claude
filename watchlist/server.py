@@ -29,6 +29,11 @@ from .config import Settings, read_json, write_json
 from .store import METADATA_FIELDS, TYPES, Store, new_item, next_episode
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+mimetypes.add_type("application/manifest+json", ".webmanifest")
+mimetypes.add_type("text/javascript", ".js")
+# The request being answered for a phone over the network: links the app would open on this
+# computer go back to the phone instead (open_link).
+_request = threading.local()
 REFRESH_AFTER = 7 * 24 * 3600
 RELATED_TTL = 3 * 24 * 3600
 # "Play this with" on a title's page: "" is "Use anything" (a file on your computer,
@@ -202,6 +207,10 @@ class App:
                 "phone_access": bool(s["phone_access"])}
 
     def open_link(self, url):
+        here = getattr(_request, "links", None)
+        if here is not None:
+            here.append(url)            # (asked for by a phone: it opens there, not on this computer)
+            return
         webtools.ADBLOCK = self.settings.get()["adblock"]
         browser = launcher.find_browser(self.settings.get()["browser_path"])
         try:
@@ -3301,7 +3310,11 @@ class Handler(BaseHTTPRequestHandler):
                                       HTTPStatus.CONFLICT)
                 try:
                     body = self._body() if method in ("POST", "PUT") else {}
-                    return self._json(getattr(self, "api_" + name)(body, *m.groups()))
+                    _request.links = [] if self.remote else None
+                    result = getattr(self, "api_" + name)(body, *m.groups())
+                    if _request.links and isinstance(result, dict):
+                        result = dict(result, open_here=list(_request.links))
+                    return self._json(result)
                 except ApiError as e:
                     return self._json({"error": str(e), **({"code": e.code} if e.code else {})}, e.status)
                 except metadata.MetadataError as e:
@@ -3313,6 +3326,8 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:  # keep the app alive whatever happens
                     return self._json({"error": f"unexpected error: {e}"},
                                       HTTPStatus.INTERNAL_SERVER_ERROR)
+                finally:
+                    _request.links = None
         return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def _online(self, url):
@@ -4415,6 +4430,8 @@ class Handler(BaseHTTPRequestHandler):
                     if e.name.startswith("."):
                         continue
                     try:
+                        if sys.platform == "win32" and e.stat().st_file_attributes & 0x6:
+                            continue                 # (Windows' hidden and system folders: AppData, Cookies...)
                         if e.is_dir():
                             dirs.append(e.name)
                         elif Path(e.name).suffix.lower() in want:
@@ -4425,15 +4442,33 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError("the app isn't allowed to look at your files yet - allow it (All files access) and try again")
         except OSError as e:
             raise ApiError(f"couldn't open that folder ({e})") from e
-        parent = os.path.dirname(path.rstrip("/")) or "/"
-        places = [{"name": n, "path": p} for n, p in (
-            [("Phone", home), ("Download", f"{home}/Download"), ("Movies", f"{home}/Movies"), ("DCIM", f"{home}/DCIM")]
-            if launcher.ANDROID else [("Home", home), ("Downloads", str(Path.home() / "Downloads"))]) if os.path.isdir(p)]
-        return {"path": path, "parent": parent if path != home and len(path) > len("/storage") else None,
+        if launcher.ANDROID:
+            parent = os.path.dirname(path.rstrip("/")) or "/"
+            parent = parent if path != home and len(path) > len("/storage") else None
+            places = [("Phone", home), ("Download", f"{home}/Download"), ("Movies", f"{home}/Movies"), ("DCIM", f"{home}/DCIM")]
+        else:
+            path = os.path.normpath(path)
+            parent = os.path.dirname(path)
+            parent = parent if parent != path else None           # (a drive's top: nothing above it)
+            s = self.app.settings.get()
+            places = [("Your downloads", s.get("downloads_folder") or ""), ("Home", home),
+                      ("Downloads", str(Path.home() / "Downloads"))]
+            if sys.platform == "win32":
+                places += [(f"{d}:", f"{d}:\\") for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.isdir(f"{d}:\\")]
+            elif sys.platform == "darwin" and os.path.isdir("/Volumes"):
+                places += [(v, f"/Volumes/{v}") for v in sorted(os.listdir("/Volumes")) if not v.startswith(".")]
+        seen, out = set(), []
+        for n, p in places:
+            if p and os.path.isdir(p) and os.path.normcase(p) not in seen:
+                seen.add(os.path.normcase(p))
+                out.append({"name": n, "path": p})
+        return {"path": path, "parent": parent,
                 "dirs": sorted(dirs, key=str.lower), "files": sorted(files, key=lambda f: f["name"].lower()),
-                "places": places}
+                "places": out}
 
     def api_browse(self, body):
+        if self.remote:
+            raise ApiError("choose it in the app's own file browser (this computer's file windows stay on this computer)")
         kind = body.get("kind", "folder")
         if kind not in ("folder", "file"):
             raise ApiError("kind must be folder or file")

@@ -306,7 +306,7 @@ body.dragging .folder-chip[data-drop] { border-style: dashed; border-color: #868
 }
 .episodes { display: flex; flex-direction: column; }
 .ep {
-  display: grid; grid-template-columns: 34px 130px 1fr auto; gap: 16px; align-items: center;
+  display: grid; grid-template-columns: 34px 130px minmax(0, 1fr) auto; gap: 16px; align-items: center;
   padding: 14px 12px; border-bottom: 1px solid #22283d; border-radius: 10px; cursor: pointer;
 }
 .ep:hover { background: #22283d; }
@@ -326,7 +326,7 @@ body.dragging .folder-chip[data-drop] { border-style: dashed; border-color: #868
 .tag-done { background: transparent; color: var(--muted); }
 .ep-set { opacity: 0; font-size: 12px; background: none; border: 1px solid #4c5677; border-radius: 3px; padding: 2px 6px; color: #c5cbdc; }
 .ep:hover .ep-set { opacity: 1; }
-.ep.compact { grid-template-columns: 34px 1fr auto; padding: 10px 12px; }
+.ep.compact { grid-template-columns: 34px minmax(0, 1fr) auto; padding: 10px 12px; }
 
 /* watch dialog */
 .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -419,7 +419,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-
   .tm-hero-content { left: 20px; right: 20px; }
   .tm-hero .poster-side { display: none; }
   .choices { grid-template-columns: 1fr; }
-  .ep { grid-template-columns: 30px 1fr auto; }
+  .ep { grid-template-columns: 30px minmax(0, 1fr) auto; }
   .ep-thumb { display: none; }
 }
 
@@ -1740,3 +1740,51 @@ body.pick-window #nav, body.pick-window #view, body.pick-window #party-dock { di
 .ph-row { margin: 6px 0; }
 .guide-steps { display: flex; flex-direction: column; gap: 8px; padding-left: 22px; }
 .ph-row .input { max-width: 140px; }
+
+/* ---------- On a phone over the network (Use on your phone): the bar, touch, sheets ---------- */
+body.remote .desktop-only { display: none !important; }
+.ep-more { display: none; }
+body.touch .ep-more { display: inline-grid; place-items: center; width: 44px; height: 44px; margin: -8px -8px -8px 0;
+  border: 0; border-radius: 50%; background: none; color: var(--muted); font-size: 22px; line-height: 1; }
+body.touch .card, body.touch .card img { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+body.touch .card .card-buttons { opacity: 1; }
+.fs-where { margin: -4px 0 10px; font-weight: 600; color: var(--accent); }
+@media (max-width: 700px) {
+  body.remote .tabbar { display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+    height: calc(58px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom);
+    background: color-mix(in srgb, var(--bg) 92%, transparent); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+    border-top: 1px solid var(--line); }
+  body.remote .tabbar a, body.remote .tabbar button { display: grid; place-items: center; align-content: center; gap: 2px; min-height: 44px;
+    color: var(--muted); font: 600 11px/1.2 inherit; background: none; border: 0; padding: 0; }
+  body.remote .tabbar svg { width: 22px; height: 22px; fill: currentColor; transition: transform .2s; }
+  body.remote .tabbar .active { color: #fff; }
+  body.remote .tabbar .active svg { color: var(--accent); transform: translateY(-1px) scale(1.08); }
+  body.remote #view { padding-bottom: calc(90px + env(safe-area-inset-bottom)); }
+  body.remote .nav-more, body.remote #btn-party, body.remote #btn-settings { display: none !important; }
+  body.remote #toasts { bottom: calc(80px + env(safe-area-inset-bottom)); }
+  body.remote #party-dock { left: 10px; right: 10px; bottom: calc(76px + env(safe-area-inset-bottom)); width: auto; max-height: calc(100vh - 150px); }
+  body.remote #sel-bar, body.remote #guide { bottom: calc(76px + env(safe-area-inset-bottom)); }
+  body.remote .nav { padding-top: env(safe-area-inset-top); height: calc(56px + env(safe-area-inset-top)); }
+  /* Dialogs come up from the bottom (a title's page stays full screen). */
+  body.remote #modal-root .overlay { align-items: flex-end; }
+  body.remote .modal:not(.title-modal) { min-height: 0; max-height: calc(100vh - 24px - env(safe-area-inset-top)); overflow: auto;
+    border-radius: 18px 18px 0 0 !important; padding-bottom: env(safe-area-inset-bottom); animation: sheet-up .22s ease-out; }
+  body.remote .modal.title-modal { padding-bottom: env(safe-area-inset-bottom); }
+  /* Menus: a sheet at the bottom, big enough for a thumb. */
+  body.touch .menu.ctx { position: fixed !important; left: 8px !important; right: 8px !important; top: auto !important;
+    bottom: calc(8px + env(safe-area-inset-bottom)) !important; max-height: 70vh; overflow: auto; width: auto !important; }
+  body.touch .menu button { min-height: 44px; }
+  body.touch .btn, body.touch .chip, body.touch .icon-btn, body.touch .seg button { min-height: 44px; }
+  body.touch .icon-btn { min-width: 44px; }
+}
+@keyframes sheet-up { from { transform: translateY(40px); opacity: .4; } to { transform: none; opacity: 1; } }
+body.touch .ep-set { opacity: 1; }
+/* The app's own file browser (a phone choosing a file or folder) */
+.fs-places { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.fs-path { margin-bottom: 6px; word-break: break-all; }
+.fs-list { display: flex; flex-direction: column; gap: 2px; max-height: 55vh; overflow: auto; }
+.fs-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 10px; text-align: left;
+  background: none; border: 0; border-radius: 8px; color: inherit; font: inherit; cursor: pointer; }
+.fs-row:hover, .fs-row:focus-visible { background: rgba(127,127,127,.14); }
+.fs-row .muted { margin-left: auto; }
+.fs-row.up { color: var(--muted); }
