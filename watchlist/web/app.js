@@ -170,6 +170,9 @@ function upsert(item) {
 /* ---- On a phone (the Android app) */
 
 const onPhone = () => S.status?.platform === 'android';
+// Plays in a player of its own: the phone app's, or a phone's over the network (unless it
+// chose the PC's screen) - not this computer's mpv or VLC.
+const ownPlayer = () => onPhone() || (REMOTE && S.device?.play_on !== 'pc');
 const phone = () => window.Android;          // the phone app's side (play, openUrl, share, files)
 
 // Choose a file or folder: the computer's own dialog, or on a phone the app's file browser.
@@ -254,6 +257,7 @@ async function reload() {
   S.items = data.items;
   S.collections = data.collections;
   S.status = data.status;
+  S.device = data.device || null;            // (a phone over the network: which one)
   applyTheme(S.status.theme);
   document.body.classList.toggle('android', onPhone());
   document.body.classList.toggle('remote', REMOTE);
@@ -1586,6 +1590,13 @@ function openModal(html, cls = '') {
   return wrap;
 }
 
+// The bar at the bottom of a phone: a section, from wherever you are (what's open closes).
+$('#tabbar')?.addEventListener('click', (e) => {
+  if (!e.target.closest('a, button')) return;
+  closeMenu();
+  [...$('#modal-root').children].reverse().forEach((w) => closeModal(w));
+}, true);
+
 function closeModal(wrap) {
   if (!wrap || !wrap.isConnected) return;
   wrap.remove();
@@ -2751,7 +2762,7 @@ async function openStartParty(item = null) {
       </div>` : '';
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
     <h2>${ICON.people} ${item ? `Host a watch party: ${esc(item.title)}` : 'Join a watch party'}</h2>
-    ${S.status.mpv || onPhone() ? '' : '<div class="warn">This needs the built-in player, which is missing.</div>'}
+    ${S.status.mpv || ownPlayer() ? '' : '<div class="warn">This needs the built-in player, which is missing.</div>'}
     ${srcPicker}
     ${item && series && avail.length ? `<label class="field" id="party-ep-field"><span>Episode</span><select class="select" id="party-ep">${options}</select></label>` : ''}
     ${onlineFields}
@@ -3868,7 +3879,7 @@ function drawFolderLine(wrap) {
   if (!line) return;
   const local = wrap.st.local;
   const dl = (S.library.items || {})[item.id];
-  const playerName = onPhone() ? "the phone's player" : S.status.player === 'vlc' || !S.status.mpv ? 'VLC' : 'the built-in player';
+  const playerName = ownPlayer() ? "the phone's player" : S.status.player === 'vlc' || !S.status.mpv ? 'VLC' : 'the built-in player';
   const brokenButtons = item.local_broken ? '<button class="btn btn-white btn-sm" data-t="mark-ok">It works now</button>'
     : '<button class="btn btn-ghost btn-sm" data-t="mark-broken">Not working</button>';
   const statusLine = item.local_broken
@@ -5746,7 +5757,7 @@ function drawLocal(wrap, { choose = false } = {}) {
       <button class="btn btn-ghost" data-w="reveal">Show in folder</button></div>
     ${info.videos.length > 1 ? `<details style="margin-top:16px" ${choose ? 'open' : ''}><summary>All files in the folder (${info.videos.length}) - click one to pick it</summary>${videoList}</details>` : ''}
     ${footer}`);
-  if (!S.status.mpv && !S.status.vlc && !onPhone()) {
+  if (!S.status.mpv && !S.status.vlc && !ownPlayer()) {
     body.insertAdjacentHTML('afterbegin', `<div class="warn" style="margin-bottom:16px">No player was found on this ${pcName()}. Install VLC from videolan.org, or set its location in Settings.</div>`);
   }
   body.addEventListener('click', (e) => localAction(wrap, e));
@@ -6258,7 +6269,7 @@ async function openSettings(focus = '') {
         : s.downloads_folder ? `<span class="ok">✓</span> ${S.library.videos || 0} videos found, ${Object.keys(S.library.items || {}).length} titles matched${(S.library.questions || []).length ? `, ${S.library.questions.length} to sort` : ''}.` : ''}</small></label>
     <div class="btns folder-btns">
       ${s.downloads_folder ? '<button class="btn btn-ghost btn-sm" type="button" data-s="dl-extra" title="Downloads no title uses: ones you took out of a title or told it to ignore - link them again">Extra files…</button>' : ''}
-      ${onPhone() ? '' : `${s.downloads_folder ? '<button class="btn btn-ghost btn-sm" type="button" data-s="open-downloads">📂 Open downloads folder</button>' : ''}
+      ${onPhone() || REMOTE ? '' : `${s.downloads_folder ? '<button class="btn btn-ghost btn-sm" type="button" data-s="open-downloads">📂 Open downloads folder</button>' : ''}
         <button class="btn btn-ghost btn-sm" type="button" data-s="open-data" title="Where the app keeps its own things: your settings and keys, what it remembers">📂 Open app data folder</button>
         ${s.sync_folder ? '<button class="btn btn-ghost btn-sm" type="button" data-s="open-sync">📂 Open sync folder</button>' : ''}`}</div>`)}
     ${card('ai', 'AI helpers <span class="tag-optional">optional</span>', `

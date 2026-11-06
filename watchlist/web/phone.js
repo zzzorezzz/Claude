@@ -50,6 +50,64 @@ function openHere(urls) {
   wrap.addEventListener('click', (e) => { if (e.target.closest('a')) setTimeout(() => closeModal(wrap), 300); });
 }
 
+// ---- on the phone: Back (the swipe from the left edge, a browser's back) closes what's open
+// on top - a menu, the player's settings, the player, a window - one at a time, instead of
+// leaving the app. Whatever's open has one entry in the browser's history.
+
+const layerCount = () => (document.getElementById('menu-root')?.children.length || 0)
+  + (document.getElementById('modal-root')?.children.length || 0)
+  + (document.querySelector('#wp:not(.hidden)') ? 1 : 0)
+  + (document.querySelector('#wp:not(.hidden) .wp-sheet:not(.hidden)') ? 1 : 0);
+let backEntry = false, backSkip = 0, backTimer = 0;
+
+function closeTopLayer() {
+  if (document.getElementById('menu-root')?.children.length) { closeMenu(); return true; }
+  const sheet = document.querySelector('#wp:not(.hidden) .wp-sheet:not(.hidden)');
+  if (sheet) { sheet.classList.add('hidden'); return true; }
+  if (document.querySelector('#wp:not(.hidden)') && typeof wpClose === 'function') { wpClose(); return true; }
+  const top = document.getElementById('modal-root')?.lastElementChild;
+  if (top) { closeModal(top); return true; }
+  return false;
+}
+
+function layersChanged() {
+  if (!REMOTE) return;
+  clearTimeout(backTimer);
+  if (layerCount() && !backEntry) {
+    history.pushState({ waLayer: true }, '');
+    backEntry = true;
+  } else if (!layerCount() && backEntry) {
+    // (all closed with their own buttons: the entry goes too, a moment later)
+    backTimer = setTimeout(() => {
+      if (!layerCount() && backEntry) { backEntry = false; backSkip += 1; history.back(); }
+    }, 60);
+  }
+}
+
+if (REMOTE) {
+  window.addEventListener('popstate', () => {
+    if (backSkip) { backSkip -= 1; return; }
+    if (!backEntry) return;
+    backEntry = false;
+    closeTopLayer();
+    if (layerCount()) { history.pushState({ waLayer: true }, ''); backEntry = true; }
+  });
+  document.addEventListener('DOMContentLoaded', () => {
+    const watch = new MutationObserver(() => layersChanged());
+    for (const id of ['menu-root', 'modal-root']) {
+      const el = document.getElementById(id);
+      if (el) watch.observe(el, { childList: true });
+    }
+    // (the player and its settings sheet open and close by a class)
+    const wp = () => document.getElementById('wp');
+    const hook = setInterval(() => {
+      if (!wp()) return;
+      clearInterval(hook);
+      watch.observe(wp(), { attributes: true, attributeFilter: ['class'], subtree: true });
+    }, 500);
+  });
+}
+
 // ---- on the phone: the bottom bar (below 700px wide) - Home, Lists, Find, Party, Settings
 
 const LIST_ROUTES = ['tv', 'anime', 'movie', 'collections', 'collection', 'watched'];
