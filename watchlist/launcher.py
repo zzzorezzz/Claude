@@ -383,6 +383,19 @@ def can_open_windows():
     return _webview is not None
 
 
+def bring_to_front():
+    """The app's main window back on the screen (a phone is asking to connect)."""
+    if _webview is None or not getattr(_webview, "windows", None):
+        return False
+    try:
+        win = _webview.windows[0]
+        win.restore()
+        win.show()
+        return True
+    except Exception:  # noqa: BLE001 - (no window to bring back)
+        return False
+
+
 def open_window(url, title, width=1100, height=800, kind="", on_top=False, x=None, y=None):
     """Another window of the app's own (the watch party, the built-in browser).
     False when there's no app window to do it with (running in a browser).

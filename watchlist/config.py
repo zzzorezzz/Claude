@@ -90,6 +90,14 @@ DEFAULT_SETTINGS = {
     "mode": "",
     # Ask about the setup guide once more (after switching between full and simple).
     "ask_guide": False,
+    # Use on your phone (remote.py): off unless you switch it on; the port it listens on (on this
+    # computer's own network addresses only); keeping the PC awake while a phone uses it; and how
+    # big videos sent to a phone are made (when they have to be converted: "original", "1080",
+    # "720", "480").
+    "phone_access": False,
+    "phone_port": 8765,
+    "phone_keep_awake": True,
+    "phone_quality": "1080",
     # Changes made once to settings saved by older versions (see Settings.__init__).
     "migrated": [],
 }
@@ -106,7 +114,9 @@ OPTIONAL_URL_KEYS = ("anime_site_url", "movie_tv_site_url")
 TEXT_KEYS = ("tmdb_api_key", "mal_client_id", "vlc_path", "browser_path", "custom_player_path", "sync_folder",
              "downloads_folder", "last_folder", "gemini_api_key", "groq_api_key", "openrouter_api_key",
              "party_name", "party_server")
-BOOL_KEYS = ("queue_next_episodes", "skip_intro", "sounds", "setup_prompt", "adblock", "ask_guide")
+BOOL_KEYS = ("queue_next_episodes", "skip_intro", "sounds", "setup_prompt", "adblock", "ask_guide",
+             "phone_access", "phone_keep_awake")
+PHONE_QUALITIES = ("original", "1080", "720", "480")
 MODES = ("full", "simple")
 
 
@@ -283,6 +293,18 @@ class Settings:
             for key in BOOL_KEYS:
                 if key in patch:
                     data[key] = bool(patch[key])
+            if "phone_port" in patch:
+                try:
+                    port = int(patch["phone_port"])
+                except (TypeError, ValueError):
+                    raise ValueError("the port must be a number, like 8765") from None
+                if not 1024 <= port <= 65535:
+                    raise ValueError("the port must be between 1024 and 65535")
+                data["phone_port"] = port
+            if "phone_quality" in patch:
+                if patch["phone_quality"] not in PHONE_QUALITIES:
+                    raise ValueError("phone quality must be original, 1080, 720 or 480")
+                data["phone_quality"] = patch["phone_quality"]
             if "party_server" in patch and data["party_server"] and not re.fullmatch(
                     r"[A-Za-z0-9.-]+(:\d{1,5})?", data["party_server"]):
                 raise ValueError("the watch-party server must look like syncplay.pl:8999")

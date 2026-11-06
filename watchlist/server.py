@@ -6,6 +6,7 @@ other websites can't add to requests they send to your PC.
 """
 
 import hashlib
+import http.cookies
 import json
 import mimetypes
 import os
@@ -20,7 +21,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, cdp, dialogs, discover, hlsfix, livecollections, partyserver, picker, relay, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
+from . import ai, cdp, dialogs, discover, hlsfix, livecollections, partyserver, remote, picker, relay, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -113,6 +114,9 @@ class App:
         tidy = threading.Timer(30, self._clean_leftovers)
         tidy.daemon = True
         tidy.start()
+        # Your phone or tablet on your own network (Settings → Use on your phone): off until you
+        # switch it on; then the app listens on this computer's own addresses too (remote.py).
+        self.remote = remote.Access(self, lambda ip, port: remote_listener(self, ip, port))
         # Shared collections that stay up to date: yours put on the relays, others' looked at.
         self._live_lock, self._live_sent, self._live_status = threading.Lock(), {}, {}
         live = threading.Timer(20, self._live_loop)
@@ -194,7 +198,8 @@ class App:
                 "sounds": s["sounds"], "setup_prompt": s["setup_prompt"], "adblock": s["adblock"],
                 "mode": s["mode"], "ask_guide": s["ask_guide"],
                 "catch_videos": webtools.can_catch(), "ytdlp": scrape.has_ytdlp(),
-                "windows": launcher.can_open_windows(), "theme": s["theme"]}
+                "windows": launcher.can_open_windows(), "theme": s["theme"],
+                "phone_access": bool(s["phone_access"])}
 
     def open_link(self, url):
         webtools.ADBLOCK = self.settings.get()["adblock"]
@@ -3059,6 +3064,14 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/ping", "ping"),
         ("GET", r"/api/state", "state"),
         ("GET", r"/api/version", "version"),
+        ("POST", r"/api/pair/request", "pair_request"),
+        ("GET", r"/api/pair/status", "pair_status"),
+        ("POST", r"/api/pair/answer", "pair_answer"),
+        ("GET", r"/api/phone", "phone_status"),
+        ("GET", r"/api/phone/me", "phone_me"),
+        ("PUT", r"/api/phone/devices/(\w+)", "phone_device"),
+        ("DELETE", r"/api/phone/devices/(\w+)", "phone_device_remove"),
+        ("POST", r"/api/phone/remove-all", "phone_remove_all"),
         ("GET", r"/api/search", "search"),
         ("POST", r"/api/items", "add_item"),
         ("GET", r"/api/items/(\w+)", "get_item"),
@@ -3181,9 +3194,50 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    remote = False       # a server listening on your network (remote.py): paired phones and tablets only
+    device = None        # the paired device a request over the network came from
+    _out_headers = None  # headers this answer carries too (the pairing cookie)
+
+    # What a phone over the network may not do: answer for this computer, or take devices out.
+    LOCAL_ONLY = {"pair_answer", "phone_remove_all", "phone_device_remove"}
+
     def _allowed_host(self):
+        if self.remote:
+            return self.app.remote.allowed_host(self.headers.get("Host", ""))
         port = self.server.server_address[1]
         return self.headers.get("Host", "") in (f"127.0.0.1:{port}", f"localhost:{port}")
+
+    def _cookie(self, name):
+        try:
+            jar = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
+        except http.cookies.CookieError:
+            return ""
+        return jar[name].value if name in jar else ""
+
+    def _remote_gate(self, method, url):
+        """A request over the network: True when it was answered here (not let in)."""
+        path = url.path
+        if path.startswith(("/online/", "/hls/")) or (path.startswith("/stream/") and not path.startswith("/stream/web/")):
+            self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")         # (this computer's own player's)
+            return True
+        if path.startswith("/stream/web/"):
+            return False                     # (its own short-lived ticket says who may have it)
+        if not path.startswith("/api/"):
+            if method in ("GET", "HEAD") and remote.SHELL.fullmatch(path):
+                return False                 # (the app's pages themselves: nothing of yours in them)
+            self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+            return True
+        if path in remote.OPEN_API:
+            return False
+        device = self.app.remote.devices.check(self._cookie(remote.COOKIE))
+        if not device:
+            self._json({"error": "This device isn't connected to the app yet.", "code": "unpaired"},
+                       HTTPStatus.UNAUTHORIZED)
+            return True
+        self.device = device
+        self.app.remote.devices.seen(device, self.client_address[0])
+        self.app.remote.awake.poke()
+        return False
 
     def _send(self, status, body: bytes, content_type, extra=None):
         self.send_response(status)
@@ -3198,7 +3252,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _json(self, data, status=HTTPStatus.OK):
-        self._send(status, json.dumps(data).encode("utf-8"), "application/json; charset=utf-8")
+        self._send(status, json.dumps(data).encode("utf-8"), "application/json; charset=utf-8", self._out_headers)
 
     def _body(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -3218,6 +3272,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed_host():
             return self._send(HTTPStatus.FORBIDDEN, b"forbidden", "text/plain")
         url = urllib.parse.urlsplit(self.path)
+        self.device, self._out_headers = None, None
+        if self.remote and self._remote_gate(method, url):
+            return None
         if url.path.startswith("/stream/") and method in ("GET", "HEAD"):
             return self._stream(url.path)
         if url.path.startswith("/online/") and method in ("GET", "HEAD"):
@@ -3234,6 +3291,8 @@ class Handler(BaseHTTPRequestHandler):
         for route_method, pattern, name in self.ROUTES:
             m = re.fullmatch(pattern, url.path)
             if m and route_method == method:
+                if self.remote and name in self.LOCAL_ONLY:
+                    return self._json({"error": "only on the computer itself"}, HTTPStatus.FORBIDDEN)
                 guest = self.app.party_guest_of()
                 if guest and name in self.HOST_PLAYS:
                     # In someone's watch party: what plays is the host's choice.
@@ -3364,15 +3423,74 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_state(self, body):
         self.app.retry_sync()
-        return {"items": self.app.store.list(), "collections": self.app.store.collections(),
-                "status": self.app.status(), "library": self.app.library.state(),
-                "version": self._version()}
+        out = {"items": self.app.store.list(), "collections": self.app.store.collections(),
+               "status": self.app.status(), "library": self.app.library.state(),
+               "version": self._version()}
+        if self.device:
+            out["device"] = self.app.remote.devices.public(self.device)
+        return out
 
     def api_version(self, body):
         """Polled by the window, so changes from the other computer (or new
-        downloads) show up."""
+        downloads) show up - and, on this computer, a phone asking to connect."""
         self.app.retry_sync()
-        return {"version": self._version()}
+        out = {"version": self._version()}
+        if not self.remote:
+            out["pair"] = self.app.remote.devices.waiting()
+        return out
+
+    # ---- your phone or tablet (remote.py)
+
+    def api_pair_request(self, body):
+        """A phone asks to connect: the code it shows (this computer shows it too, with Allow / Deny)."""
+        if not self.remote:
+            raise ApiError("this is the computer itself - it's always connected")
+        try:
+            rid, code = self.app.remote.devices.request(body.get("name"), self.client_address[0])
+        except PermissionError as e:
+            raise ApiError(str(e), HTTPStatus.TOO_MANY_REQUESTS) from e
+        threading.Thread(target=launcher.bring_to_front, daemon=True).start()
+        return {"id": rid, "code": code}
+
+    def api_pair_status(self, body):
+        if not self.remote:
+            raise ApiError("this is the computer itself - it's always connected")
+        state, token = self.app.remote.devices.poll(str(self.query.get("id") or ""), self.client_address[0])
+        if token:
+            # The device's key, kept by the browser where scripts (and other sites) can't read it.
+            self._out_headers = {"Set-Cookie": f"{remote.COOKIE}={token}; Max-Age={remote.COOKIE_AGE}; Path=/; "
+                                               "HttpOnly; SameSite=Strict"}
+        return {"state": state}
+
+    def api_pair_answer(self, body):
+        try:
+            device = self.app.remote.devices.answer(str(body.get("id") or ""), bool(body.get("allow")))
+        except KeyError as e:
+            raise ApiError(str(e.args[0]) if e.args else "that request isn't waiting any more",
+                           HTTPStatus.NOT_FOUND) from None
+        return {"device": device}
+
+    def api_phone_status(self, body):
+        return self.app.remote.status()
+
+    def api_phone_me(self, body):
+        if not self.device:
+            return {"device": None, "remote": False}
+        return {"device": self.app.remote.devices.public(self.device), "remote": True}
+
+    def api_phone_device(self, body, device_id):
+        if self.device and device_id != self.device["id"]:
+            raise ApiError("a phone can only change itself", HTTPStatus.FORBIDDEN)
+        try:
+            return {"device": self.app.remote.devices.update(device_id, body.get("name"), body.get("play_on"))}
+        except KeyError:
+            raise ApiError("that device isn't connected", HTTPStatus.NOT_FOUND) from None
+
+    def api_phone_device_remove(self, body, device_id):
+        return {"removed": self.app.remote.devices.remove(device_id)}
+
+    def api_phone_remove_all(self, body):
+        return {"removed": self.app.remote.devices.remove(None)}
 
     def api_player_status(self, body):
         status = self.app.player.status()
@@ -4248,6 +4366,9 @@ class Handler(BaseHTTPRequestHandler):
                 "browsers": launcher.list_browsers(), "players": launcher.list_players()}
 
     def api_put_settings(self, body):
+        if self.remote:
+            for key in ("phone_access", "phone_port"):
+                body.pop(key, None)
         if "downloads_folder" in body:
             folder = str(body["downloads_folder"] or "").strip().strip('"')
             if folder and not os.path.isdir(folder):
@@ -4260,6 +4381,9 @@ class Handler(BaseHTTPRequestHandler):
         settings = self.app.settings.update(body)
         if "downloads_folder" in body:
             self.app.library.scan(force=True)
+        if any(k in body for k in ("phone_access", "phone_port", "phone_keep_awake")):
+            self.app.remote.start()
+            self.app.remote.refresh()
         return {"settings": settings, "status": self.app.status()}
 
     def api_test_settings(self, body):
@@ -4342,6 +4466,14 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True}
 
 
+def remote_listener(app: App, ip: str, port: int):
+    """The app on one of this computer's network addresses, for paired phones (remote.py)."""
+    handler = type("RemoteHandler", (Handler,), {"app": app, "remote": True})
+    server = ThreadingHTTPServer((ip, port), handler)
+    server.daemon_threads = True
+    return server
+
+
 def make_server(app: App, port: int):
     handler = type("BoundHandler", (Handler,), {"app": app})
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
@@ -4352,5 +4484,6 @@ def make_server(app: App, port: int):
 
 def start_background_refresh(app: App):
     app.fill_pending()
+    app.remote.start()
     threading.Thread(target=app.refresh_stale, daemon=True).start()
     threading.Thread(target=library.watch, args=(app,), daemon=True).start()

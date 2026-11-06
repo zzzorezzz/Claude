@@ -1,0 +1,6 @@
+Libraries bundled with Watch Anything's pages (served by the app itself, never fetched at run time).
+
+qrcode-1.4.4.min.js - qrcode-generator 1.4.4 by Kazuhiko Arase, MIT License.
+  From https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js
+  https://github.com/kazuhikoarase/qrcode-generator
+  "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.

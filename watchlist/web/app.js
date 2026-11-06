@@ -79,12 +79,22 @@ async function api(method, path, body) {
   try {
     res = await fetch(path, opts);
   } catch {
+    if (REMOTE) {
+      showUnreachable();                       // (a phone: the PC is asleep, closed, or on another network)
+      const err = new Error("Your PC isn't reachable right now");
+      err.shown = true;
+      throw err;
+    }
     throw new Error('The Watch Anything window lost its connection - is the app still running?');
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new Error(data.error || `request failed (${res.status})`);
     err.code = data.code || '';
+    if (err.code === 'unpaired') {
+      showPairing();                           // (a phone that isn't connected yet, or was removed)
+      err.shown = true;
+    }
     if (err.code === 'party_guest') {
       // In someone's watch party: a popup saying who chooses (whatever button was pressed).
       partyGuestNote(err.message);
@@ -3975,7 +3985,7 @@ async function deleteEpisodeFile(wrap, item, key) {
     loadLocal(wrap);
   } catch (err) { fail(err); }
 }
-const binName = () => (S.status.platform === 'win32' ? 'Recycle Bin' : 'Trash');
+const binName = () => (REMOTE ? "PC's " : '') + (S.status.platform === 'win32' ? 'Recycle Bin' : 'Trash');
 
 async function torrentClick(wrap, item, btn) {
   const t = btn.dataset.t;
@@ -6163,7 +6173,8 @@ async function openSettings(focus = '') {
   const simple = (s.mode || 'full') === 'simple';
   const card = (id, title, body, cls = '') => `<section class="set-card ${cls}" id="set-${id}"><h4>${title}</h4>${body}</section>`;
   const nav = [['keys', 'Online info'], ['data', 'Your data'], ['online', 'Watching online'], ['video', 'Your own sites'],
-    ...(simple ? [] : [['torrents', 'Torrent sites'], ['downloads', 'Downloads']]), ['ai', 'AI helpers'], ['look', 'Look'], ['party', 'Watch together']];
+    ...(simple ? [] : [['torrents', 'Torrent sites'], ['downloads', 'Downloads']]), ['ai', 'AI helpers'], ['look', 'Look'], ['party', 'Watch together'],
+    ...(onPhone() ? [] : [['phone', REMOTE ? 'This device' : 'Use on your phone']])];
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><form class="modal-pad set-form" autocomplete="off">
     <div class="set-top"><h2>Settings</h2>
       <button class="btn btn-white btn-sm" type="button" data-s="guide">🧭 Setup guide</button>
@@ -6243,6 +6254,7 @@ async function openSettings(focus = '') {
     <label class="field"><span>Watch-party server</span>
       <div class="input-row"><input class="input" name="party_server" value="${esc(s.party_server)}" placeholder="syncplay.pl:8999">
       <button class="btn btn-ghost btn-sm" type="button" data-s="find-server">Find a working server</button></div></label>`)}
+    ${onPhone() ? '' : card('phone', REMOTE ? 'This device' : 'Use on your phone', '<div id="phone-card"><div class="spinner"></div></div>')}
     </div></div>
     <div class="set-save"><button class="btn btn-red" type="submit">Save</button>
       <button class="btn btn-ghost" type="button" data-s="cancel">Cancel</button>
@@ -6292,6 +6304,7 @@ async function openSettings(focus = '') {
     });
   }
   drawServices(wrap);
+  drawPhoneCard(wrap);
   api('GET', '/api/services/presets').then(({ presets }) => { wrap.presets = presets; drawServicePicker(wrap); }).catch(() => {});
   if (focus === 'svc') $('#svc-picker', wrap).classList.remove('hidden');
   const spot = { svc: '#svc-field', tmdb: '[name=tmdb_api_key]', mal: '[name=mal_client_id]', sync: '[name=sync_folder]',
