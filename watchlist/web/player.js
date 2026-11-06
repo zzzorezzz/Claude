@@ -88,7 +88,29 @@ function openWebPlayer(launch) {
   wpLoad(WP.s.index, launch.start || 0, { paused: launch.paused });
   clearInterval(WP.tick);
   WP.tick = setInterval(wpReport, 1000);
+  wpListen();
   wpShowUi();
+}
+
+// What the PC asks of the player (a watch party: pause, play, seek, move on), as it happens.
+function wpListen() {
+  try { WP.events?.close(); } catch { /* gone */ }
+  const s = WP.s;
+  if (!s || typeof EventSource === 'undefined') return;
+  const es = new EventSource(`/api/web/${s.sid}/events?after=${s.seq}`);
+  es.onmessage = (e) => { if (WP.s === s) { try { wpCommands(JSON.parse(e.data).commands); } catch { /* fine */ } } };
+  es.addEventListener('closed', () => es.close());
+  WP.events = es;
+}
+
+// Each command once, in order (it may come both ways: the events and the report's answer).
+function wpCommands(list) {
+  const s = WP.s;
+  for (const c of list || []) {
+    if (!s || c.n <= s.seq) continue;
+    s.seq = c.n;
+    wpCommand(c);
+  }
 }
 
 async function wpLoad(index, at = 0, { paused = false, reload = false } = {}) {
@@ -96,6 +118,8 @@ async function wpLoad(index, at = 0, { paused = false, reload = false } = {}) {
   if (!s) return;
   const token = ++s.token;
   s.index = index;
+  s.media = null;                                    // (no position told for it until it's open)
+  s.pendingSeek = null;
   s.upnextShown = false;
   wpQ('.wp-upnext').classList.add('hidden');
   wpHideError();
@@ -168,6 +192,7 @@ async function wpAttach(media, at, paused) {
   const target = Math.max(0, (at || 0) - s.offset);
   const begin = async () => {
     if (target > 1) await wpSeekRel(target);
+    s.pendingSeek = null;
     wpLoading(false);
     wpSubsLoad();
     wpAudioPick();
@@ -230,11 +255,14 @@ async function wpSeek(t) {
   const rel = t - s.offset;
   if (rel >= 0 && rel <= wpSeekableEnd() + 2) { wpV().currentTime = rel; wpReport(true); return; }
   if (s.media.how === 'site' || s.media.how === 'direct') { wpV().currentTime = Math.max(0, rel); return; }
+  // While it gets there, that's where it is (a watch party mustn't take the old place for a seek back).
+  s.pendingSeek = t;
   wpLoading('Getting there…');
   let r;
-  try { r = await api('POST', `/api/web/${s.sid}/seek`, { t, caps: wpCaps(), quality: s.quality || undefined, burn: s.burn ?? undefined }); } catch (err) { wpError(err.message, true); return; }
+  try { r = await api('POST', `/api/web/${s.sid}/seek`, { t, caps: wpCaps(), quality: s.quality || undefined, burn: s.burn ?? undefined }); } catch (err) { s.pendingSeek = null; wpError(err.message, true); return; }
   if (r.restart) { wpAttach(r, t, wpV().paused); return; }
   await wpSeekRel(rel);
+  s.pendingSeek = null;
 }
 
 // ---- telling the PC (and hearing from it)
@@ -246,13 +274,12 @@ async function wpReport(force) {
   s.busy = true;
   try {
     const r = await api('POST', `/api/web/${s.sid}/state`, {
-      index: s.index, pos: s.media ? wpNow() : null, dur: s.media ? wpTotal() || null : null,
+      index: s.index, pos: s.pendingSeek ?? (s.media ? wpNow() : null), dur: s.media ? wpTotal() || null : null,
       paused: v.paused, after: s.seq,
     });
     if (WP.s !== s) return;
-    s.seq = r.seq;
     if (r.ready != null) s.ready = r.ready;
-    for (const c of r.commands || []) wpCommand(c);
+    wpCommands(r.commands);
     if (r.ended && !s.closing) wpClose(true);
   } catch (err) {
     if (err.code === 'closed') wpClose(true);
@@ -269,7 +296,7 @@ function wpCommand(c) {
   else if (c.do === 'index') wpLoad(c.to, 0);
   else if (c.do === 'reload') wpLoad(WP.s.index, c.at || wpNow(), { reload: true });
   else if (c.do === 'entries') WP.s.entries = c.entries;
-  else if (c.do === 'replace') { WP.s.entries = c.launch.entries; WP.s.sid = c.launch.session || WP.s.sid; wpLoad(c.launch.index || 0, c.launch.start || 0, { paused: c.launch.paused }); }
+  else if (c.do === 'replace') { WP.s.entries = c.launch.entries; WP.s.launch = { ...WP.s.launch, title: c.launch.title, item_id: c.launch.item_id }; wpQ('.wp-show').textContent = c.launch.title || ''; wpLoad(c.launch.index || 0, c.launch.start || 0, { paused: c.launch.paused }); }
   else if (c.do === 'close') wpClose(true);
 }
 
@@ -499,6 +526,7 @@ async function wpClose(already) {
   }
   clearInterval(WP.tick);
   clearTimeout(s.subTimer);
+  try { WP.events?.close(); } catch { /* gone */ }
   wpTeardownStream();
   if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
   WP.el.classList.add('hidden');

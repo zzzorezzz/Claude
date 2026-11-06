@@ -225,3 +225,37 @@ class RemovedDeviceTest(RemoteBase):
         t = self.app.tickets.make(dev["id"], {"kind": "file", "path": str(f)})
         self.call("DELETE", f"/api/phone/devices/{dev['id']}")
         self.assertIsNone(self.app.tickets.check(t))
+
+
+class EventsTest(RemoteBase):
+    def test_the_phone_hears_at_once(self):
+        token, _ = self.pair()
+        dev = self.app.remote.devices.list()[0]
+        item = self.add("tv", "tmdb", "tv/1396")
+        session = self.app.web_session(dev, self.app.store.get(item["id"]), [{"key": "1:1", "path": "x"}])
+        got = []
+
+        def listen():
+            conn = http.client.HTTPConnection("127.0.0.1", self.lan_port, timeout=10)
+            conn.request("GET", f"/api/web/{session.id}/events?after=0",
+                         headers={"Host": self.host, "Cookie": f"wa_device={token}"})
+            r = conn.getresponse()
+            got.append(r.getheader("Content-Type"))
+            got.append(r.fp.readline().decode())
+            conn.close()
+        import threading
+        t = threading.Thread(target=listen)
+        t.start()
+        time.sleep(0.5)
+        session.send(["set_property", "pause", True])
+        t.join(10)
+        self.assertEqual(got[0], "text/event-stream")
+        data = json.loads(got[1].split("data: ", 1)[1])
+        self.assertEqual(data["commands"], [{"do": "pause", "n": 1}])
+
+    def test_not_without_the_key(self):
+        self.pair()
+        dev = self.app.remote.devices.list()[0]
+        item = self.add("tv", "tmdb", "tv/1396")
+        session = self.app.web_session(dev, self.app.store.get(item["id"]), [{"key": "1:1", "path": "x"}])
+        self.assertEqual(self.phone("GET", f"/api/web/{session.id}/events")[0], 401)

@@ -92,6 +92,7 @@ class WebSession:
         self.party = False
         self.commands, self.seq = [], 0
         self.lock = threading.Lock()
+        self.changed = threading.Condition(self.lock)
         self.seen = time.time()
         self.saved_at = 0.0
         self.on_end = None
@@ -135,16 +136,23 @@ class WebSession:
             self._end()
 
     def take(self, after):
-        """The commands the phone hasn't had yet: (newest number, [commands])."""
+        """The commands the phone hasn't had yet: (newest number, [commands, each with its "n"])."""
         with self.lock:
-            return self.seq, [c for n, c in self.commands if n > after]
+            return self.seq, [dict(c, n=n) for n, c in self.commands if n > after]
+
+    def wait(self, after, timeout):
+        """take(), once there's something new (or `timeout` seconds went by)."""
+        with self.changed:
+            self.changed.wait_for(lambda: self.seq > after or self.ended, timeout)
+            return self.seq, [dict(c, n=n) for n, c in self.commands if n > after]
 
     def _queue(self, *cmds):
-        with self.lock:
+        with self.changed:
             for c in cmds:
                 self.seq += 1
                 self.commands.append((self.seq, c))
             self.commands = self.commands[-60:]
+            self.changed.notify_all()
 
     # ---- the same calls as player.Session
 
@@ -212,7 +220,9 @@ class WebSession:
     def _end(self):
         if self.ended:
             return
-        self.ended = True
+        with self.changed:
+            self.ended = True
+            self.changed.notify_all()
         if self.on_end:
             try:
                 self.on_end(self)

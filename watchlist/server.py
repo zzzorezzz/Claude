@@ -129,6 +129,7 @@ class App:
         self.web_jobs = webplay.Jobs(self.data_dir / "phone-cache")
         self.web_jobs.clear()
         self.web_sessions = {}           # device -> WebSession
+        self.party_device = None         # the phone a watch party is for (its own player), or None
         self._probes = {}                # a video -> what's in it (ffprobe)
         # Shared collections that stay up to date: yours put on the relays, others' looked at.
         self._live_lock, self._live_sent, self._live_status = threading.Lock(), {}, {}
@@ -282,7 +283,14 @@ class App:
         if entry.get("web") or entry.get("online"):
             # A site's video: through the app, as the site wants it asked for (its headers stay here).
             got = self._online_found.get((item["id"], key))
-            if not got or "/online/" in str(entry.get("path") or ""):
+            path = str(entry.get("path") or "")
+            if not got and path.startswith(("http://", "https://")) and "/online/" not in path \
+                    and not path.startswith("http://127.0.0.1"):
+                # (a watch party's: the host's video, which plays here too)
+                got = ({"name": (entry.get("party") or {}).get("site", {}).get("name") or "the host's site", "id": ""},
+                       {"url": path, "referer": entry.get("referer") or "", "headers": entry.get("headers") or {},
+                        "subtitle": (entry.get("party") or {}).get("sub") or ""}, time.time())
+            if not got or "/online/" in path:
                 season, episode = self._key_numbers(key)
                 try:
                     self.online_video(item["id"], season, episode, entry.get("site") or "", entry.get("track") or "")
@@ -734,8 +742,8 @@ class App:
         return self.settings.get()["party_name"] or syncplay.default_name()
 
     def _need_mpv(self):
-        if launcher.ANDROID:
-            return None                      # the phone's own player (phone_player.py)
+        if launcher.ANDROID or self._web_device():
+            return None                      # the phone's own player (phone_player.py, webplay.py)
         mpv = player.find_mpv()
         if not mpv:
             raise ApiError("watching together needs the built-in player, which is missing")
@@ -775,6 +783,12 @@ class App:
         if old and old.active:
             old.leave("you started another watch party")
 
+    def _web_launch(self, res, out):
+        """A phone's player opened for the party: what the phone needs to show it."""
+        if res.get("player") == "web":
+            out.update({k: res[k] for k in ("player", "session", "entries", "index", "start", "paused", "item_id",
+                                            "title", "anime", "party") if k in res})
+
     def party_start(self, item=None, season=None, episode=None, path="", source="", site="", how=""):
         """Host: open a private room and hand back an invite. The party isn't tied
         to anything playing: whatever you play while it's on, everyone follows.
@@ -786,6 +800,7 @@ class App:
         self._need_mpv()
         with self._party_lock:
             current = self.party
+        self.party_device = self._web_device()       # (a phone hosting: its own player plays for everyone)
         note = ""
         if current and current.active and current.role == "host":
             party = current                  # already hosting: just play this in it
@@ -804,6 +819,7 @@ class App:
                            message=f"The party is on, but it couldn't be played from {res.get('site') or 'your site'}: {res.get('error')}")
                 return out
             out.update(file=res.get("file") or "", code=party.invite)
+            self._web_launch(res, out)
             threading.Thread(target=self._party_hello, args=(party,), daemon=True).start()
             return out
         if item is not None:
@@ -823,6 +839,7 @@ class App:
                                    "season": season, "episode": episode, "paused": True})
             if res.get("player") == "android" and phone_player.current():
                 phone_player.current().open()     # (on a computer, play() opened the player itself)
+            self._web_launch(res, out)
             out["file"] = target["name"]
             threading.Thread(target=self._party_hello, args=(party,), daemon=True).start()
         return out
@@ -926,6 +943,7 @@ class App:
         """Guest: join the room. What the host plays is followed from then on (in
         the background): your own copy, or the host's torrent made ready first."""
         self._need_mpv()
+        self.party_device = self._web_device()       # (a phone joining: what the host plays opens on it)
         invite = syncplay.read_invite(code)
         party = party_mod.Party(invite["server"], invite["room"], self._party_name(), "guest",
                                 resolve=self.party_resolve, leader=invite.get("host"),
@@ -1023,6 +1041,13 @@ class App:
         """A guest's player, opened for what the host plays (paused until it's in step)."""
         item = self.store.get(entry["item_id"])
         entries, first = self._party_playlist(item, entry)
+        device = self.party_device
+        if device and self.remote.devices.check_id(device["id"]):
+            # A phone in the party: what the host plays opens in the phone's own player.
+            session = self.web_session(device, item, entries, 0, first, paused=True)
+            session.party = True
+            party.attach(session)
+            return
         if launcher.ANDROID:
             session = phone_player.PhoneSession(item["id"], entries, 0, paused=True, keep_open=True,
                                                 anime=item["type"] == "anime", index=first)
@@ -3477,6 +3502,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._web_stream(url)
         if self.remote and self._remote_gate(method, url):
             return None
+        em = re.fullmatch(r"/api/web/(\w+)/events", url.path)
+        if em and method == "GET":
+            return self._web_events(em.group(1), url)
         if url.path.startswith("/stream/") and method in ("GET", "HEAD"):
             return self._stream(url.path)
         if url.path.startswith("/online/") and method in ("GET", "HEAD"):
@@ -3655,6 +3683,35 @@ class Handler(BaseHTTPRequestHandler):
         if not session or (self.device and session.device != self.device["id"]):
             raise ApiError("that player has closed", HTTPStatus.NOT_FOUND, code="closed")
         return session
+
+    def _web_events(self, sid, url):
+        """What the phone's player is asked to do (a watch party: pause, play, seek, move on), as
+        it happens: Server-Sent Events, each batch with its number (the phone skips what it had)."""
+        try:
+            session = self._web_session(sid)
+        except ApiError as e:
+            return self._json({"error": str(e), "code": e.code}, e.status)
+        try:
+            after = int(urllib.parse.parse_qs(url.query).get("after", ["0"])[-1])
+        except ValueError:
+            after = 0
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            while not session.ended:
+                seq, cmds = session.wait(after, 15)
+                if cmds:
+                    self.wfile.write(f"data: {json.dumps({'seq': seq, 'commands': cmds})}\n\n".encode())
+                    after = seq
+                else:
+                    self.wfile.write(b": still here\n\n")
+                self.wfile.flush()
+            self.wfile.write(b"event: closed\ndata: {}\n\n")
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        return None
 
     def api_web_current(self, body):
         """The player this phone had open (the page was reloaded): opened again."""

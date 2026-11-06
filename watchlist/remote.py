@@ -147,6 +147,11 @@ class Devices:
                     return d
         return None
 
+    def check_id(self, device_id):
+        """Whether that device is still let in."""
+        with self.lock:
+            return any(d["id"] == device_id for d in self.devices)
+
     def seen(self, device, ip):
         with self.lock:
             device["seen"], device["ip"] = _now(), ip

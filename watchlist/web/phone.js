@@ -109,6 +109,16 @@ function homeScreenOnce() {
   wrap.addEventListener('click', (e) => { if (e.target.closest('[data-a2hs]')) closeModal(wrap); });
 }
 
+// ---- the phone in a watch party: what the host plays opens here (in the phone's own player)
+
+setInterval(async () => {
+  if (!REMOTE || typeof S === 'undefined' || !S.status?.party || (typeof WP !== 'undefined' && WP.s)) return;
+  try {
+    const r = await api('GET', '/api/web/current');
+    if (r.launch && !WP.s) openWebPlayer(r.launch);
+  } catch { /* not now */ }
+}, 2500);
+
 // ---- the app's own files kept on the phone (only where browsers allow it: https)
 
 if (REMOTE && 'serviceWorker' in navigator && window.isSecureContext) {
