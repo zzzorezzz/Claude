@@ -217,6 +217,11 @@ class _Connection:
                 pass
 
 
+def _file_opt(name, value):
+    """One of loadfile's options, its value quoted as mpv reads it (%length%value)."""
+    return f"{name}=%{len(value.encode('utf-8'))}%{value}"
+
+
 class Session:
     """One run of mpv: a playlist of entries, followed until mpv closes.
 
@@ -472,7 +477,18 @@ class Session:
         self._swapping = entry["path"]
         self.entries[i] = entry
         self.loaded = False
-        return self.send(["loadfile", entry["path"], "insert-next-play", -1, f"start={max(0, int(at))}"],
+        opts = [f"start={max(0, int(at))}"]
+        if entry.get("web"):
+            # (a site's video: sent as from its page - another server may want another Referer)
+            headers = entry.get("headers") or {}
+            if entry.get("referer"):
+                opts.append(_file_opt("referrer", entry["referer"]))
+            if headers.get("User-Agent"):
+                opts.append(_file_opt("user-agent", headers["User-Agent"]))
+            fields = [f"{k}: {v}" for k, v in headers.items() if k in ("Origin", "Cookie") and v]
+            if fields:
+                opts.append(_file_opt("http-header-fields", ",".join(x.replace(",", "\\,") for x in fields)))
+        return self.send(["loadfile", entry["path"], "insert-next-play", -1, ",".join(opts)],
                          ["playlist-remove", i])
 
     def jump(self, index):

@@ -57,6 +57,10 @@ TICK = 0.2                       # how often the player is checked
 WAITING_STATUSES = ("idle", "finding", "preparing", "needs-file")
 # A chat message from the host's app asking the guests' apps to open a link.
 OPEN_LINK = "[Watch Anything] open: "
+# ...and one saying someone chose another server (or site) for the episode playing: everyone
+# moves to it (JSON: "k" the episode, "h" the site's server, "l" the server's name, "d" sub / dub,
+# "w" 1 for the site as it plays by itself). Short: some servers allow 150 characters.
+SERVER = "[Watch Anything] server: "
 # ...and one making someone else the host (everyone follows them from then on).
 NEW_HOST = "[Watch Anything] host: "
 
@@ -167,6 +171,7 @@ class Party:
         self.avatar = avatar             # a small picture of you ("data:image/jpeg;base64,..."), shown to the others
         self.open_link = open_link       # a guest: opens a link the host shared (Watch online)
         self.on_role = None              # the app: told when you become the host or a guest
+        self.on_server = None            # the app: told when someone chose another server
         self._following = None           # a guest: the key of what the host plays that's being followed
         self.mine = {"status": "idle"}   # a guest getting ready: what it's doing, how far along
         self._mine_sent = 0.0
@@ -286,6 +291,15 @@ class Party:
             self._follow_leader()
         else:
             self.osd("You're the host now - what you play, everyone watches", 6)
+
+    def share_server(self, choice):
+        """You chose another server for the episode playing: everyone's player moves to it."""
+        if not self.active:
+            return
+        try:
+            self.conn.send({"Chat": SERVER + json.dumps(choice, separators=(",", ":"))[:150 - len(SERVER)]})
+        except OSError:
+            pass
 
     def share_link(self, url, label=""):
         """The host opened a link (Watch online): the guests' apps open it too."""
@@ -433,6 +447,15 @@ class Party:
                     if who == self.leader_name() and who != self.me and name:
                         role = "host" if name == self.me else "guest"
                         threading.Thread(target=self._become, args=(role, name), daemon=True).start()
+                    return
+                if msg.startswith(SERVER):
+                    if who != self.me and self.on_server:
+                        try:
+                            choice = json.loads(msg[len(SERVER):])
+                        except ValueError:
+                            return
+                        self.osd(f"{who} switched to {choice.get('l') or 'another server'} - switching you too", 4)
+                        threading.Thread(target=self.on_server, args=(self, choice), daemon=True).start()
                     return
                 if msg.startswith(OPEN_LINK):
                     if self.role == "guest" and who == self.leader_name() and self.open_link:

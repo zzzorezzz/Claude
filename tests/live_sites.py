@@ -17,6 +17,11 @@ from watchlist.livecheck import ANIME, EXTRA_SITES, SHOWS, SITES, cases
 POS_LUA = """local best = 0
 mp.observe_property("time-pos", "number", function(_, v) if v and v > best then best = v end end)
 mp.register_event("end-file", function() mp.msg.info("POS " .. string.format("%.2f", best)) end)
+mp.observe_property("track-list/count", "number", function()
+    local a = 0
+    for _, t in ipairs(mp.get_property_native("track-list") or {}) do if t.type == "audio" then a = a + 1 end end
+    mp.msg.info("AUDIO " .. a)
+end)
 """
 
 
@@ -37,13 +42,16 @@ def play5(mpv, found, script):
         return 0.0, "mpv timed out"
     out = p.stdout + p.stderr
     pos = [float(x.split("POS ")[1].split()[0]) for x in out.splitlines() if "POS " in x]
-    return (max(pos) if pos else 0.0), ("" if pos and max(pos) >= 4.5 else [x for x in out.strip().splitlines() if "POS" not in x][-12:])
+    audio = max([int(x.split("AUDIO ")[1].split()[0]) for x in out.splitlines() if "AUDIO " in x] or [0])
+    if pos and max(pos) >= 4.5 and not audio:
+        return max(pos), "no sound: the video has no audio track"
+    return (max(pos) if pos else 0.0), ("" if pos and max(pos) >= 4.5 else [x for x in out.strip().splitlines() if "POS" not in x and "AUDIO" not in x][-12:])
 
 
 BASE = ""
 
 
-def check_servers(s, site, item, season, episode, found, mpv, script, most=6):
+def check_servers(s, site, item, season, episode, found, mpv, script, most=8):
     """Each of the episode's other servers (as the app's Servers list does): found, then played."""
     out = []
     for x in s.episode_servers(found)[:most]:
@@ -53,7 +61,7 @@ def check_servers(s, site, item, season, episode, found, mpv, script, most=6):
         try:
             got = s.resolve(site, item, season, episode, stream=f"{x['id']}:{x['kind']}:{x['label']}", fresh=True, remember=False)
             reached, why = play5(mpv, got, script)
-            row.update(played=reached >= 4.5, why=why if reached < 4.5 else "", same=got["url"] == found["url"])
+            row.update(played=reached >= 4.5 and not why, why=why, same=got["url"] == found["url"])
         except Exception as e:  # noqa: BLE001
             row.update(played=False, why=str(e)[:160])
         print("   server", json.dumps(row), flush=True)
@@ -92,7 +100,7 @@ def main(argv):
                 found = s.resolve(site, item, season, episode)
                 row["find_secs"] = round(time.time() - t0, 1)
                 reached, why = play5(mpv, found, script)
-                row.update(played=reached >= 4.5, reached=round(reached, 2), page=found.get("page"),
+                row.update(played=reached >= 4.5 and not why, reached=round(reached, 2), page=found.get("page"),
                            subtitle=bool(found.get("subtitle")), why=why,
                            server=(found.get("stream") or {}).get("label") or "",
                            opened=((found.get("entry") or {}).get("name") or "")[:60])

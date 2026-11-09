@@ -779,6 +779,7 @@ class App:
 
     def _start_party(self, party):
         party.on_role = self._party_role
+        party.on_server = self._party_server
         with self._party_lock:
             old, self.party = self.party, party
         if old and old.active:
@@ -2440,8 +2441,9 @@ class App:
         finally:
             state["running"] = False
 
-    def use_server(self, session, server_id):
-        """One of the Servers list's: played from where you are (found now if it wasn't yet)."""
+    def use_server(self, session, server_id, share=True):
+        """One of the Servers list's: played from where you are (found now if it wasn't yet) - in a
+        watch party, for everyone (`share`)."""
         entry = session.current()
         if not entry or not entry.get("web"):
             return
@@ -2494,6 +2496,51 @@ class App:
         session.send(["show-text", f"Playing from {x['label']}" + ("" if x["site"] in x["label"] else f" on {x['site']}"), 3000])
         if item["format"] == "series":
             threading.Thread(target=self._link_around, args=(item["id"], site, key, session), daemon=True).start()
+        with self._party_lock:
+            party = self.party if self.party and self.party.active and self.party.session is session else None
+        if share and party:
+            whole = server_id.startswith("site|")
+            party.share_server({"k": key, "h": urllib.parse.urlsplit(site["url"]).netloc.lower().removeprefix("www."),
+                                "l": "" if whole else x["label"], "d": "" if whole else x["kind"], "w": 1 if whole else 0})
+
+    def _party_server(self, party, choice):
+        """Someone in the party chose another server (or site) for the episode playing: this
+        player moves to it too, from where it is (the same server on the same site)."""
+        session = party.session
+        entry = session.current() if session and not session.ended else None
+        if not entry or not entry.get("web") or entry.get("key") != choice.get("k"):
+            return
+        item = self.store.get(session.item_id)
+        host = str(choice.get("h") or "")
+        site = next((s for s in self._video_sites(item)
+                     if urllib.parse.urlsplit(s["url"]).netloc.lower().removeprefix("www.") == host), None)
+        if not site:
+            session.send(["show-text", f"They switched to {host}, which isn't one of your sites", 4000])
+            return
+        state = self.server_list(session, start=False)
+        slot = (session.item_id, entry["key"])
+        if slot not in self._servers:
+            return                                      # (not one of your sites' videos here)
+        items = self._servers[slot]["items"]
+        if choice.get("w"):
+            sid = f"site|{site['id']}"
+            if sid not in items:
+                self._servers[slot]["order"].append(sid)
+                items[sid] = {"id": sid, "site_id": site["id"], "site": site["name"], "label": site["name"], "kind": "",
+                              "state": "unchecked"}
+        else:
+            label, kind = str(choice.get("l") or ""), str(choice.get("d") or "")
+            playing = next((x for x in state["items"] if x["on"]), None)
+            if playing and playing["site_id"] == site["id"] and playing["label"] == label:
+                return                                  # (on that one already)
+            sid = next((k for k, x in items.items() if x["site_id"] == site["id"] and x["label"] == label
+                        and (x["kind"] or "") == kind), None)
+            if not sid:
+                sid = f"click||{label.replace(':', '~')}|{kind}"
+                self._servers[slot]["order"].append(sid)
+                items[sid] = {"id": sid, "site_id": site["id"], "site": site["name"], "label": label, "kind": kind,
+                              "state": "unchecked"}
+        self.use_server(session, sid, share=False)
 
     def _other_site(self, session):
         """Find it on another site: the episode looked for again on your other sites (not the one

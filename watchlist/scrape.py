@@ -1365,6 +1365,51 @@ def scrambled_playlist(url, headers=None):
     return not head.lstrip().removeprefix(BOM).startswith(b"#EXTM3U")
 
 
+def _playlist_head(url, headers=None):
+    """The start of an HLS playlist ("" when it can't be read)."""
+    req = urllib.request.Request(safe_url(url), headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
+                                               **{k: v for k, v in (headers or {}).items()
+                                                  if k in ("Referer", "Origin", "Cookie") and v}})
+    try:
+        with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
+            return r.read(8192).decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+        return ""
+
+
+_PLAYLIST_FILE = re.compile(r"(/|%2F)([^/%?&=]+)\.m3u8", re.I)
+
+
+def _sibling(url, name):
+    """The address with its playlist's file name changed (also when it's inside another address)."""
+    found = list(_PLAYLIST_FILE.finditer(url))
+    if not found:
+        return ""
+    m = found[-1]
+    return url[:m.start(2)] + name + url[m.end(2):]
+
+
+def master_playlist(url, headers=None, seen=()):
+    """The playlist a player should get: the master (every quality, the audio and subtitle tracks),
+    not one of its streams - a stream caught on its own (a server pressed in the page, its player
+    already having the master) can be the picture alone, without sound. The master is one the page
+    asked for too, else the usual name beside it (master / index / playlist .m3u8)."""
+    if ".m3u8" not in urllib.parse.unquote(url).lower():
+        return url
+    head = _playlist_head(url, headers)
+    if not head or "#EXT-X-STREAM-INF" in head or "#EXTINF" not in head:
+        return url                     # (a master already, or it can't be told)
+    here = _sibling(url, "")
+    for other in seen:
+        if other != url and _sibling(other, "") == here and "#EXT-X-STREAM-INF" in _playlist_head(other, headers):
+            return other
+    for name in ("master", "index", "playlist"):
+        other = _sibling(url, name)
+        if other and other != url and "#EXT-X-STREAM-INF" in _playlist_head(other, headers):
+            return other
+    return url
+
+
 def scrambled_video(url, headers=None):
     """Whether a video's address (one that doesn't say it's a playlist) answers with something
     no player can read - neither a playlist nor a video file - its site's own player
@@ -2392,7 +2437,10 @@ class Scraper:
         if scrambled_playlist(caught["url"], headers) or scrambled_video(caught["url"], headers):
             self._note("  ...but it isn't a video a player can read (only the site's own player unscrambles it)")
             return None
-        return {"url": caught["url"], "referer": headers.get("Referer") or page_url,
+        video = master_playlist(caught["url"], headers, caught.get("videos") or ())
+        if video != caught["url"]:
+            self._note(f"  ...one stream of a playlist: its whole playlist instead ({video[:120]})")
+        return {"url": video, "referer": headers.get("Referer") or page_url,
                 "headers": {k: v for k, v in headers.items() if k != "Referer"},
                 "subtitle": pick_subtitle(caught.get("subs") or [], headers), "servers": caught.get("servers") or []}
 

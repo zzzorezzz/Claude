@@ -360,3 +360,62 @@ class AnotherShowsEpisodeTest(unittest.TestCase):
         own = scrape.parse("".join(f'<a href="/watch/bleach-episode-{n}-g1jm73">Episode {n}</a>' for n in (1, 2, 3)),
                            "https://site.test/watch/bleach-episode-1-g1jm73")
         self.assertEqual(scrape.pick_episode(scrape.episode_links(own), None, 2), "https://site.test/watch/bleach-episode-2-g1jm73")
+
+
+class SwitchKeepsTracksTest(unittest.TestCase):
+    def test_a_stream_caught_alone_becomes_its_whole_playlist(self):
+        media = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nseg1.ts\n"
+        master = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",URI=\"a.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\nv0.m3u8\n"
+        url = "https://bridge.test/?url=https%3A%2F%2Fcdn.test%2Fdash%2Fx%2Fv2.m3u8&Policy=abc"
+        heads = {url: media, "https://bridge.test/?url=https%3A%2F%2Fcdn.test%2Fdash%2Fx%2Fmaster.m3u8&Policy=abc": master}
+        with mock.patch.object(scrape, "_playlist_head", side_effect=lambda u, h=None: heads.get(u, "")):
+            self.assertEqual(scrape.master_playlist(url), "https://bridge.test/?url=https%3A%2F%2Fcdn.test%2Fdash%2Fx%2Fmaster.m3u8&Policy=abc")
+            self.assertEqual(scrape.master_playlist("https://cdn.test/a/master.m3u8"), "https://cdn.test/a/master.m3u8")
+
+    def test_a_swap_carries_the_new_servers_headers(self):
+        from watchlist import player
+        s = player.Session("mpv", "i", [{"key": "1:1", "path": "https://a.test/v.m3u8", "web": True}])
+        s.send = mock.Mock(return_value=True)
+        s.swap({"key": "1:1", "path": "https://b.test/v.m3u8", "web": True, "referer": "https://site.test/",
+                "headers": {"Origin": "https://site.test", "User-Agent": "UA x"}}, 42)
+        opts = s.send.call_args.args[0][4]
+        self.assertIn("start=42", opts)
+        self.assertIn("referrer=%18%https://site.test/", opts)
+        self.assertIn("http-header-fields=%25%Origin: https://site.test", opts)
+
+
+class PartyServerTest(ServerListTest):
+    def test_a_server_chosen_is_chosen_for_everyone(self):
+        app, site = self.app, self.site
+        streams, playing = scrape.clicked_streams([{"label": "Prism", "kind": "", "on": True, "frame": ""},
+                                                   {"label": "Edge", "kind": "", "on": False, "frame": ""}])
+        found = {"url": "https://cdn.test/prism.m3u8", "page": "https://site.test/watch/tv/1396/1/1", "referer": "", "headers": {},
+                 "streams": streams, "stream": playing, "entry": {"url": "https://site.test/tv/1396"}}
+        session = webplay.WebSession("dev", self.item["id"], [{"key": "1:1", "web": True, "path": found["url"]}])
+        session.swap = mock.Mock()
+        app._online_found[(self.item["id"], "1:1")] = (site, found, time.time())
+        party = mock.Mock(active=True, session=session)
+        app.party = party
+        with mock.patch.object(app.scraper, "resolve", return_value={"url": "https://cdn.test/x.m3u8", "page": found["page"],
+                                                                     "referer": "", "headers": {}, "streams": []}):
+            app.server_list(session)
+            for _ in range(100):
+                if not app._servers[(self.item["id"], "1:1")]["running"]:
+                    break
+                time.sleep(0.05)
+        edge = next(k for k, x in app._servers[(self.item["id"], "1:1")]["items"].items() if x["label"] == "Edge")
+        with mock.patch.object(app.scraper, "resolve", return_value={"url": "https://cdn.test/edge.m3u8", "page": found["page"],
+                                                                     "referer": "", "headers": {}, "streams": []}):
+            app.use_server(session, edge)
+        choice = party.share_server.call_args.args[0]
+        self.assertEqual((choice["k"], choice["h"], choice["l"]), ("1:1", "site.test", "Edge"))
+
+        # ...and on a guest's computer, that same server is chosen (without telling everyone again).
+        app._online_found[(self.item["id"], "1:1")] = (site, dict(found, stream=playing), time.time())
+        app._servers.clear()
+        party.share_server.reset_mock()
+        with mock.patch.object(app, "use_server") as use:
+            app._party_server(party, choice)
+        sid = use.call_args.args[1]
+        self.assertEqual(app._servers[(self.item["id"], "1:1")]["items"][sid]["label"], "Edge")
+        self.assertEqual(use.call_args.kwargs, {"share": False})

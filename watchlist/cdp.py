@@ -624,7 +624,8 @@ def catch_video(url, timeout=30, click=None, open_page=None):
             after = [f for f in found if f[2] >= opts.get("clicked_at", 0)] or found
             best = min(after, key=lambda f: (webtools.learned_rank(url, f[0], f[1]),
                                              0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1, after.index(f)))
-            return {"url": best[0], "headers": best[1], "subs": list(opts["subs"]), "servers": webtools.servers_of(opts, url)}
+            return {"url": best[0], "headers": best[1], "subs": list(opts["subs"]), "servers": webtools.servers_of(opts, url),
+                    "videos": [f[0] for f in found]}
         except (CDPError, OSError):
             return None
         finally:

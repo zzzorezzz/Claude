@@ -790,7 +790,7 @@ def catch_video(url, timeout=30, click=None):
             best = min(after, key=lambda f: (learned_rank(url, f[0], f[1]),
                                              0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1,
                                              after.index(f)))
-            return {"url": best[0], "headers": best[1], "subs": list(opts.get("subs") or []),
+            return {"url": best[0], "headers": best[1], "subs": list(opts.get("subs") or []), "videos": [f[0] for f in found],
                     "servers": servers_of(opts, url)}
         finally:
             try:
