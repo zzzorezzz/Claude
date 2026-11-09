@@ -98,8 +98,21 @@ AUTOPLAY_JS = r"""(() => {
     }
     if (n % 3 === 1) {
       const b = document.querySelector('.jw-icon-display, .jw-display-icon-container, .vjs-big-play-button, .plyr__control--overlaid,'
-        + ' .fp-play, .play-button, .btn-play, .playbutton, [aria-label="Play"], [title="Play"], #play, .play-btn, .vds-play-button, #player > .play');
+        + ' .fp-play, .play-button, .btn-play, .playbutton, [aria-label="Play"], [title="Play"], #play, .play-btn, .vds-play-button, #player > .play,'
+        // (any player's own big play button, by the words in its class: "video-play-button", "big-play-btn"...)
+        + ' [class*="play-button" i], [class*="play-btn" i], [class*="playbutton" i], [class*="btn-play" i], [class*="big-play" i],'
+        + ' [class*="play-icon" i], [class*="playicon" i], [id*="play-button" i], [id*="playbtn" i]');
       if (b) { try { b.click(); } catch (e) {} }
+    }
+    // Nothing playing after a few seconds: the page's own "Play now" / "Watch now" (its own
+    // button, in the page itself - not an ad's frame, not a link away).
+    if ((n === 4 || n === 9) && window.top === window && ![...document.querySelectorAll('video')].some((v) => !v.paused)) {
+      const own = [...document.querySelectorAll('button, [role="button"], a[href^="#"], a:not([href])')].find((el) => {
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && /^(▶\s*)?(play|play now|watch|watch now|start watching|play (episode|movie|film)|watch (episode|movie|film))$/i.test(t);
+      });
+      if (own) { try { own.click(); } catch (e) {} }
     }
     if (n < 25) setTimeout(kick, 1000);
   };
@@ -120,8 +133,9 @@ CLICKED = "https://watchanything.invalid/clicked"
 # ...or that the page has nothing to click for it (what it plays by itself is taken at once).
 NO_CLICK = "https://watchanything.invalid/nothing-to-click"
 CLICK_JS = r"""(() => {
-  if (window.top !== window || window.__waClick) return; window.__waClick = true;
   const want = __WANT__;
+  if (want.frame ? location.host !== want.frame : window.top !== window) return;
+  if (window.__waClick) return; window.__waClick = true;
   const norm = (t) => (t || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const kindOk = (el) => {
     if (!want.kind) return true;
@@ -148,8 +162,9 @@ CLICK_JS = r"""(() => {
         return 'chosen';
       }
     }
-    const triggers = [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], [aria-haspopup="true"]')]
-      .filter((el) => !opened.has(el) && /^(sub|dub|raw|soft ?sub|hard ?sub|japanese|english|audio|language|server)/i.test((el.textContent || '').trim()));
+    const triggers = [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], [aria-haspopup="true"], [aria-haspopup="dialog"]')]
+      .filter((el) => !opened.has(el) && (/^(sub|dub|raw|soft ?sub|hard ?sub|japanese|english|audio|language|server)/i.test((el.textContent || '').trim())
+        || /\b(servers?|sources?|mirrors?)\b/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${norm((el.parentElement || {}).textContent || '').slice(0, 40)}`)));
     if (triggers.length) { opened.add(triggers[0]); triggers[0].click(); return 'opened'; }
     return '';
   };
@@ -166,7 +181,7 @@ CLICK_JS = r"""(() => {
       return (text.includes(label) || title.includes(label)) && kindOk(el);
     });
     const exact = found.filter((el) => norm(el.textContent) === label);
-    const named = want.exact ? found.filter((el) => new RegExp(`^${label}(bed|s)?$`).test(norm(el.textContent))) : [];
+    const named = want.exact ? found.filter((el) => new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(bed|s)?$`).test(norm(el.textContent))) : [];
     const hit = (want.exact ? named : exact.length ? exact : found).sort((a, b) => norm(a.textContent).length - norm(b.textContent).length)[0];
     if (hit) {
       const clickable = hit.closest('[role="option"], [role="menuitem"], a, button, li, [role="button"]') || hit;
@@ -183,11 +198,176 @@ CLICK_JS = r"""(() => {
   else setTimeout(pick, 400);
 })();""".replace("__CLICKED__", CLICKED).replace("__NO_CLICK__", NO_CLICK)
 
+# The servers (sources, mirrors) an episode's page offers, read in every frame of it - the
+# player is often another site's frame with its own list. Any page's: a box named for servers
+# ("server", "source", "mirror", "provider", "embed"), or the list under a "Server(s)" heading,
+# or a <select> of them; each option's name, its sub / dub, and whether it's the one playing.
+# Told to the app as a request to SERVERS (in every way a page can send one).
+SERVERS = "https://watchanything.invalid/servers?d="
+SERVERS_JS = r"""(() => {
+  if (window.__waServers) return; window.__waServers = true;
+  const norm = (t) => (t || '').replace(/\s+/g, ' ').trim();
+  const NAMED = /server|mirror|provider|embed|sources?(?:[-_ ]?(?:list|box|item|btn|button|wrap|tab))?$|^sources?\b|\bsources?\b/i;
+  const HEAD = /^(servers?|video servers?|streaming servers?|sources?|video sources?|mirrors?|providers?|(choose|select|switch)( a| the)? (server|source|mirror))\s*:?$/i;
+  const NOT = /^(home|log ?in|sign ?(in|up)|register|menu|search|share|report|download|trailer|comments?|next|prev(ious)?|episodes?|seasons?|settings|close|cancel|ok|auto|quality|speed|subtitles?|audio|captions?|\d{3,4}p|[\d.]+x|on|off|more|less|all|watch( now)?|play|pause|embed|direct|server|servers|source|sources|sub|dub|language|lang)$/i;
+  const CLICK = 'button, a, li, [role=option], [role=menuitem], [role=menuitemradio], [role=radio], [role=tab], [role=button], [data-server], [data-server-id], [data-link], [data-embed], [data-src], [data-id], option';
+  const INNER = CLICK.replace(', option', '');
+  const QUALITY = /\b\d{3,4}p\b|\bup to\b|^auto\b/i;            // (a quality, in the same box as the servers)
+  const BASE = location.hostname.replace(/^www\./, '').split('.')[0].toLowerCase();
+  const cls = (n) => (typeof n.className === 'string' ? n.className : (n.className && n.className.baseVal) || '');
+  const kindOf = (el, box) => {
+    for (let n = el, i = 0; n && i < 10; n = n.parentElement, i += 1) {
+      const t = [n.getAttribute && n.getAttribute('data-type'), cls(n), n.id].join(' ');
+      if (/\bdub|[-_]dub\b/i.test(t)) return 'dub';
+      if (/\b(sub|softsub|hardsub)\b|[-_]sub\b|\bsub[-_]/i.test(t)) return 'sub';
+      if (/\braw\b/i.test(t)) return 'raw';
+      if (n === box) {
+        const head = norm((box.previousElementSibling || {}).textContent || '');
+        if (head.length < 30) { if (/\bdub/i.test(head)) return 'dub'; if (/\bsub/i.test(head)) return 'sub'; if (/\braw\b/i.test(head)) return 'raw'; }
+      }
+    }
+    return '';
+  };
+  const activeOf = (el) => {
+    for (let n = el, i = 0; n && i < 3; n = n.parentElement, i += 1) {
+      if (!n.getAttribute) break;
+      if (['aria-selected', 'aria-checked', 'aria-current', 'aria-pressed'].some((a) => n.getAttribute(a) === 'true')) return true;
+      if (/(^|[\s_-])(active|selected|current|checked|is-active|is-selected|on)($|[\s_-])/i.test(cls(n))) return true;
+      if (n.tagName === 'OPTION' && n.selected) return true;
+    }
+    return false;
+  };
+  const boxes = () => {
+    const out = new Set();
+    for (const el of document.querySelectorAll('[class], [id], [aria-label], [title], select')) {
+      if (/^(SCRIPT|STYLE|LINK|META|IFRAME|VIDEO|SOURCE|BODY|HTML|IMG)$/.test(el.tagName)) continue;
+      const name = [cls(el), el.id, el.getAttribute('aria-label') || '', el.getAttribute('title') || '', el.getAttribute('name') || ''].join(' ');
+      if (NAMED.test(name)) out.add(el);
+    }
+    for (const el of document.querySelectorAll('h1, h2, h3, h4, h5, h6, div, span, p, label, strong, b, dt, legend, header')) {
+      if (el.children.length > 2) continue;
+      const t = norm(el.textContent);
+      if (t.length < 40 && HEAD.test(t)) {
+        if (el.nextElementSibling) out.add(el.nextElementSibling);
+        if (el.parentElement) out.add(el.parentElement);
+      }
+    }
+    return [...out].sort((a, b) => a.getElementsByTagName('*').length - b.getElementsByTagName('*').length);
+  };
+  const options = (box) => {
+    const out = [];
+    const els = box.matches(CLICK) && !box.querySelector(INNER) ? [box] : box.querySelectorAll(CLICK);
+    for (const el of els) {
+      if (el.tagName !== 'OPTION' && el.querySelector(INNER)) continue;          // (a box of options, not one)
+      const label = norm(el.tagName === 'OPTION' ? el.textContent : (el.innerText || el.textContent || el.getAttribute('title') || el.getAttribute('aria-label')));
+      if (!label || label.length > 32 || NOT.test(label) || QUALITY.test(label)) continue;
+      if (/^[\w-]+(\.[\w-]+)*\.[a-z]{2,}$/i.test(label) && label.split('.')[0].toLowerCase() === BASE) continue;   // (the site's own other addresses)
+      out.push({ el, label });
+    }
+    return out;
+  };
+  // A "Server" dropdown whose options only exist while it's open (drawn in a pop-up elsewhere in
+  // the page): opened once, its pop-up read with the rest, then closed again.
+  const POPUP = '[role=listbox], [role=menu], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [class*=popover], [class*=Popover], [class*=dropdown-menu], [class*=Dropdown], [class*=popup]';
+  const openers = () => [...document.querySelectorAll('button, [role=button], [role=combobox], [aria-haspopup]')]
+    .filter((el) => /\b(servers?|sources?|mirrors?|providers?)\b/i.test(`${norm(el.textContent)} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${norm((el.parentElement || {}).textContent || '').slice(0, 40)}`)
+      && !el.closest(POPUP) && el.getBoundingClientRect().width > 0);
+  let opened = 0;
+  const peek = (then) => {
+    const el = openers()[0];
+    if (!el || opened >= 2) { then([]); return; }
+    opened += 1;
+    const shown = (p) => { const r = p.getBoundingClientRect(); return r.height > 0 && r.width > 0; };
+    const before = new Map([...document.querySelectorAll(POPUP)].map((p) => [p, shown(p)]));
+    try { el.click(); } catch (e) { /* fine */ }
+    setTimeout(() => {
+      // (only what the click opened - not a menu that was open already)
+      const popups = [...document.querySelectorAll(POPUP)].filter((p) => shown(p) && before.get(p) !== true);
+      then(popups);
+      try { el.click(); } catch (e) { /* fine */ }
+      try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) { /* fine */ }
+    }, 700);
+  };
+  let last = '';
+  const tell = (url) => {
+    try { fetch(url, { mode: 'no-cors' }).catch(() => {}); } catch (e) { /* not allowed here */ }
+    try { new Image().src = url; } catch (e) { /* not allowed here */ }
+  };
+  const report = (extra = []) => {
+    const items = [], taken = new Set(), names = new Set();
+    for (const box of [...extra, ...boxes()]) {
+      const opts = options(box);
+      const distinct = new Set(opts.map((o) => o.label.toLowerCase()));
+      if (distinct.size < 2 || distinct.size > 40) continue;
+      if ([...distinct].every((l) => /^\d+$/.test(l)) && distinct.size > 8) continue;      // (an episode list)
+      for (const o of opts) {
+        if (taken.has(o.el)) continue;
+        taken.add(o.el);
+        const said = /\bdub(bed)?\b/i.test(o.label) ? 'dub' : /(\b|-)sub(bed|s)?\b/i.test(o.label) ? 'sub' : /\braw\b/i.test(o.label) ? 'raw' : '';
+        const kind = said || kindOf(o.el, box);
+        const key = `${o.label.toLowerCase()}|${kind}`;
+        if (names.has(key)) continue;
+        names.add(key);
+        items.push({ l: o.label, k: kind, a: activeOf(o.el) });
+      }
+    }
+    if (!items.length && !extra.length && openers().length) { peek((popups) => { if (popups.length) report(popups); }); return; }
+    const s = JSON.stringify(items.slice(0, 40));
+    if (s === last || !items.length) return;
+    last = s;
+    tell('__SERVERS__' + encodeURIComponent(JSON.stringify({ f: location.host, i: items.slice(0, 40) })));
+  };
+  for (const ms of [1200, 3000, 6000, 10000, 16000]) setTimeout(report, ms);
+})();""".replace("__SERVERS__", SERVERS)
+
+
+def servers_signal(url, opts):
+    """A page telling its servers (SERVERS_JS) into opts["servers"] (by frame): whether it was that."""
+    if not url.startswith(SERVERS):
+        return False
+    import json
+    try:
+        got = json.loads(urllib.parse.unquote(url[len(SERVERS):]))
+    except ValueError:
+        return True
+    items = [{"label": str(x.get("l"))[:40], "kind": str(x.get("k") or ""), "on": bool(x.get("a"))}
+             for x in got.get("i") or [] if isinstance(x, dict) and x.get("l")][:40]
+    if items:
+        opts.setdefault("servers", {})[str(got.get("f") or "")] = items
+        opts["servers_at"] = time.time()
+    return True
+
+
+def servers_of(opts, page_url):
+    """Every server the page's frames told, the page's own first: [{"label", "kind", "on", "frame"}]
+    ("frame": the frame's server when it isn't the page's)."""
+    top = urllib.parse.urlsplit(page_url or "").netloc
+    out, seen = [], set()
+    for frame, items in sorted((opts.get("servers") or {}).items(), key=lambda kv: kv[0] != top):
+        for x in items:
+            key = (x["label"].lower(), x["kind"])
+            if key not in seen:
+                seen.add(key)
+                out.append(dict(x, frame="" if frame == top else frame))
+    return out
+
+
 ADBLOCK = True                 # Settings → Browser → Block ads and pop-ups (kept current by the app)
 _pending = {}                  # address -> options, for a window about to open (see _options)
 _by_window = {}                # window uid -> options
 _patched = False
 _lock = threading.BoundedSemaphore(3)       # up to three hidden windows at once (several sites searched together)
+
+
+_TRAILER_HOSTS = re.compile(r"(?:^|\.)(?:youtube\.com|youtube-nocookie\.com|youtu\.be|googlevideo\.com|ytimg\.com|"
+                            r"media-imdb\.com|imdb-video\.media-imdb\.com|imdb\.com|vimeocdn\.com)$")
+
+
+def trailer(url):
+    """A trailer, not the episode: YouTube's / IMDb's own servers, or "trailer" in its path (a
+    server merely named like them - "xyz-youtube.cfd" - isn't one)."""
+    parts = urllib.parse.urlsplit(url)
+    return bool(_TRAILER_HOSTS.search((parts.hostname or "").lower()) or re.search(r"trailer", parts.path, re.I))
 
 
 def blocked(url):
@@ -298,6 +478,7 @@ def _recover(core):
 
 def _hook(opts, core):
     """Ad blocking and video catching, in the browser engine of one window (UI thread)."""
+    from . import droidweb
     from Microsoft.Web.WebView2.Core import CoreWebView2WebResourceContext
     catch = opts.get("catch")
     if not (opts.get("adblock") or catch):
@@ -332,6 +513,19 @@ def _hook(opts, core):
             opts["no_click"] = True
             args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
             return
+        if servers_signal(url, opts):
+            args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
+            return
+        if catch and url.startswith(droidweb.MANIFEST):
+            # (a playlist the page's scripts got from an address that doesn't say so)
+            video = urllib.parse.unquote(url[len(droidweb.MANIFEST):])
+            catch(video, (opts.get("seen") or {}).get(video) or {})
+            args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
+            return
+        if catch and droidweb._might_be_playlist(url) and len(opts.setdefault("seen", {})) < 3000:
+            h = args.Request.Headers
+            opts["seen"][url] = {"Referer": header(h, "Referer"), "Origin": header(h, "Origin"),
+                                 "User-Agent": header(h, "User-Agent"), "Cookie": header(h, "Cookie")}
         if opts.get("adblock") and blocked(url):
             args.Response = core.Environment.CreateWebResourceResponse(None, 403, "Blocked", "")
             return
@@ -375,6 +569,8 @@ def _hook(opts, core):
         scripts.append(TRACK_JS)
     elif catch:
         scripts.append(AUTOPLAY_JS)
+        scripts.append(SERVERS_JS)
+        scripts.append(droidweb.MANIFEST_JS)
         if opts.get("click"):
             import json
             scripts.append(CLICK_JS.replace("__WANT__", json.dumps(opts["click"])))
@@ -539,7 +735,7 @@ def catch_video(url, timeout=30, click=None):
     def catch(video, headers):
         u = video.lower()
         if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
-                or re.search(r"imdb-video|media-imdb|youtube|googlevideo|ytimg|trailer", u):
+                or trailer(video):
             return
         if not any(v == video for v, _, _ in found):
             found.append((video, {k: v for k, v in headers.items() if v}, time.time()))
@@ -566,16 +762,55 @@ def catch_video(url, timeout=30, click=None):
                     got.clear()
                 if click and not opts.get("clicked_at") and videos() and (opts.get("no_click") or time.time() > deadline - timeout + 15):
                     break                   # the button wasn't found: what the page plays by itself
+                if not click and not videos() and opts.get("servers") and time.time() > deadline - timeout + 15:
+                    break                   # (nothing in 15 s, and the page has other servers to try)
             found[:] = videos()
             if not found:
-                return None
+                servers = servers_of(opts, url)
+                return {"url": "", "headers": {}, "subs": [], "servers": servers} if servers else None
             after = [f for f in found if f[2] >= opts.get("clicked_at", 0)] or found
             best = min(after, key=lambda f: (learned_rank(url, f[0], f[1]),
                                              0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1,
                                              after.index(f)))
-            return {"url": best[0], "headers": best[1], "subs": list(opts.get("subs") or [])}
+            return {"url": best[0], "headers": best[1], "subs": list(opts.get("subs") or []),
+                    "servers": servers_of(opts, url)}
         finally:
             try:
                 win.destroy()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def list_servers(url, timeout=16):
+    """The servers an episode's page offers (its player started, as for catch_video):
+    [{"label", "kind", "on", "frame"}], [] when it shows none."""
+    if _chromium():
+        from . import cdp
+        return cdp.list_servers(url, timeout)
+    if _phone():
+        from . import droidweb
+        return droidweb.list_servers(url, timeout)
+    if not can_catch():
+        return []
+    opts = {"adblock": True, "catch": lambda video, headers: None}
+    with _lock:
+        win = _hidden_window(url, opts, "Finding the video…")
+        if win is None:
+            return []
+        try:
+            return wait_for_servers(opts, url, timeout)
+        finally:
+            try:
+                win.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def wait_for_servers(opts, url, timeout):
+    """Until the page's list hasn't changed for 3 seconds (once it has one), or `timeout`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(0.4)
+        if opts.get("servers_at") and time.time() - opts["servers_at"] > 3:
+            break
+    return servers_of(opts, url)

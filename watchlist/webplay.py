@@ -87,6 +87,7 @@ class WebSession:
         self.start_at, self.start_paused, self.anime, self.title = float(start or 0), paused, anime, title
         self.index, self.pos, self.dur, self.paused = index, None, None, paused
         self.pos_at = 0.0
+        self.stalled, self.stall_seen = False, -1e9   # waiting for its video (and when it last did)
         self.listeners = []
         self.connected, self.error, self.ended = False, "", False
         self.party = False
@@ -125,6 +126,9 @@ class WebSession:
             self.pos, self.pos_at = float(ev["pos"]), time.monotonic()
         if "paused" in ev:
             self.paused = bool(ev["paused"])
+        if bool(ev.get("stall")) != self.stalled or ev.get("stall"):
+            self.stall_seen = time.monotonic()
+        self.stalled = bool(ev.get("stall"))
         self.connected = True
         for name, data in changed:
             for listener in list(self.listeners):
@@ -162,7 +166,7 @@ class WebSession:
     def position(self):
         if self.pos is None:
             return None
-        if self.paused:
+        if self.paused or self.stalled:
             return self.pos
         return self.pos + max(0.0, time.monotonic() - self.pos_at)
 

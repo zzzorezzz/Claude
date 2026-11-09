@@ -15,6 +15,7 @@ itself, its screens in the app's WebView. What's different on a phone:
 - Torrents use libtorrent built for Android (lt_android.py).
 """
 
+import json
 import threading
 from pathlib import Path
 
@@ -56,6 +57,28 @@ def switch_version(session_id):
     session = phone_player._sessions.get(session_id)
     if session and _app is not None:
         threading.Thread(target=_app._switch_version, args=(session,), daemon=True).start()
+
+
+def servers(session_id):
+    """The phone player: the episode's servers (and your other sites), as JSON."""
+    session = phone_player._sessions.get(session_id)
+    if not session or _app is None:
+        return json.dumps({"items": [], "checking": False, "note": "The player has closed"})
+    return json.dumps(_app.server_list(session))
+
+
+def use_server(session_id, server_id):
+    """The phone player: one of the Servers list's, from where it is."""
+    session = phone_player._sessions.get(session_id)
+    if session and _app is not None:
+        threading.Thread(target=_app.use_server, args=(session, str(server_id)), daemon=True).start()
+
+
+def other_site(session_id):
+    """The phone player: the episode found on another of your sites, from where it is."""
+    session = phone_player._sessions.get(session_id)
+    if session and _app is not None:
+        threading.Thread(target=_app._other_site, args=(session,), daemon=True).start()
 
 
 def player_event(session_id, data):

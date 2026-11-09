@@ -1,5 +1,13 @@
 # Notes: where we left off, and how the builds work
 
+## Round 1.3.8 (2026-11-09): parties together, every server, a better finder
+
+- **Party sync** (`party.py`): behind > 2 s seeks forward (FASTFORWARD), behind > 0.6 s plays at 1.05x; pressing play while the room plays seeks to the room (no doSeek sent); a step back within STALL_STEP while the player waits (`stalled` / `stall_seen` on player.Session from mpv's paused-for-cache, WebSession / PhoneSession from the phone's "stall") isn't a seek; LOOP_MAX jumps back in LOOP_WINDOW stop following them. The phone's player starts muted with "Tap for sound" when play() is refused (Safari autoplay).
+- **Servers**: `webtools.SERVERS_JS` (every frame) reads a page's server lists (boxes named server/source/mirror/provider/embed, a "Server" heading's list, a <select>, a "Server" dropdown opened once) and reports them to SERVERS; `catch_video` returns "servers", `list_servers` only lists. `scrape.clicked_streams` makes them streams "click|<frame>|<label>|<kind>", pressed by CLICK_JS in that frame. `resolve(stream=..., remember=False)` finds one without making it the site's choice. `App.server_list / _check_servers / use_server / _other_site`; mpv: uosc `open-menu`/`update-menu` ("watchlist-servers", S, Ctrl+F, two controls buttons); phone: menu + "Other site"; Android: "Servers" dialog (`android.servers/use_server/other_site`).
+- **Finder**: no Sub click for non-anime; `by_tmdb` address templates per site; fuzzy words and a softer year in `score`; MATCH_TO_PLAY 55 (25-55 asks); a guessed /watch/<id> only when its page isn't another show's or a 404; `find_search` (home page -> search link, two sample titles must both be found) and {slug}; <base href>; this title's own episode links over other cards; the page's "Play now" and *play-button* classes; MANIFEST_JS on Windows and Mac too; `webtools.trailer` by host (not "youtube" anywhere); `scrambled_video`; a page that played nothing has its listed servers tried; no second 30 s catch of the same page; 15 s when other servers exist.
+- **Keys**: mpv UP/DOWN/wheel volume, - = audio delay, z x subtitle delay; phone player the same (no audio delay in a browser).
+- Live tests: `tests/live_sites.py` checks each server of the first title; `python -m tests.live_sites x.json extra` runs `livecheck.EXTRA_SITES` (everythingmoe's lists). Nepu, AnimePahe, VidBox's player sit behind Cloudflare Turnstile; Gotaku's and ReAnime's videos are scrambled for their own players: not worked around.
+
 ## Round "Use on your phone" (2026-11-06)
 
 Not built yet (exe/dmg/apk); everything committed on `claude/blissful-mendel-jghzf5`.

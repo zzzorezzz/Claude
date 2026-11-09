@@ -14,6 +14,20 @@ SITES = [
     {"name": "Bingr", "url": "https://bingr.one/explore?q={title}", "types": ["tv", "movie"]},
     {"name": "ShuttleTV", "url": "https://shuttletv.su/search?q={title}", "types": ["tv", "movie"]},
 ]
+# More sites (everythingmoe's lists), for testing how the finder copes with sites it wasn't made
+# for: python -m tests.live_sites extra (their search links as the app finds them by itself).
+EXTRA_SITES = [
+    {"name": "HydraHD", "url": "https://hydrahd.gd/index.php?menu=search&query={title}", "types": ["tv", "movie"]},
+    {"name": "Watchroo", "url": "https://watchroo.com/search?query={title}", "types": ["tv", "movie"]},
+    {"name": "VidBox", "url": "https://vidbox.cc/search?q={title}", "types": ["tv", "movie"]},
+    {"name": "M4UHD", "url": "https://ww2.m4uhd.to/search/{slug}.html", "types": ["tv", "movie"]},
+    {"name": "Hexa", "url": "https://hexa.su/search?q={title}", "types": ["tv", "movie"]},
+    {"name": "AniWaves", "url": "https://aniwaves.ru/filter?keyword={title}", "types": ["anime"]},
+    {"name": "HiAnimes", "url": "https://hianimes.se/filter?keyword={title}", "types": ["anime"]},
+    {"name": "Shonen", "url": "https://shonen.to/browse?q={title}", "types": ["anime"]},
+    {"name": "ReAnime", "url": "https://reanime.to/search?q={title}", "types": ["anime"]},
+    {"name": "Gotaku", "url": "https://gotaku.to/browse?q={title}", "types": ["anime"]},
+]
 ANIME = [
     ({"title": "Death Note", "year": 2006}, 1),
     ({"title": "Bleach", "year": 2004}, 1),

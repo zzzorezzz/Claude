@@ -6053,6 +6053,17 @@ async function videoSiteAction(wrap, a, row) {
   if (a === 'vsite-diag') { openSiteTest(wrap.vsites[i]); return; }
   if (a === 'vsite-test') {
     const out = $('.site-test-out', row);
+    const site = wrap.vsites[i];
+    if (site.url && !/\{(title|query)\}/.test(site.url)) {
+      // Just the site's address: its search link is found (by searching it) and filled in.
+      out.innerHTML = '<span class="spin-dot"></span> Finding its search link…';
+      try {
+        const f = await api('POST', '/api/video-sites/find-search', { url: site.url, types: site.types });
+        if (!f.ok) { out.innerHTML = `<span class="bad">${esc(f.error)}</span>`; return; }
+        site.url = f.url;
+        $('.vsite-url', row).value = f.url;
+      } catch (err) { out.innerHTML = `<span class="bad">${esc(err.message)}</span>`; return; }
+    }
     out.innerHTML = '<span class="spin-dot"></span> Searching it…';
     try {
       const r = await api('POST', '/api/video-sites/test', { site: wrap.vsites[i] });

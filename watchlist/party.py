@@ -41,6 +41,16 @@ REWIND_THRESHOLD = 4.0
 SLOWDOWN_THRESHOLD = 1.5
 SLOWDOWN_RESET = 0.1
 SLOWDOWN_RATE = 0.95
+# Behind the others (Syncplay only ever corrects whoever is ahead): a little behind plays a
+# little faster until caught up; further behind jumps to where they are.
+SPEEDUP_THRESHOLD = 0.6
+SPEEDUP_RATE = 1.05
+FASTFORWARD_THRESHOLD = 2.0
+FASTFORWARD_EXTRA = 0.25
+# A player waiting for its video (buffering) falls back a little: that isn't you skipping back.
+STALL_GRACE = 4.0                # seconds after a wait in which a small step back is the wait's
+STALL_STEP = 10.0                # how far back a wait can leave it
+LOOP_WINDOW, LOOP_MAX = 20.0, 3  # the same few seconds again and again: stop jumping back
 PING_WEIGHT = 0.85
 TICK = 0.2                       # how often the player is checked
 # What a guest is doing, as the room sees it (in the "file" each person sets).
@@ -177,6 +187,8 @@ class Party:
         self._player_pos, self._player_paused, self._player_at = 0.0, True, None
         self._global_pos, self._global_paused, self._global_at = 0.0, True, None
         self._speed_changed = False
+        self._speed = 1.0            # (slowed to let the others catch up, or sped up to catch them)
+        self._jumps_back = []        # when the room moved this player back (a loop shows itself)
         self._quiet_until = 0.0      # just moved the player ourselves: don't read that as you
         self._file_key = None        # what's loaded, as announced
         self._announced = False
@@ -692,9 +704,27 @@ class Party:
         paused, position = session.paused, session.position()
         pause_change, seeked = self._changes(paused, position)
         first = self._player_at is None
+        was_paused = self._player_paused
+        if not first and was_paused and not paused and self._global_at and not self._global_paused \
+                and abs(self._global_position() - position) > SEEK_THRESHOLD:
+            # You pressed play while the others were playing: you join them where they are
+            # (they aren't pulled back to where you were).
+            position = self._global_position()
+            self._quiet_until = time.time() + 1.0
+            session.send(["seek", position, "absolute"])
+            pause_change = seeked = False
+        elif seeked and not paused and self._stall_step(session, position):
+            seeked = False               # (it waited for its video: not a skip)
         self._player_pos, self._player_paused, self._player_at = position, paused, time.time()
         if self._global_at and not first and (pause_change or seeked):
             self._send_state(position, paused, seeked, None, True)
+
+    def _stall_step(self, session, position):
+        """Whether a step back is the player having waited for its video (buffering)."""
+        behind = self._player_position() - position
+        stalled = getattr(session, "stalled", False) or \
+            time.monotonic() - getattr(session, "stall_seen", -1e9) < STALL_GRACE
+        return stalled and 0 < behind < STALL_STEP
 
     def _handle_state(self, state):
         latency = None
@@ -724,6 +754,8 @@ class Party:
             position = session.position()
             paused = session.paused
             pause_change, seeked = self._changes(paused, position)
+            if seeked and not paused and self._stall_step(session, position):
+                seeked = False
             self._send_state(position, paused, seeked, latency, pause_change)
         else:
             self._send_state(None, None, False, latency, False)
@@ -749,7 +781,13 @@ class Party:
         if first:
             return
         commands = []
-        if do_seek and set_by != self.me:
+        if do_seek and set_by != self.me and 0 < diff < STALL_STEP and self._looping():
+            # The room keeps moving everyone back a few seconds (someone's video keeps waiting):
+            # this player carries on instead of going round the same seconds again.
+            self.osd("Someone's video keeps stopping to load - carrying on", 3)
+        elif do_seek and set_by != self.me:
+            if 0 < diff < STALL_STEP:
+                self._jumps_back.append(time.time())
             commands.append(["seek", position, "absolute"])
             self._player_pos, self._player_at = position, time.time()
             if set_by:
@@ -757,13 +795,24 @@ class Party:
         elif diff > REWIND_THRESHOLD and set_by != self.me:
             commands.append(["seek", position, "absolute"])
             self._player_pos, self._player_at = position, time.time()
-        elif not do_seek and not paused:
-            if diff > SLOWDOWN_THRESHOLD and not self._speed_changed and set_by != self.me:
-                commands.append(["set_property", "speed", SLOWDOWN_RATE])
-                self._speed_changed = True
-            elif self._speed_changed and diff < SLOWDOWN_RESET:
+        elif -diff > FASTFORWARD_THRESHOLD and not paused and not self._player_paused and set_by != self.me:
+            # Behind the others: to where they are.
+            commands.append(["seek", position + FASTFORWARD_EXTRA, "absolute"])
+            self._player_pos, self._player_at = position + FASTFORWARD_EXTRA, time.time()
+            if self._speed != 1.0:
                 commands.append(["set_property", "speed", 1.0])
-                self._speed_changed = False
+                self._speed, self._speed_changed = 1.0, False
+        elif not do_seek and not paused:
+            if diff > SLOWDOWN_THRESHOLD and self._speed == 1.0 and set_by != self.me:
+                commands.append(["set_property", "speed", SLOWDOWN_RATE])
+                self._speed, self._speed_changed = SLOWDOWN_RATE, True
+            elif -diff > SPEEDUP_THRESHOLD and self._speed == 1.0 and set_by != self.me and not self._player_paused:
+                commands.append(["set_property", "speed", SPEEDUP_RATE])
+                self._speed, self._speed_changed = SPEEDUP_RATE, True
+            elif self._speed != 1.0 and (abs(diff) < SLOWDOWN_RESET or (self._speed == SLOWDOWN_RATE and diff < 0)
+                                         or (self._speed == SPEEDUP_RATE and diff > 0)):
+                commands.append(["set_property", "speed", 1.0])
+                self._speed, self._speed_changed = 1.0, False
         if pause_changed and paused != self._player_paused:
             if paused and set_by != self.me:
                 commands.append(["seek", position, "absolute"])
@@ -775,6 +824,11 @@ class Party:
         if commands:
             self._quiet_until = time.time() + 1.0
             session.send(*commands)
+
+    def _looping(self):
+        now = time.time()
+        self._jumps_back = [t for t in self._jumps_back if now - t < LOOP_WINDOW]
+        return len(self._jumps_back) >= LOOP_MAX
 
     def _send_state(self, position, paused, do_seek, latency, state_change):
         state = {}

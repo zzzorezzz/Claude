@@ -63,6 +63,7 @@ class PhoneSession:
         self.start_at, self.start_paused, self.keep_open, self.anime = start, paused, keep_open, anime
         self.index, self.pos, self.dur, self.paused = index, None, None, paused
         self.pos_at = 0.0
+        self.stalled, self.stall_seen = False, -1e9   # waiting for its video (and when it last did)
         self.listeners = []
         self.connected, self.error, self.ended = False, "", False
         self.party = False           # in a watch party: leaving the player doesn't pause it
@@ -107,6 +108,9 @@ class PhoneSession:
             self.pos, self.pos_at = float(ev["pos"]), time.monotonic()
         if "paused" in ev:
             self.paused = bool(ev["paused"])
+        if bool(ev.get("stall")) != self.stalled or ev.get("stall"):
+            self.stall_seen = time.monotonic()
+        self.stalled = bool(ev.get("stall"))
         self.connected = True
         if ev.get("ended"):
             self._end()
@@ -137,7 +141,7 @@ class PhoneSession:
     def position(self):
         if self.pos is None:
             return None
-        if self.paused:
+        if self.paused or self.stalled:
             return self.pos
         return self.pos + max(0.0, time.monotonic() - self.pos_at)
 

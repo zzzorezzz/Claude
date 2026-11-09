@@ -185,5 +185,9 @@ def catch_video(url, timeout=30, click=None):
     return cdp.catch_video(url, timeout + 10, click, open_page=Page)      # (a phone is slower)
 
 
+def list_servers(url, timeout=16):
+    return cdp.list_servers(url, timeout + 6, open_page=Page)
+
+
 def render(url, timeout=20, settle=2.5):
     return cdp.render(url, timeout, settle + 1, open_page=Page)

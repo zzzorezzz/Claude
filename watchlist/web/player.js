@@ -31,6 +31,7 @@ function wpBuild() {
     <div class="wp-tap"></div>
     <div class="wp-loading hidden"><div class="spinner"></div><p class="wp-loading-text">Getting it ready…</p></div>
     <div class="wp-osd hidden"></div>
+    <button class="wp-unmute hidden" data-wp="unmute"></button>
     <div class="wp-error hidden" role="alert"><h3>It won't play</h3><p class="wp-error-why"></p><div class="btns wp-error-btns"></div></div>
     <div class="wp-upnext hidden"><div><span class="muted small">Up next</span><b class="wp-upnext-what"></b></div>
       <div class="btns"><button class="btn btn-white btn-sm" data-wp="next-now">Play now <span class="wp-count"></span></button>
@@ -48,6 +49,7 @@ function wpBuild() {
           <input class="wp-seek" type="range" min="0" max="1000" step="1" value="0" aria-label="Where in the video"></div>
         <div class="wp-row"><span class="wp-time">0:00</span><span class="wp-dur">0:00</span><span class="wp-spacer"></span>
           <button class="wp-btn wp-src hidden" data-wp="source" title="Not working? Try another server">Not working?</button>
+          <button class="wp-btn wp-src wp-other hidden" data-wp="other-site" title="Find this episode on another of your sites">Other site</button>
           <button class="wp-btn" data-wp="cc" aria-label="Subtitles">CC</button>
           <button class="wp-btn" data-wp="menu" aria-label="Audio, subtitles, quality, speed">${wpIco('gear')}</button>
           <button class="wp-btn" data-wp="full" aria-label="Full screen">${wpIco('full')}</button></div></div>
@@ -164,7 +166,7 @@ async function wpAttach(media, at, paused) {
   s.duration = media.duration || 0;
   s.cues = [];
   s.subPick = Math.min(s.subPick, Math.max(0, (media.subs || []).length - 1));
-  wpQ('.wp-src').classList.toggle('hidden', media.how !== 'site');
+  WP.el.querySelectorAll('.wp-src').forEach((b) => b.classList.toggle('hidden', media.how !== 'site'));
   // Apple's Safari plays HLS best itself (and lists its audio tracks); elsewhere hls.js does,
   // where it can (its audio tracks can be switched), else the browser's own.
   const apple = /Apple/.test(navigator.vendor || '');        // (Safari and every iPhone browser: Apple's WebKit)
@@ -197,7 +199,7 @@ async function wpAttach(media, at, paused) {
     wpSubsLoad();
     wpAudioPick();
     wpMediaSession();
-    if (!paused) v.play().catch(() => wpShowUi(true));      // (no tap yet on this page: the play button shows)
+    if (!paused) wpPlay();                // (no tap yet on this page: muted, with "Tap for sound")
   };
   v.addEventListener('loadedmetadata', begin, { once: true });
 }
@@ -275,7 +277,7 @@ async function wpReport(force) {
   try {
     const r = await api('POST', `/api/web/${s.sid}/state`, {
       index: s.index, pos: s.pendingSeek ?? (s.media ? wpNow() : null), dur: s.media ? wpTotal() || null : null,
-      paused: v.paused, after: s.seq,
+      paused: v.paused, stall: !!(s.stall && !v.paused), after: s.seq,
     });
     if (WP.s !== s) return;
     if (r.ready != null) s.ready = r.ready;
@@ -286,10 +288,30 @@ async function wpReport(force) {
   } finally { s.busy = false; }
 }
 
+// Play: if the phone won't start a video with sound without a tap on the page (Safari, after a
+// watch party opened it), it plays muted - in step with everyone - and a tap brings the sound.
+function wpPlay() {
+  const v = wpV();
+  return v.play().catch((err) => {
+    if (err && err.name === 'NotAllowedError' && !v.muted) {
+      v.muted = true;
+      return v.play().then(() => wpUnmuteAsk('🔇 Tap for sound')).catch(() => wpUnmuteAsk('▶ Tap to join'));
+    }
+    wpShowUi(true);
+    return undefined;
+  });
+}
+
+function wpUnmuteAsk(text) {
+  const b = wpQ('.wp-unmute');
+  b.textContent = text;
+  b.classList.remove('hidden');
+}
+
 function wpCommand(c) {
   const v = wpV();
   if (c.do === 'pause') v.pause();
-  else if (c.do === 'play') v.play().catch(() => wpShowUi(true));
+  else if (c.do === 'play') wpPlay();
   else if (c.do === 'seek') wpSeek(c.to);
   else if (c.do === 'speed') { v.playbackRate = c.to; }
   else if (c.do === 'text') wpOsd(c.text, c.ms);
@@ -358,7 +380,7 @@ function wpSubsDraw() {
   const s = WP.s;
   const box = wpQ('.wp-cc');
   if (!s || !s.subOn || WP.native) { if (box.innerHTML) box.innerHTML = ''; return; }
-  const t = wpNow();
+  const t = wpNow() - (s.subDelay || 0);
   const now = s.cues.filter((c) => c.start <= t && c.end > t);
   const html = now.map((c) => `<span>${wpCueHtml(c.text)}</span>`).join('<br>');
   if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
@@ -502,7 +524,9 @@ function wpMenu() {
   const q = s.quality || '';
   sheet.innerHTML = `<div class="wp-sheet-head"><b>Player</b><button class="wp-btn" data-wp="menu" aria-label="Close">✕</button></div>
     ${audio.length > 1 ? `<h5>Audio</h5><div class="wp-opts">${audio.map((a) => `<button class="${a.on ? 'on' : ''}" data-audio="${a.i}">${esc(a.label)}</button>`).join('')}</div>` : ''}
-    ${s.media?.how === 'site' ? '<h5>Sub / Dub</h5><div class="wp-opts"><button data-wp="version">Switch Sub ⇄ Dub</button></div>' : ''}
+    ${s.media?.how === 'site' ? `<h5>Servers</h5><div class="wp-opts wp-servers"><span class="muted small">Looking for this episode's servers…</span></div>
+      <div class="wp-opts"><button data-wp="other-site">Find it on another site</button></div>
+      <h5>Sub / Dub</h5><div class="wp-opts"><button data-wp="version">Switch Sub ⇄ Dub</button></div>` : ''}
     <h5>Subtitles</h5><div class="wp-opts"><button class="${!s.subOn ? 'on' : ''}" data-sub="off">Off</button>
       ${subs.map((x, i) => `<button class="${s.subOn && s.subPick === i ? 'on' : ''}" data-sub="${i}">${esc(x.label)}</button>`).join('') || '<span class="muted small">None for this one</span>'}</div>
     ${file && styled ? `<label class="check-row"><input type="checkbox" data-wp="burn" ${s.burn != null ? 'checked' : ''}> Burn in styled subtitles <span class="muted small">(their own look, drawn into the picture)</span></label>` : ''}
@@ -512,6 +536,27 @@ function wpMenu() {
     ${s.media ? `<p class="muted small wp-how">${{ direct: 'Played as it is', copy: 'Repackaged for the phone (picture untouched)', encode: `Converted for the phone${s.media.encoder ? ` (${esc(s.media.encoder.replace('h264_', '').toUpperCase())})` : ''}`, site: `From ${esc(s.media.site || 'your site')}` }[s.media.how] || ''}</p>` : ''}`;
   sheet.classList.remove('hidden');
   wpShowUi(true);
+  if (s.media?.how === 'site') wpServers();
+}
+
+// The Servers list in the menu: what the PC has found of the episode's servers (and your other
+// sites), shown again as it checks them, while the menu is open.
+async function wpServers() {
+  const s = WP.s;
+  const sheet = wpQ('.wp-sheet');
+  clearTimeout(WP.serversTimer);
+  if (!s || sheet.classList.contains('hidden')) return;
+  let got;
+  try { got = await api('GET', `/api/web/${s.sid}/servers`); } catch { return; }
+  const box = sheet.querySelector('.wp-servers');
+  if (!box || WP.s !== s) return;
+  const mark = { ok: '✓', checking: '…', failed: '✕', unchecked: '' };
+  const kind = { sub: 'Sub', dub: 'Dub', raw: 'Raw' };
+  box.innerHTML = (got.items || []).map((x) => `<button class="${x.on ? 'on' : ''} ${x.state === 'failed' ? 'wp-off' : ''}" data-server="${esc(x.id)}"
+      title="${esc(x.site)}">${esc(x.label)}${x.kind ? ` <small>${kind[x.kind] || ''}</small>` : ''} <small>${x.on ? '▶' : mark[x.state] || ''}</small></button>`).join('')
+    + (got.note ? `<span class="muted small">${esc(got.note)}</span>` : '')
+    + (got.checking ? '<span class="muted small">Checking the others…</span>' : '');
+  if (got.checking || got.note) WP.serversTimer = setTimeout(wpServers, 2000);
 }
 
 // ---- closing
@@ -556,9 +601,16 @@ function wpWire(el) {
     const code = v.error?.code;
     wpError(code === 4 ? "The phone can't play this video as it is. Try again (it's converted then), or another server." : wpWhy(0, `error ${code}`), true);
   });
-  v.addEventListener('waiting', () => { if (WP.s) wpLoading('Loading…'); });
-  v.addEventListener('playing', () => { wpLoading(false); wpHideError(); wpShowUi(); });
-  v.addEventListener('pause', () => { wpShowUi(true); wpReport(true); });
+  v.addEventListener('waiting', () => {
+    if (!WP.s) return;
+    wpLoading('Loading…');
+    if (!WP.s.stall) { WP.s.stall = true; wpReport(true); }
+  });
+  v.addEventListener('playing', () => {
+    wpLoading(false); wpHideError(); wpShowUi();
+    if (WP.s?.stall) { WP.s.stall = false; wpReport(true); }
+  });
+  v.addEventListener('pause', () => { if (WP.s) WP.s.stall = false; wpShowUi(true); wpReport(true); });
   v.addEventListener('play', () => wpReport(true));
   // The phone's own full screen (iPhone): subtitles go to it, since the page can't draw there.
   v.addEventListener('webkitbeginfullscreen', () => { WP.native = true; if (WP.s) wpTrackFill(WP.s.cues); });
@@ -571,6 +623,10 @@ function wpWire(el) {
   // Taps: one shows or hides the controls; two on a side jump 10 seconds.
   let lastTap = 0, tapTimer = 0;
   el.querySelector('.wp-tap').addEventListener('click', (e) => {
+    if (v.muted && !wpQ('.wp-unmute').classList.contains('hidden')) {
+      v.muted = false; wpQ('.wp-unmute').classList.add('hidden'); if (v.paused) wpPlay();
+      return;
+    }
     const now = Date.now();
     const r = e.currentTarget.getBoundingClientRect();
     const side = e.clientX < r.left + r.width / 3 ? -1 : e.clientX > r.right - r.width / 3 ? 1 : 0;
@@ -596,7 +652,7 @@ function wpWire(el) {
   });
   seek.addEventListener('change', () => { WP.dragging = false; wpSeek((seek.value / 1000) * wpTotal()); wpShowUi(); });
   el.addEventListener('click', async (e) => {
-    const b = e.target.closest('[data-wp], [data-audio], [data-sub], [data-q], [data-speed]');
+    const b = e.target.closest('[data-wp], [data-audio], [data-sub], [data-q], [data-speed], [data-server]');
     if (!b || !WP.s) return;
     const s = WP.s;
     wpShowUi();
@@ -621,6 +677,12 @@ function wpWire(el) {
       wpLoad(s.index, wpNow(), { reload: true });
       return;
     }
+    if (b.dataset.server !== undefined) {
+      wpQ('.wp-sheet').classList.add('hidden');
+      wpLoading('Switching server…');
+      try { await api('POST', `/api/web/${s.sid}/server`, { id: b.dataset.server }); } catch (err) { wpError(err.message, true); }
+      return;
+    }
     if (b.dataset.speed !== undefined) {
       s.speed = Number(b.dataset.speed);
       wpV().playbackRate = s.speed;
@@ -628,7 +690,14 @@ function wpWire(el) {
       return;
     }
     const a = b.dataset.wp;
-    if (a === 'play') { if (v.paused) v.play().catch(() => {}); else v.pause(); }
+    if (a === 'play') { v.muted = false; wpQ('.wp-unmute').classList.add('hidden'); if (v.paused) v.play().catch(() => {}); else v.pause(); }
+    else if (a === 'unmute') { v.muted = false; b.classList.add('hidden'); if (v.paused) wpPlay(); }
+    else if (a === 'other-site') {
+      wpQ('.wp-sheet').classList.add('hidden');
+      wpHideError();
+      wpLoading('Looking for it on your other sites…');
+      try { await api('POST', `/api/web/${s.sid}/other-site`, {}); } catch (err) { wpError(err.message, true); }
+    }
     else if (a === 'close') wpClose();
     else if (a === 'prev' && s.index > 0) wpLoad(s.index - 1, 0);
     else if (a === 'next' && s.index < s.entries.length - 1) wpLoad(s.index + 1, 0);
@@ -672,8 +741,17 @@ function wpWire(el) {
   document.addEventListener('keydown', (e) => {
     if (!WP.s || WP.el.classList.contains('hidden') || e.target.closest('input, textarea')) return;
     if (e.key === ' ' || e.key === 'k') { e.preventDefault(); if (v.paused) v.play(); else v.pause(); }
-    else if (e.key === 'ArrowLeft') wpSeek(wpNow() - 10);
-    else if (e.key === 'ArrowRight') wpSeek(wpNow() + 10);
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); wpSeek(wpNow() - 10); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); wpSeek(wpNow() + 10); }
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      v.muted = false;
+      v.volume = Math.max(0, Math.min(1, Math.round((v.volume + (e.key === 'ArrowUp' ? 0.05 : -0.05)) * 100) / 100));
+      wpOsd(`Volume ${Math.round(v.volume * 100)}%`, 900);
+    } else if (e.key === 'z' || e.key === 'x') {
+      WP.s.subDelay = Math.round(((WP.s.subDelay || 0) + (e.key === 'x' ? 0.1 : -0.1)) * 10) / 10;
+      wpOsd(`Subtitle delay ${WP.s.subDelay > 0 ? '+' : ''}${WP.s.subDelay.toFixed(1)} s`, 1200);
+    }
     else if (e.key === 'Escape') wpClose();
   });
 }

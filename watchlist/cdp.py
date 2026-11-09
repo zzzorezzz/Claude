@@ -280,7 +280,7 @@ class Browser:
     """One headless Chromium, its pages opened and closed as they're needed."""
 
     def __init__(self, exe, visible="", profile="profile"):
-        self.profile = HOME / profile
+        self.profile = (HOME / profile).resolve()      # (a full path: the browser has a folder of its own)
         self.profile.mkdir(parents=True, exist_ok=True)
         (self.profile / "DevToolsActivePort").unlink(missing_ok=True)
         # Headless, except a full Chromium can run as an ordinary window kept off the screen
@@ -521,7 +521,7 @@ class _Page:
             pass
         try:
             self.b.call("Target.closeTarget", {"targetId": self.target}, timeout=5)
-        except CDPError:
+        except (CDPError, OSError):        # (the browser gone already)
             pass
 
 
@@ -547,7 +547,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
         u = video.lower()
         if webtools.blocked(video) or u.startswith(("blob:", "data:")) or re.search(
                 r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
-                or re.search(r"imdb-video|media-imdb|youtube|googlevideo|ytimg|trailer", u):
+                or webtools.trailer(video):
             return
         if not any(v == video for v, _, _ in found):
             ref = _header(headers, "Referer")
@@ -559,9 +559,19 @@ def catch_video(url, timeout=30, click=None, open_page=None):
             if not click or opts.get("clicked_at"):
                 got.set()
 
+    seen = {}
+
     def on_request(u, headers, kind):
+        if u.startswith(droidweb.MANIFEST):
+            video = urllib.parse.unquote(u[len(droidweb.MANIFEST):])
+            keep(video, seen.get(video) or headers)
+            return
+        if len(seen) < 3000 and droidweb._might_be_playlist(u):
+            seen[u] = headers
         if u.startswith(webtools.CLICKED):
             opts["clicked_at"] = time.time()
+        elif webtools.servers_signal(u, opts):
+            pass
         elif u.startswith(webtools.NO_CLICK):
             opts["no_click"] = True
         elif webtools.VIDEO.search(urllib.parse.urlsplit(u).path) or kind == "Media":
@@ -577,7 +587,8 @@ def catch_video(url, timeout=30, click=None, open_page=None):
         elif ("text/vtt" in mime or "subrip" in mime or "x-ass" in mime or "x-ssa" in mime) and u not in opts["subs"]                 and not u.startswith(("blob:", "data:")):
             opts["subs"].append(u)
 
-    scripts = [webtools.AUTOPLAY_JS]
+    from . import droidweb
+    scripts = [webtools.AUTOPLAY_JS, webtools.SERVERS_JS, droidweb.MANIFEST_JS]
     if click:
         scripts.append(webtools.CLICK_JS.replace("__WANT__", json.dumps(click)))
     if webtools.ADBLOCK:
@@ -602,15 +613,38 @@ def catch_video(url, timeout=30, click=None, open_page=None):
                     got.clear()
                 if click and not opts.get("clicked_at") and videos() and (opts.get("no_click") or time.time() > deadline - timeout + 15):
                     break
+                if not click and not videos() and opts.get("servers") and time.time() > deadline - timeout + 15:
+                    break                   # (nothing in 15 s, and the page has other servers to try)
             found[:] = videos()
             if not found:
-                return None
+                servers = webtools.servers_of(opts, url)
+                return {"url": "", "headers": {}, "subs": [], "servers": servers} if servers else None
             after = [f for f in found if f[2] >= opts.get("clicked_at", 0)] or found
             best = min(after, key=lambda f: (webtools.learned_rank(url, f[0], f[1]),
                                              0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1, after.index(f)))
-            return {"url": best[0], "headers": best[1], "subs": list(opts["subs"])}
-        except CDPError:
+            return {"url": best[0], "headers": best[1], "subs": list(opts["subs"]), "servers": webtools.servers_of(opts, url)}
+        except (CDPError, OSError):
             return None
+        finally:
+            page.close()
+
+
+def list_servers(url, timeout=16, open_page=None):
+    """As webtools.list_servers: the servers an episode's page offers."""
+    from . import webtools
+    open_page = open_page or _chromium_page
+    opts = {}
+    scripts = [webtools.AUTOPLAY_JS, webtools.SERVERS_JS] + ([webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
+    with _lock:
+        try:
+            page = open_page(scripts, lambda u, headers, kind: webtools.servers_signal(u, opts), None)
+        except (CDPError, OSError, ValueError, KeyError, StopIteration):
+            return []
+        try:
+            page.go(url)
+            return webtools.wait_for_servers(opts, url, timeout)
+        except (CDPError, OSError):
+            return []
         finally:
             page.close()
 
@@ -629,7 +663,7 @@ def render(url, timeout=20, settle=2.5, open_page=None):
             page.loaded.wait(timeout)
             try:
                 page.run(webtools.EPISODES_TAB_JS)
-            except CDPError:
+            except (CDPError, OSError):
                 pass
             last, deadline = -1, time.time() + max(settle, 1) * 3
             while time.time() < deadline:
@@ -639,7 +673,7 @@ def render(url, timeout=20, settle=2.5, open_page=None):
                     break
                 last = count
             return page.run("document.documentElement.outerHTML"), page.run("location.href") or url
-        except CDPError:
+        except (CDPError, OSError):
             return None
         finally:
             page.close()

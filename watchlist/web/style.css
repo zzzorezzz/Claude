@@ -1817,6 +1817,12 @@ body.wp-open { overflow: hidden; }
 .wp-play { width: 78px; height: 78px; }
 .wp-play svg { width: 44px; height: 44px; }
 .wp-src { border: 1px solid rgba(255,255,255,.45); border-radius: 22px; padding: 0 12px; font-weight: 600; }
+.wp-src.hidden, .wp-unmute.hidden { display: none; }
+.wp-unmute { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; padding: 14px 24px;
+  border-radius: 999px; border: 1px solid rgba(255,255,255,.35); background: rgba(10,12,22,.82); color: #fff; font-size: 17px;
+  font-weight: 700; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.wp-servers button small { opacity: .7; font-weight: 500; }
+.wp-servers button.wp-off { opacity: .45; text-decoration: line-through; }
 .wp-bar { position: relative; height: 28px; display: flex; align-items: center; }
 .wp-bar::before { content: ""; position: absolute; left: 0; right: 0; height: 4px; border-radius: 2px; background: rgba(255,255,255,.25); }
 .wp-buffered, .wp-played { position: absolute; height: 4px; border-radius: 2px; left: 0; }

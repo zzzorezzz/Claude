@@ -61,8 +61,26 @@ jobs:
           sys.exit(live_sites.main(["live-report.json", *sites]))
           PY
 
+      - name: More sites the finder wasn't made for (everythingmoe's lists), three titles each
+        if: "!contains(github.event.head_commit.message, '[diag]')"
+        continue-on-error: true
+        env:
+          WATCHLIST_CHROMIUM_HOME: chromium-home
+          WATCHLIST_SERVERS: "0"
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          from watchlist import cdp
+          cdp.HOME = Path("chromium-home")
+          from tests import live_sites
+          live_sites.main(["live-report-extra.json", "extra"])
+          PY
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: live-sites-mac
-          path: live-report.json
+          path: |
+            live-report.json
+            live-report-extra.json

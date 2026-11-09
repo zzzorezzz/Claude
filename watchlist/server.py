@@ -109,6 +109,10 @@ class App:
         self.site_jobs = sites.Jobs(self)
         self.scraper = scrape.Scraper(self.data_dir)                       # your video sites
         self.scraper.render, self.scraper.catch = self._render_page, self._catch_video
+        self.scraper.servers = self._list_servers
+        # Every server of the episode playing, each checked in the background (the player's
+        # Servers list): {(title, episode): {"site", "page", "items": {id: {...}}, ...}}.
+        self._servers = {}
         # Your own sites: videos found ({(item, "s:e"): (site, found, when)}), the background
         # matching of a title's episodes (the latest run per title goes on) and how far it is.
         self._online_found, self._link_runs, self._link_progress = {}, {}, {}
@@ -2263,6 +2267,13 @@ class App:
             threading.Thread(target=self._switch_version, args=(session,), daemon=True).start()
         elif args[0] == "watchlist-other-source":
             threading.Thread(target=self._other_source, args=(session,), daemon=True).start()
+        elif args[0] == "watchlist-servers":
+            if self._servers_menu(session):
+                threading.Thread(target=self._follow_servers_menu, args=(session,), daemon=True).start()
+        elif args[0] == "watchlist-server" and len(args) > 1:
+            threading.Thread(target=self.use_server, args=(session, args[1]), daemon=True).start()
+        elif args[0] == "watchlist-other-site":
+            threading.Thread(target=self._other_site, args=(session,), daemon=True).start()
 
     def _load_own_sub(self, session):
         path = dialogs.choose("file", "Choose a subtitle file", "", "subtitle")
@@ -2325,6 +2336,227 @@ class App:
         session.send(["show-text", f"Playing from {name}" + ("" if where is site else f" on {where['name']}"), 3000])
         if item["format"] == "series":
             threading.Thread(target=self._link_around, args=(item["id"], where, key, session), daemon=True).start()
+
+    # ---- the player's Servers list: every server of the episode on its site (each checked in
+    # the background, a few at once), then your other sites; one press plays it from where you are.
+
+    SERVER_CHECKS = 3          # servers checked at once (each is a hidden page)
+
+    def server_list(self, session, start=True):
+        """{"items": [{"id", "site_id", "site", "label", "kind", "state", "on"}], "checking", "note"}
+        for the episode playing ("state": "ok", "checking", "failed", "unchecked")."""
+        entry = session.current()
+        got = self._online_found.get((session.item_id, (entry or {}).get("key")))
+        if not entry or not entry.get("web") or not got:
+            return {"items": [], "checking": False, "note": "Servers: only for videos from your own sites"}
+        key = entry["key"]
+        slot = (session.item_id, key)
+        site, found = got[0], got[1]
+        state = self._servers.get(slot)
+        if not state or state.get("page") != found.get("page") or state.get("site") != site["id"]:
+            state = self._servers[slot] = {"site": site["id"], "page": found.get("page"), "items": {}, "order": [],
+                                           "running": False, "listed": False}
+        playing = (found.get("stream") or {}).get("id")
+        if start and not state["running"]:
+            state["running"] = True
+            threading.Thread(target=self._check_servers, args=(session.item_id, key, slot), daemon=True).start()
+        items = []
+        for sid in state["order"]:
+            x = state["items"][sid]
+            # (the one chosen; by its video only when which one is playing isn't known - two
+            # servers can give the same video)
+            on = x["site_id"] == site["id"] and (sid == playing if playing in state["items"]
+                                                 else bool(x.get("url")) and x["url"] == found.get("url"))
+            items.append({k: x.get(k) for k in ("id", "site_id", "site", "label", "kind", "state")} | {"on": bool(on)})
+        if not any(x["on"] for x in items):
+            label = (found.get("stream") or {}).get("label") or site["name"]
+            items.insert(0, {"id": playing or "", "site_id": site["id"], "site": site["name"], "label": label,
+                             "kind": (found.get("stream") or {}).get("kind") or "", "state": "ok", "on": True})
+        return {"items": items, "checking": state["running"],
+                "note": "" if state["listed"] or items[1:] else "Looking for this episode's servers…"}
+
+    def _check_servers(self, item_id, key, slot):
+        """Every server of the episode's page (as its player lists them), each found in a hidden
+        page of its own, a few at once; then the episode on each of your other sites."""
+        state = self._servers[slot]
+        try:
+            item = self.store.get(item_id)
+            site_id = state["site"]
+            got = self._online_found.get(slot)
+            if not got:
+                return
+            site, found = got[0], got[1]
+            season, episode = self._key_numbers(key)
+            streams = self.scraper.episode_servers(found)
+            if streams and not found.get("streams"):
+                found["streams"] = streams
+            for s in streams:
+                if s["id"] not in state["items"]:
+                    state["order"].append(s["id"])
+                    state["items"][s["id"]] = dict(s, site_id=site_id, site=site["name"], state="unchecked")
+            state["listed"] = True
+            playing = (found.get("stream") or {}).get("id")
+            if playing in state["items"]:
+                state["items"][playing].update(state="ok", found=found, url=found.get("url"))
+            todo = [x for x in state["items"].values() if x["state"] == "unchecked"]
+
+            def check(x):
+                if self._servers.get(slot) is not state:
+                    return
+                x["state"] = "checking"
+                try:
+                    new = self.scraper.resolve(site, item, season, episode, stream=f"{x['id']}:{x['kind']}:{x['label']}",
+                                               fresh=True, remember=False)
+                    ok = bool(new.get("url"))
+                except scrape.ScrapeError:
+                    new, ok = None, False
+                x.update(state="ok" if ok else "failed", found=new if ok else None, url=(new or {}).get("url"),
+                         at=time.time())
+            with ThreadPoolExecutor(self.SERVER_CHECKS) as pool:
+                list(pool.map(check, todo))
+            # ...then your other sites (each the way it plays by itself).
+            others = [x for x in self._online_order(item, key) if x["id"] != site_id]
+
+            def other(s):
+                sid = f"site|{s['id']}"
+                if sid in state["items"]:
+                    return
+                x = state["items"][sid] = {"id": sid, "site_id": s["id"], "site": s["name"], "label": s["name"],
+                                           "kind": "", "state": "checking"}
+                state["order"].append(sid)
+                try:
+                    new = self.scraper.resolve(s, item, season, episode, fresh=False)
+                    ok = bool(new.get("url"))
+                except scrape.ScrapeError:
+                    new, ok = None, False
+                x.update(state="ok" if ok else "failed", found=new if ok else None, url=(new or {}).get("url"),
+                         at=time.time())
+                if ok and (new.get("stream") or {}).get("label"):
+                    x["label"] = f"{s['name']} · {new['stream']['label']}"
+            with ThreadPoolExecutor(self.SERVER_CHECKS) as pool:
+                list(pool.map(other, others))
+        except Exception:  # noqa: BLE001 - the list shows what was checked; the rest stays unchecked
+            pass
+        finally:
+            state["running"] = False
+
+    def use_server(self, session, server_id):
+        """One of the Servers list's: played from where you are (found now if it wasn't yet)."""
+        entry = session.current()
+        if not entry or not entry.get("web"):
+            return
+        key = entry["key"]
+        slot = (session.item_id, key)
+        state = self._servers.get(slot) or {}
+        x = (state.get("items") or {}).get(server_id)
+        item = self.store.get(session.item_id)
+        if x is None:
+            session.send(["show-text", "That server isn't in the list any more", 3000])
+            return
+        site = next((s for s in self._video_sites(item) if s["id"] == x["site_id"]), None)
+        if not site:
+            return
+        session.send(["show-text", f"Switching to {x['label']}…", 60000])
+        new = x.get("found") if x.get("found") and time.time() - x.get("at", 0) < self.FOUND_FOR else None
+        if not new:
+            season, episode = self._key_numbers(key)
+            try:
+                if server_id.startswith("site|"):
+                    new = self.scraper.resolve(site, item, season, episode, fresh=True)
+                else:
+                    new = self.scraper.resolve(site, item, season, episode, stream=f"{x['id']}:{x['kind']}:{x['label']}",
+                                               fresh=True, remember=False)
+            except scrape.ScrapeError as e:
+                x["state"] = "failed"
+                session.send(["show-text", f"{x['label']} didn't give a video ({e})"[:160], 5000])
+                return
+            if not new.get("url"):
+                x["state"] = "failed"
+                session.send(["show-text", f"{x['label']} didn't give a video", 4000])
+                return
+            x.update(state="ok", found=new, url=new["url"], at=time.time())
+        if not server_id.startswith("site|"):
+            self.scraper.prefer_stream(site, x["label"], x["kind"])      # (it plays: tried first from now on)
+            new = dict(new, stream={"id": x["id"], "label": x["label"], "kind": x["kind"]},
+                       streams=new.get("streams") or [{k: y[k] for k in ("id", "label", "kind")}
+                                                       for y in state["items"].values() if y["site_id"] == site["id"]])
+        else:
+            self._online_linked(item, key, site)
+        for k in [k for k in self._online_found if k[0] == item["id"] and k[1] != key]:
+            self._online_found.pop(k, None)           # (the episodes found ahead: found again with it)
+        self._online_found[slot] = (site, new, time.time())
+        state["site"], state["page"] = site["id"], new.get("page")
+        fresh = dict(self._web_entry(item, site, key, new), online=True)
+        sub = self.saved_sub(item, key)
+        if sub:
+            fresh["sub"] = sub
+        session.swap(fresh, session.position() or 0)
+        session.send(["show-text", f"Playing from {x['label']}" + ("" if x["site"] in x["label"] else f" on {x['site']}"), 3000])
+        if item["format"] == "series":
+            threading.Thread(target=self._link_around, args=(item["id"], site, key, session), daemon=True).start()
+
+    def _other_site(self, session):
+        """Find it on another site: the episode looked for again on your other sites (not the one
+        playing), the first that has it played from where you are."""
+        entry = session.current()
+        got = self._online_found.get((session.item_id, (entry or {}).get("key")))
+        if not entry or not entry.get("web") or not got:
+            session.send(["show-text", "Another site: only for videos from your own sites", 3000])
+            return
+        key = entry["key"]
+        item = self.store.get(session.item_id)
+        here = got[0]
+        state = self._servers.get((item["id"], key)) or {}
+        ready = [x for x in (state.get("items") or {}).values()
+                 if x["site_id"] != here["id"] and x["state"] == "ok" and x.get("found")]
+        if ready:
+            self.use_server(session, ready[0]["id"])
+            return
+        session.send(["show-text", "Looking for it on your other sites…", 60000])
+        season, episode = self._key_numbers(key)
+        try:
+            site, new = self._online_find(item, season, episode, skip=[here["id"]], fresh=True)
+        except OnlineError as e:
+            session.send(["show-text", f"None of your other sites had it ({e})"[:200], 6000])
+            return
+        sid = f"site|{site['id']}"
+        state = self._servers.setdefault((item["id"], key), {"site": here["id"], "page": got[1].get("page"), "items": {},
+                                                             "order": [], "running": False, "listed": False})
+        if sid not in state["items"]:
+            state["order"].append(sid)
+        state["items"][sid] = {"id": sid, "site_id": site["id"], "site": site["name"], "label": site["name"], "kind": "",
+                               "state": "ok", "found": new, "url": new.get("url"), "at": time.time()}
+        self.use_server(session, sid)
+
+    def _list_servers(self, url):
+        webtools.ADBLOCK = self.settings.get()["adblock"]
+        return webtools.list_servers(url)
+
+    def _servers_menu(self, session, update=False):
+        """The built-in player's Servers menu (uosc), kept up to date while servers are checked."""
+        got = self.server_list(session)
+        marks = {"ok": "✓", "checking": "checking…", "failed": "didn't work", "unchecked": ""}
+        items = []
+        for x in got["items"]:
+            kind = {"sub": "Sub", "dub": "Dub", "raw": "Raw"}.get(x["kind"], "")
+            hint = " · ".join(t for t in (kind, "playing" if x["on"] else marks.get(x["state"], "")) if t)
+            items.append({"title": x["label"], "hint": hint, "active": x["on"], "muted": x["state"] == "failed",
+                          "value": ["script-message", "watchlist-server", x["id"]]})
+        items.append({"title": "Find it on another site", "hint": "", "bold": True,
+                      "value": ["script-message", "watchlist-other-site"]})
+        if got["note"]:
+            items.insert(0, {"title": got["note"], "muted": True, "selectable": False})
+        menu = {"type": "watchlist-servers", "title": "Servers" + (" (checking…)" if got["checking"] else ""),
+                "items": items}
+        session.send(["script-message-to", "uosc", "update-menu" if update else "open-menu", json.dumps(menu)])
+        return got["checking"]
+
+    def _follow_servers_menu(self, session):
+        """While the Servers menu is open and servers are being checked: shown again as they are."""
+        for _ in range(90):
+            time.sleep(2)
+            if session.ended or not self._servers_menu(session, update=True):
+                break
 
     def _switch_version(self, session):
         """Sub to dub (or back) for the episode playing, from where it is; the episodes after
@@ -3077,6 +3309,7 @@ class App:
         shared = {k: v for k, v in (found.get("headers") or {}).items() if k in ("Origin", "User-Agent")}  # (never cookies)
         entry["party"] = dict(self._party_meta(item, key), url=found["url"], referer=found["referer"],
                               headers=shared, sub=found.get("subtitle") or "", track=track,
+                              stream={k: v for k, v in (found.get("stream") or {}).items() if k in ("id", "label", "kind")},
                               site={"name": site["name"], "url": site["url"]},
                               entry=(found.get("entry") or {}).get("url") or "")
         return entry
@@ -3106,7 +3339,18 @@ class App:
         found = None
         try:
             pin = "" if self.scraper.remembered(item["id"], site) else str(meta.get("entry") or "")
-            if pin:
+            want = meta.get("stream") or {}
+            if want.get("label") and not str(want.get("id") or "").startswith(("lang:", "switch:")):
+                # The host's own server (another server is often another copy, seconds apart).
+                try:
+                    found = self.scraper.resolve(site, item, season, episode, pin=pin, remember=False,
+                                                 stream=f"{want.get('id') or 'x'}:{want.get('kind') or track}:{want['label']}")
+                    self._online_found[(item["id"], key)] = (site, found, time.time())
+                except scrape.ScrapeError:
+                    found = None
+            if found and found.get("url"):
+                pass
+            elif pin:
                 found = self.scraper.resolve(site, item, season, episode, pin=pin, track=track)
                 self._online_found[(item["id"], key)] = (site, found, time.time())
             else:
@@ -3287,6 +3531,9 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/web/(\w+)/seek", "web_seek"),
         ("POST", r"/api/web/(\w+)/source", "web_source"),
         ("POST", r"/api/web/(\w+)/version", "web_version"),
+        ("GET", r"/api/web/(\w+)/servers", "web_servers"),
+        ("POST", r"/api/web/(\w+)/server", "web_server"),
+        ("POST", r"/api/web/(\w+)/other-site", "web_other_site"),
         ("GET", r"/api/pair/status", "pair_status"),
         ("POST", r"/api/pair/answer", "pair_answer"),
         ("GET", r"/api/phone", "phone_status"),
@@ -3364,6 +3611,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/items/(\w+)/connections/redo", "sort_again"),
         ("POST", r"/api/sites/test", "test_site"),
         ("POST", r"/api/video-sites/test", "test_video_site"),
+        ("POST", r"/api/video-sites/find-search", "find_video_site_search"),
         ("POST", r"/api/video-sites/diagnose", "diagnose_video_site"),
         ("POST", r"/api/items/(\w+)/scraped", "play_scraped"),
         ("POST", r"/api/items/(\w+)/scraped/unlink", "scraped_unlink"),
@@ -3782,6 +4030,19 @@ class Handler(BaseHTTPRequestHandler):
         """Not working? Try another server (or your next site) - as in the computer's player."""
         session = self._web_session(sid)
         threading.Thread(target=self.app._other_source, args=(session,), daemon=True).start()
+        return {"ok": True}
+
+    def api_web_servers(self, query, sid):
+        return self.app.server_list(self._web_session(sid))
+
+    def api_web_server(self, body, sid):
+        session = self._web_session(sid)
+        threading.Thread(target=self.app.use_server, args=(session, str(body.get("id") or "")), daemon=True).start()
+        return {"ok": True}
+
+    def api_web_other_site(self, body, sid):
+        session = self._web_session(sid)
+        threading.Thread(target=self.app._other_site, args=(session,), daemon=True).start()
         return {"ok": True}
 
     def api_web_version(self, body, sid):
@@ -4648,6 +4909,20 @@ class Handler(BaseHTTPRequestHandler):
             return dict(sites.test_site(site, query), query=query)
         except sites.SiteError as e:
             raise ApiError(str(e)) from e
+
+    def api_find_video_site_search(self, body):
+        """A site given by its home page: its search link, found by searching it."""
+        url = str(body.get("url") or "").strip()
+        if not url:
+            raise ApiError("paste the site's address first")
+        types = body.get("types") or ["anime"]
+        log = []
+        for kind in [t for t in ("anime", "tv", "movie") if t in types] or ["anime"]:
+            got = scrape.find_search(url, kind, renderer=self.app._render_page, log=log)
+            if got:
+                return {"ok": True, "url": got["url"], "how": got["how"], "log": log}
+        return {"ok": False, "log": log, "error": "its search link wasn't found - search for any title on the site and "
+                                                  "paste the results page's address with {title} where the name was"}
 
     def api_test_video_site(self, body):
         try:

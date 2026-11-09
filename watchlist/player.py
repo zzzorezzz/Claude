@@ -236,6 +236,7 @@ class Session:
         self.on_exit = on_exit or (lambda *a: None)
         self.index, self.pos, self.dur, self.paused = first, None, None, False
         self.pos_at = 0.0            # when pos was last reported (time.monotonic())
+        self.stalled, self.stall_seen = False, -1e9   # waiting for its video (and when it last did)
         self.listeners = []          # called with every message from mpv (watch parties)
         self._pending_sub = None
         self._swapping = None        # the path of the episode's other file coming in (swap)
@@ -318,7 +319,7 @@ class Session:
             self.connected = True
             conn.send(["observe_property", 1, "time-pos"], ["observe_property", 2, "duration"],
                       ["observe_property", 3, "playlist-pos"], ["observe_property", 4, "pause"],
-                      ["observe_property", 5, "path"])
+                      ["observe_property", 5, "path"], ["observe_property", 6, "paused-for-cache"])
             for msg in conn.messages():
                 event = msg.get("event")
                 if event == "property-change":
@@ -328,6 +329,11 @@ class Session:
                         self._save()
                     elif name == "duration" and data is not None:
                         self.dur = float(data)
+                    elif name == "paused-for-cache":
+                        if self.pos is not None:
+                            self.pos, self.pos_at = self.position(), time.monotonic()
+                        self.stalled = bool(data)
+                        self.stall_seen = time.monotonic()
                     elif name == "pause":
                         if self.pos is not None:
                             # Estimates of where playback is restart from here.
@@ -384,7 +390,7 @@ class Session:
         """Where playback is now (moving on from the last report while playing)."""
         if self.pos is None:
             return None
-        if self.paused:
+        if self.paused or self.stalled:
             return self.pos
         return self.pos + max(0.0, time.monotonic() - self.pos_at)
 

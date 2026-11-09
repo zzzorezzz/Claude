@@ -98,6 +98,11 @@ mp.register_script_message("ask-sync", function(text)
 end)
 mp.register_script_message("stop-asking", stop_asking)
 
+function from_site_now()
+    local path = mp.get_property("path") or ""
+    return path:find("^https?://") ~= nil and not path:find("^https?://127%.0%.0%.1:%d+/stream/")
+end
+
 -- Your own subtitle file (the app opens a window to choose it) and switching sub / dub:
 -- the app does them, so the player only says so.
 mp.register_script_message("load-subtitle", function()
@@ -106,6 +111,23 @@ mp.register_script_message("load-subtitle", function()
 end)
 mp.register_script_message("switch-version", function()
     mp.commandv("script-message", "watchlist-switch-version")
+end)
+-- Every server of the episode (the app lists them, checking each) and finding it on another
+-- of your sites: the app does them too.
+mp.register_script_message("servers", function()
+    if not from_site_now() then
+        mp.osd_message("Servers: only for videos from your own sites", 2)
+        return
+    end
+    mp.commandv("script-message", "watchlist-servers")
+end)
+mp.register_script_message("other-site", function()
+    if not from_site_now() then
+        mp.osd_message("Another site: only for videos from your own sites", 2)
+        return
+    end
+    mp.osd_message("Looking for it on your other sites…", 3)
+    mp.commandv("script-message", "watchlist-other-site")
 end)
 
 -- Anything loading (an episode opening - found on its site, a torrent's first part, a file -

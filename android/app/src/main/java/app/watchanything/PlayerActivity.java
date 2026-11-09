@@ -68,6 +68,64 @@ public class PlayerActivity extends Activity {
     private android.widget.ProgressBar loadingBar;
 
     /** Every episode of the list (the whole season or show), to play any of them. */
+    /** The episode's servers (the app checks each in the background) and your other sites:
+     *  one tap plays it from where you are. Opened again, it shows how the checking went. */
+    private void chooseServer() {
+        final String sid = session;
+        show("Looking for this episode's servers…", 2500);
+        new Thread(() -> {
+            String json;
+            try {
+                json = Python.getInstance().getModule("watchlist.android").callAttr("servers", sid).toString();
+            } catch (Throwable e) {
+                return;
+            }
+            runOnUiThread(() -> showServers(sid, json));
+        }).start();
+    }
+
+    private void showServers(String sid, String json) {
+        if (isFinishing() || !sid.equals(session)) return;
+        final java.util.List<String> ids = new java.util.ArrayList<>();
+        final java.util.List<String> names = new java.util.ArrayList<>();
+        boolean checking = false;
+        String note = "";
+        try {
+            JSONObject o = new JSONObject(json);
+            checking = o.optBoolean("checking");
+            note = o.optString("note");
+            org.json.JSONArray items = o.optJSONArray("items");
+            for (int i = 0; items != null && i < items.length(); i++) {
+                JSONObject x = items.getJSONObject(i);
+                String state = x.optString("state");
+                String kind = x.optString("kind");
+                String mark = x.optBoolean("on") ? "  ▶ playing" : "ok".equals(state) ? "  ✓" : "failed".equals(state) ? "  ✕"
+                        : "checking".equals(state) ? "  …" : "";
+                ids.add(x.optString("id"));
+                names.add(x.optString("label") + (kind.isEmpty() ? "" : " (" + kind + ")") + mark);
+            }
+        } catch (Exception e) {
+            return;
+        }
+        ids.add("");
+        names.add("🔎  Find it on another site");
+        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this)
+                .setTitle(checking ? "Servers (checking the others…)" : note.isEmpty() ? "Servers" : note)
+                .setItems(names.toArray(new String[0]), (d, which) -> {
+                    final String id = ids.get(which);
+                    show(id.isEmpty() ? "Looking for it on your other sites…" : "Switching server…", 4000);
+                    new Thread(() -> {
+                        try {
+                            if (id.isEmpty()) Python.getInstance().getModule("watchlist.android").callAttr("other_site", sid);
+                            else Python.getInstance().getModule("watchlist.android").callAttr("use_server", sid, id);
+                        } catch (Throwable ignored) {
+                        }
+                    }).start();
+                });
+        if (checking) b.setPositiveButton("Refresh", (d, w) -> chooseServer());
+        b.show();
+    }
+
     private void chooseEpisode() {
         int n = player.getMediaItemCount();
         if (n < 2) return;
@@ -245,11 +303,20 @@ public class PlayerActivity extends Activity {
                 }
             }).start();
         });
+        // Every server of the episode, and the episode on another of your sites.
+        TextView servers = new TextView(this);
+        servers.setText("Servers");
+        servers.setTextColor(Color.WHITE);
+        servers.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        servers.setBackgroundColor(0xB3141826);
+        servers.setPadding(pad * 2, pad, pad * 2, pad);
+        servers.setOnClickListener(v -> chooseServer());
         android.widget.LinearLayout tools = new android.widget.LinearLayout(this);
         tools.setOrientation(android.widget.LinearLayout.HORIZONTAL);
         android.widget.LinearLayout.LayoutParams gap = new android.widget.LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         gap.leftMargin = pad;
+        tools.addView(servers, gap);
         tools.addView(version, gap);
         tools.addView(episodes, gap);
         FrameLayout.LayoutParams corner = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -260,6 +327,7 @@ public class PlayerActivity extends Activity {
         view.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility -> {
             tools.setVisibility(visibility == View.VISIBLE ? View.VISIBLE : View.GONE);
             episodes.setVisibility(player != null && player.getMediaItemCount() > 1 ? View.VISIBLE : View.GONE);
+            servers.setVisibility(player != null && fromSite() ? View.VISIBLE : View.GONE);
         });
         tools.setVisibility(View.GONE);
         setContentView(root);
@@ -501,7 +569,8 @@ public class PlayerActivity extends Activity {
                 o.put("index", player.getCurrentMediaItemIndex())
                         .put("pos", player.getCurrentPosition() / 1000.0)
                         .put("dur", dur == C.TIME_UNSET ? 0 : dur / 1000.0)
-                        .put("paused", !player.getPlayWhenReady());
+                        .put("paused", !player.getPlayWhenReady())
+                        .put("stall", player.getPlayWhenReady() && player.getPlaybackState() == Player.STATE_BUFFERING);
             }
             json = o.toString();
         } catch (Exception e) {
