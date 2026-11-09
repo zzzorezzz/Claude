@@ -176,14 +176,19 @@ CLICK_JS = r"""(() => {
       + ' [data-link], [data-embed], [class*="server"] a, [class*="server"] li, [class*="server"] button, [class*="server-item"], [class*="episode"], a, button, li, span, div')]
       .filter((el) => !el.matches('[role="combobox"], [aria-haspopup]'));
     const label = norm(want.label);
+    // (a name made of several pieces - "sun" "DL" "H-SUB" - reads with or without the spaces between)
+    const squash = (t) => norm(t).replace(/\s+/g, '');
+    const said = (el) => [norm(el.innerText || el.textContent), squash(el.textContent)];
+    const bare = squash(want.label);
     // The button itself, not a box around it: its name exactly, else the smallest match.
     const found = els.filter((el) => {
-      const text = norm(el.textContent);
+      const [text, packed] = said(el);
       const title = norm(el.getAttribute('title') || '');
-      return (text.includes(label) || title.includes(label)) && kindOk(el);
+      return (text.includes(label) || packed.includes(bare) || title.includes(label)) && kindOk(el);
     });
-    const exact = found.filter((el) => norm(el.textContent) === label);
-    const named = want.exact ? found.filter((el) => new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(bed|s)?$`).test(norm(el.textContent))) : [];
+    const exact = found.filter((el) => { const [text, packed] = said(el); return text === label || packed === bare; });
+    const named = want.exact ? found.filter((el) => { const [text, packed] = said(el);
+      return new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(bed|s)?$`).test(text) || packed === bare; }) : [];
     const hit = (want.exact ? named : exact.length ? exact : found).sort((a, b) => norm(a.textContent).length - norm(b.textContent).length)[0];
     if (hit) {
       const clickable = hit.closest('[role="option"], [role="menuitem"], a, button, li, [role="button"]') || hit;
@@ -558,7 +563,7 @@ def _hook(opts, core):
                 kind = header(args.Response.Headers, "Content-Type").lower()
             except Exception:  # noqa: BLE001
                 return
-            if "mpegurl" in kind or "dash+xml" in kind or kind.startswith("video/"):
+            if "mpegurl" in kind or "dash+xml" in kind or (kind.startswith("video/") and kind not in ("video/mp2t", "video/iso.segment")):  # (a playlist's piece isn't the video)
                 h = args.Request.Headers
                 catch(str(args.Request.Uri), {"Referer": header(h, "Referer"), "Origin": header(h, "Origin"),
                                               "User-Agent": header(h, "User-Agent"), "Cookie": header(h, "Cookie")})
@@ -753,6 +758,7 @@ def catch_video(url, timeout=30, click=None):
     def catch(video, headers):
         u = video.lower()
         if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
+                or re.search(r"/(?:tiles?|thumbs?|thumbnails?|sprites?|storyboards?|previews?|trickplay)(?:/|[^/?]*\.m3u8)", u) \
                 or trailer(video):
             return
         if not any(v == video for v, _, _ in found):
@@ -783,6 +789,10 @@ def catch_video(url, timeout=30, click=None):
                 if not click and not videos() and opts.get("servers") and time.time() > deadline - timeout + 15:
                     break                   # (nothing in 15 s, and the page has other servers to try)
             found[:] = videos()
+            if click and click.get("exact") and not click.get("quick") and not opts.get("clicked_at"):
+                # (a server or an episode asked for by name that was never there to press: not
+                # what played by itself instead - that would look like a switch that worked)
+                return {"url": "", "headers": {}, "subs": [], "servers": servers_of(opts, url)}
             if not found:
                 servers = servers_of(opts, url)
                 return {"url": "", "headers": {}, "subs": [], "servers": servers} if servers else None

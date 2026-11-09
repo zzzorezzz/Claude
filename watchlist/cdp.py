@@ -549,6 +549,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
         u = video.lower()
         if webtools.blocked(video) or u.startswith(("blob:", "data:")) or re.search(
                 r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
+                or re.search(r"/(?:tiles?|thumbs?|thumbnails?|sprites?|storyboards?|previews?|trickplay)(?:/|[^/?]*\.m3u8)", u) \
                 or webtools.trailer(video):
             return
         if not any(v == video for v, _, _ in found):
@@ -584,8 +585,8 @@ def catch_video(url, timeout=30, click=None, open_page=None):
                 opts["subs"].append(u)
 
     def on_response(u, mime, headers):
-        if "mpegurl" in mime or "dash+xml" in mime or mime.startswith("video/"):
-            keep(u, headers)
+        if "mpegurl" in mime or "dash+xml" in mime or (mime.startswith("video/") and mime not in ("video/mp2t", "video/iso.segment")):
+            keep(u, headers)                     # (a playlist's piece isn't the video)
         elif ("text/vtt" in mime or "subrip" in mime or "x-ass" in mime or "x-ssa" in mime) and u not in opts["subs"]                 and not u.startswith(("blob:", "data:")):
             opts["subs"].append(u)
 
@@ -618,6 +619,10 @@ def catch_video(url, timeout=30, click=None, open_page=None):
                 if not click and not videos() and opts.get("servers") and time.time() > deadline - timeout + 15:
                     break                   # (nothing in 15 s, and the page has other servers to try)
             found[:] = videos()
+            if click and click.get("exact") and not click.get("quick") and not opts.get("clicked_at"):
+                # (a server or an episode asked for by name that was never there to press: not
+                # what played by itself instead - that would look like a switch that worked)
+                return {"url": "", "headers": {}, "subs": [], "servers": webtools.servers_of(opts, url)}
             if not found:
                 servers = webtools.servers_of(opts, url)
                 return {"url": "", "headers": {}, "subs": [], "servers": servers} if servers else None

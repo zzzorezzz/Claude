@@ -107,3 +107,22 @@ class PartyServerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServerChoiceTest(unittest.TestCase):
+    def test_a_server_chosen_reaches_everyone_but_whoever_chose_it(self):
+        srv = partyserver.PartyServer()
+        self.addCleanup(srv.stop)
+        port = srv.listen(0, "127.0.0.1")
+        host = party.Party(f"127.0.0.1:{port}", "room", "Ann", "host").connect()
+        self.addCleanup(host.leave)
+        guest = party.Party(f"127.0.0.1:{port}", "room", "Ben", "guest").connect()
+        self.addCleanup(guest.leave)
+        heard = {"Ann": [], "Ben": []}
+        host.on_server = lambda p, choice: heard["Ann"].append(choice)
+        guest.on_server = lambda p, choice: heard["Ben"].append(choice)
+        self.assertTrue(wait_for(lambda: sorted(host.people) == ["Ann", "Ben"]))
+        choice = {"k": "1:1", "h": "bingr.one", "l": "Edge", "d": "", "w": 0}
+        guest.share_server(choice)                       # (a guest can choose one too)
+        self.assertTrue(wait_for(lambda: heard["Ann"] == [choice]))
+        self.assertEqual(heard["Ben"], [])
