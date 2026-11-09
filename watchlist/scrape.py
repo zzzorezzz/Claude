@@ -323,6 +323,7 @@ class _Page(html.parser.HTMLParser):
     def __init__(self, base):
         super().__init__(convert_charrefs=True)
         self.base = base
+        self.url = base            # (the page's own address, whatever its <base> says)
         self.links = []            # {"href", "text", "title", "num", "attrs", "ctx"}
         self.servers = []          # {"label", "url", "attrs", "ctx"}: an episode's streams
         self._stack = []           # (tag, its class/id/data words) of the elements we're inside
@@ -634,6 +635,8 @@ def candidates(page, search_page):
         slug = urllib.parse.unquote(urllib.parse.urlsplit(e["url"]).path.rstrip("/").split("/")[-1])
         slug = re.sub(r"[-_]+", " ", re.sub(r"\.\w{2,5}$", "", slug))
         slug = re.sub(r"\b[0-9a-f]{6,}\b|\b\d{4,}\b", " ", slug)      # ids in the address
+        # (...ids of letters and digits - "23ujrm" - and the episode an address is for)
+        slug = re.sub(r"\b(?=[a-z]*\d)(?=\d*[a-z])[a-z0-9]{5,10}\b|\b(?:episode|ep)\s*\d+\b", " ", slug, flags=re.I)
         names = list(dict.fromkeys(e["names"] + ([slug] if slug.strip() else [])))
         years = re.findall(r"\b(19[2-9]\d|20[0-4]\d)\b", " ".join(e["names"]) + " " + e["url"])
         # The name with the most letters ("Death Note", not "37 37 37 TV" from a card's numbers).
@@ -736,9 +739,8 @@ def episode_links(page):
     # Other titles' cards on the page ("EP 13" - how many episodes another show has) aren't
     # this one's episodes: when there's a run of links carrying this title's own id or name
     # in their address (/anime/269 -> /watch/269/1, /watch/269/2...), only those count.
-    own_tokens = [t for t in re.split(r"[/?&=._-]+", urllib.parse.urlsplit(page.base or "").path.lower())
-                  if (t.isdigit() and len(t) >= 2) or (len(t) >= 5 and t not in ("anime", "watch", "series", "movie",
-                                                                                  "movies", "shows", "title", "details"))]
+    generic = _GENERIC_WORDS
+    own_tokens = _own_tokens(getattr(page, "url", page.base))
 
     def own(href):
         segs = set(re.split(r"[/?&=._-]+", urllib.parse.urlsplit(href).path.lower()))
@@ -748,6 +750,15 @@ def episode_links(page):
         if len({f[1] for f, _, _ in mine}) >= 3:
             strong = [x for x in strong if own(x[1])]
             weak = [x for x in weak if own(x[1])]
+    # A link whose address names another title ("/watch/other-show-episode-1-x8") while this
+    # page's own name is in its address too ("/watch/bleach-episode-1-g1"): another show's episode.
+    own_words = {t for t in own_tokens if t.isalpha()}
+
+    def names_another(href):
+        return _names_another(href, own_words)
+    if own_words:
+        strong = [x for x in strong if not names_another(x[1])]
+        weak = [x for x in weak if not names_another(x[1])]
 
     # A title page can contain several mirrors of the first few episodes as
     # well as the real episode index.  Do not let the first mirror for Episode
@@ -780,6 +791,27 @@ def episode_links(page):
             for found, href in best:
                 out.setdefault(found, href)
     return out
+
+
+_GENERIC_WORDS = {"anime", "watch", "series", "movie", "movies", "shows", "title", "details", "episode", "episodes",
+                  "season", "seasons", "online", "stream", "free", "english", "dubbed", "subbed", "watchseries"}
+
+
+def _own_tokens(url):
+    """The words and ids of a title page's address that are its own (not "watch", "episode"...)."""
+    return [t for t in re.split(r"[/?&=._-]+", urllib.parse.urlsplit(url or "").path.lower())
+            if (t.isdigit() and len(t) >= 2) or (len(t) >= 5 and t not in _GENERIC_WORDS)]
+
+
+def _names_another(href, own_words):
+    """Whether an address names another title ("/watch/other-show-episode-1-x8") than the one
+    whose own words are given (from "/watch/bleach-episode-1-g1")."""
+    if not own_words:
+        return False
+    last = urllib.parse.unquote(urllib.parse.urlsplit(href).path.rstrip("/").split("/")[-1].lower())
+    words = [w for w in re.split(r"[^a-z0-9]+", re.split(r"[-_]?(?:episode|ep)[-_]?\d", last)[0])
+             if len(w) >= 3 and w.isalpha() and w not in _GENERIC_WORDS]
+    return len(words) >= 2 and not (set(words) & set(own_words))
 
 
 def pick_episode(eps, season, episode, absolute=None):
@@ -1892,7 +1924,10 @@ class Scraper:
                 except (ScrapeError, ValueError):
                     pass
         if not eps:
+            own_words = {t for t in _own_tokens(entry_url) if t.isalpha()}
             for link in watch_links(page, final):
+                if _names_another(link, own_words):
+                    continue                         # (another title's "Watch" - a recommendation)
                 t2, f2 = self._read(link, lambda p: bool(episode_links(p)), referer=final)
                 eps = episode_links(parse(t2, f2))
                 if eps:

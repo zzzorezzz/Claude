@@ -350,3 +350,13 @@ class EpisodeButtonTest(unittest.TestCase):
             self.assertEqual(scrape._episode_button("https://site.test/watch-x.html", 5, 15), "S05-E15")
             self.assertEqual(scrape._episode_button("https://site.test/watch-x.html", 1, 1), "S01-E01|Season 1")
             self.assertIsNone(scrape._episode_button("https://site.test/watch-x.html", None, 400))
+
+
+class AnotherShowsEpisodeTest(unittest.TestCase):
+    def test_a_recommended_shows_episode_isnt_this_ones(self):
+        page = scrape.parse('<a href="/watch/anila-to-cocora-episode-1-8so0pl">Episode 1</a>',
+                            "https://site.test/watch/bleach-episode-1-g1jm73")
+        self.assertEqual(scrape.episode_links(page), {})
+        own = scrape.parse("".join(f'<a href="/watch/bleach-episode-{n}-g1jm73">Episode {n}</a>' for n in (1, 2, 3)),
+                           "https://site.test/watch/bleach-episode-1-g1jm73")
+        self.assertEqual(scrape.pick_episode(scrape.episode_links(own), None, 2), "https://site.test/watch/bleach-episode-2-g1jm73")

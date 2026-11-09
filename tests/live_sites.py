@@ -94,7 +94,8 @@ def main(argv):
                 reached, why = play5(mpv, found, script)
                 row.update(played=reached >= 4.5, reached=round(reached, 2), page=found.get("page"),
                            subtitle=bool(found.get("subtitle")), why=why,
-                           server=(found.get("stream") or {}).get("label") or "")
+                           server=(found.get("stream") or {}).get("label") or "",
+                           opened=((found.get("entry") or {}).get("name") or "")[:60])
                 if servers and not any(r["site"] == site["name"] for r in rows):
                     row["servers"] = check_servers(s, site, item, season, episode, found, mpv, script)
             except Exception as e:  # noqa: BLE001
