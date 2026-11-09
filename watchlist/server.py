@@ -2681,6 +2681,11 @@ class App:
                 if e.choices and choices is None:
                     choices = {"site": site["id"], "site_name": site["name"], "choices": e.choices, "question": str(e)}
                 continue
+            except Exception as e:  # noqa: BLE001 - one site's trouble isn't the others' (as in the race)
+                import traceback
+                traceback.print_exc()
+                errors.append(f"{site['name']}: {e}")
+                continue
             self._online_linked(item, key, site)
             return site, found
         raise OnlineError("; ".join(errors) or "no video site in Settings has it", choices, page)

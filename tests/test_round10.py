@@ -119,7 +119,7 @@ class PageTest(unittest.TestCase):
             got = scraper.resolve(site, item, 1, 1)
         self.assertEqual(got["url"], "https://cdn.test/master.m3u8")
         # (Sub chosen on the page when it has a switch named that; else what it plays by itself)
-        scraper.catch.assert_called_once_with("https://site.test/watch/ep-1", click={"label": "Sub", "kind": "sub", "exact": True})
+        scraper.catch.assert_called_once_with("https://site.test/watch/ep-1", click={"label": "Sub", "kind": "sub", "exact": True, "quick": True})
 
     def test_anikoto_sub_and_dub_servers_come_from_its_server_list(self):
         page = "https://anikototv.to/watch/show-x1/ep-2"

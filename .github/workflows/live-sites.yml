@@ -62,7 +62,7 @@ jobs:
           PY
 
       - name: More sites the finder wasn't made for (everythingmoe's lists), three titles each
-        if: "!contains(github.event.head_commit.message, '[diag]')"
+        if: "always() && !contains(github.event.head_commit.message, '[diag]')"
         continue-on-error: true
         env:
           WATCHLIST_CHROMIUM_HOME: chromium-home

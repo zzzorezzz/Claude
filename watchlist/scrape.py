@@ -725,6 +725,9 @@ def episode_links(page):
             found, bare = (None, int(_EP_TEXT[1].search(text).group(1))), True
         if not found or found[1] <= 0 or re.search(r"\b(next|prev|previous)\b", link["text"], re.I):
             continue
+        if (bare or found[0] is None) and 1900 <= found[1] <= 2100 and re.search(r"\byears?\b|(?<!\d)(19|20)\d\d(?!\d)", href + " " + text, re.I) \
+                and not re.search(r"\b(?:episode|ep)\b", text, re.I):
+            continue                     # (a site's "2025" / "2024" year links, not episodes)
         if bare:
             weak.append((found, href, link))
         else:
@@ -883,6 +886,39 @@ def _page_title(url):
         return False if re.search(r"\b(404|410)\b", str(e)) else ""
     m = re.search(r"<title[^>]*>([^<]*)</title>", text, re.I)
     return html.unescape(m.group(1)).strip() if m else ""
+
+
+# An episode that's a button on the title's page: the page's address + CLICK_MARK + its name.
+CLICK_MARK = "#wa-press="
+
+
+def _episode_button(url, season, episode):
+    """The name of the button for an episode on a title's page ("S01-E01", "Episode 1"), when
+    its episodes are buttons there rather than links; else None."""
+    try:
+        text, _ = fetch(url, timeout=10)
+    except ScrapeError:
+        return None
+    labels = [html.unescape(m.group(1)).strip() for m in
+              re.finditer(r"<(?:button|li|span|div|a)\b[^>]*(?:episode|ep-|data-ep|idepisode)[^>]*>\s*([^<]{1,30}?)\s*<", text, re.I)]
+    for label in labels:
+        m = re.fullmatch(r"(?:s(?:eason)?\s*0*(\d{1,2})\s*[-:x. ]?\s*)?e(?:p(?:isode)?)?\.?\s*0*(\d{1,4})(?:\s*[:\-].*)?", label, re.I) \
+            or re.fullmatch(r"0*(\d{1,4})", label)
+        if not m:
+            continue
+        s, e = (m.group(1), m.group(2)) if m.lastindex and m.lastindex >= 2 else (None, m.group(1))
+        if int(e) == episode and (season is None or s is None or int(s) == season):
+            return label
+    # Only another season's buttons shown ("S05-E16"): the season's own button pressed first, then
+    # the episode's, named the same way ("S01-E01").
+    shaped = next((x for x in labels if re.fullmatch(r"[Ss]\d{1,2}\s*[-x. ]?\s*[Ee]\d{1,4}", x)), None)
+    if shaped and season:
+        nums = re.findall(r"\d+", shaped)
+        name = re.sub(r"\d+", "{}", shaped, count=2).format(str(season).zfill(len(nums[0])), str(episode).zfill(len(nums[1])))
+        tab = re.search(r"<(?:button|li|a|span|div)\b[^>]*season[^>]*>\s*(Season\s*0*" + str(season) + r")\s*<", text, re.I)
+        if tab:
+            return f"{name}|{html.unescape(tab.group(1)).strip()}"
+    return None
 
 
 def _has_id(url, tid):
@@ -1603,7 +1639,14 @@ class Scraper:
         self._here.log = value
 
     def _renderer(self):
-        return self.render if self.render and self.can_render() else None
+        if not (self.render and self.can_render()):
+            return None
+        render = self.render
+
+        def safe(url):
+            got = render(url)
+            return got if got and isinstance(got[0], str) else None      # (a page that came back empty: not read)
+        return safe
 
     def _catcher(self):
         return self.catch if self.catch and self.can_catch() else None
@@ -1623,7 +1666,7 @@ class Scraper:
         if enough(parse(text, final)) or not self._renderer():
             return text, final
         self._note(f"Nothing usable in {final} as it is - reading it after its scripts have run")
-        got = self.render(url)
+        got = self._renderer()(url)
         if got:
             if cloudflare_check(got[0]):
                 raise ScrapeError("the site shows a Cloudflare check (\"Verify you are human\") instead of this page: "
@@ -1696,7 +1739,7 @@ class Scraper:
             if weak and self._renderer():
                 # Results the site only shows with JavaScript (the page as it is may hold
                 # nothing but its menus: "Trending", "Schedule"...).
-                got = self.render(url)
+                got = self._renderer()(url)
                 if got:
                     shown = candidates(parse(got[0], got[1]), got[1])
                     if shown:
@@ -1911,6 +1954,11 @@ class Scraper:
                 url = derive_episode(eps, episode, season)  # (another season, from the one shown)
                 if url and not _exists(url, final):
                     url = None
+            if not url and not eps:
+                button = _episode_button(final, season if tv_season else None, episode)
+                if button:
+                    url = f"{final.split('#')[0]}{CLICK_MARK}{urllib.parse.quote(button)}"
+                    self._note(f"The episodes are buttons on the page: pressing \"{button}\" there")
             if not url and not eps and (episode == 1 or idx["itself"] or tv_season is not None):
                 # The title's page plays its episodes itself, chosen by ?ep= (Miruro, ani.pm),
                 # or by ?s= and ?e= (TV shows on a site keyed by TMDB's ids).
@@ -2010,6 +2058,10 @@ class Scraper:
             page_url, entry, others = self._json_api_episode(site, item, season, episode, pin)
         else:
             page_url, entry, others = self.episode_page(site, item, season, episode, pin)
+        press = None
+        if CLICK_MARK in page_url:
+            page_url, _, press = page_url.partition(CLICK_MARK)
+            press = urllib.parse.unquote(press)
         out = {"page": page_url, "entry": entry, "others": others, "site": site["name"], "url": "", "referer": "",
                "headers": {}, "subtitle": "", "streams": [], "stream": None, "qualities": [], "quality": ""}
         self._note(f"The episode's page: {page_url}")
@@ -2054,8 +2106,17 @@ class Scraper:
             # the last choice made there would start with the dub after one was played) - an
             # anime's: a show's or film's page has no Sub to press (and looking for one is slow).
             switch = None if auto_url != page_url or not anime else {"id": "switch:sub", "label": "Sub", "kind": "sub",
-                                                                     "url": "", "how": "click", "exact": True}
+                                                                     "url": "", "how": "click", "exact": True, "quick": True}
+            if press:
+                label, _, first = press.partition("|")
+                switch = {"id": "episode", "label": label, "kind": "", "url": "", "how": "click", "exact": True}
+                if first:
+                    switch["first"] = first           # (its season's button, pressed before it)
             got = self._catch_stream(auto_url, switch)
+            if not got and switch and switch["id"] == "switch:sub":
+                # (pressing its Sub got nothing: the page as it plays by itself - Sub, on most sites)
+                switch = None
+                got = self._catch_stream(auto_url, None)
             auto_missed = not got and switch is None and auto_url == page_url
             listed = [] if got else getattr(self._here, "missed_servers", [])
             if got:
@@ -2279,6 +2340,10 @@ class Scraper:
         click = None
         if x and x["how"] != "page":
             click = {"label": x["label"], "kind": x["kind"], "exact": bool(x.get("exact"))}
+            if x.get("quick"):
+                click["quick"] = True                  # (a nicety: not worth the full half minute)
+            if x.get("first"):
+                click["first"] = x["first"]
             if x.get("frame"):
                 click["frame"] = x["frame"]            # (a server listed in another site's player)
         caught = self.catch(target, click=click)

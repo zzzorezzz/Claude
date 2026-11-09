@@ -164,7 +164,9 @@ CLICK_JS = r"""(() => {
     }
     const triggers = [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], [aria-haspopup="true"], [aria-haspopup="dialog"]')]
       .filter((el) => !opened.has(el) && (/^(sub|dub|raw|soft ?sub|hard ?sub|japanese|english|audio|language|server)/i.test((el.textContent || '').trim())
-        || /\b(servers?|sources?|mirrors?)\b/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${norm((el.parentElement || {}).textContent || '').slice(0, 40)}`)));
+        // (a "Server" dropdown named by its label or the words beside it: only when a server is
+        // wanted - looking for Sub / Dub, a server list is no place to open)
+        || (!/^(sub|dub|raw)$/i.test(want.label) && /\b(servers?|sources?|mirrors?)\b/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${norm((el.parentElement || {}).textContent || '').slice(0, 40)}`))));
     if (triggers.length) { opened.add(triggers[0]); triggers[0].click(); return 'opened'; }
     return '';
   };
@@ -194,8 +196,17 @@ CLICK_JS = r"""(() => {
     if (want.exact && !d && !opened.size && tries >= 6) { fetch('__NO_CLICK__').catch(() => {}); return; }   // (no such switch here)
     if (tries < 25) setTimeout(pick, d === 'opened' ? 350 : 600);
   };
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(pick, 400));
-  else setTimeout(pick, 400);
+  // A button to press before it (an episode's season, whose episodes only show once it's chosen).
+  const first = (n) => {
+    if (!want.first) { pick(); return; }
+    const name = norm(want.first);
+    const el = [...document.querySelectorAll('button, a, li, [role="tab"], [role="button"], span, div')]
+      .filter((e) => norm(e.textContent) === name).sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length)[0];
+    if (el) { try { el.click(); } catch (e) { /* fine */ } setTimeout(pick, 1500); return; }
+    if (n < 15) setTimeout(() => first(n + 1), 600); else pick();
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(() => first(0), 400));
+  else setTimeout(() => first(0), 400);
 })();""".replace("__CLICKED__", CLICKED).replace("__NO_CLICK__", NO_CLICK)
 
 # The servers (sources, mirrors) an episode's page offers, read in every frame of it - the
@@ -706,7 +717,12 @@ def render(url, timeout=20, settle=2.5):
                 if count == last:
                     break
                 last = count
-            return win.evaluate_js("document.documentElement.outerHTML"), win.get_current_url() or url
+            page = win.evaluate_js("document.documentElement.outerHTML")
+            if not isinstance(page, str):
+                # (it was moving to another address just then - ShuttleTV's .su to .pk: once more)
+                time.sleep(settle)
+                page = win.evaluate_js("document.documentElement.outerHTML")
+            return (page, win.get_current_url() or url) if isinstance(page, str) else None
         except Exception:  # noqa: BLE001 - the page or the window went away
             return None
         finally:
@@ -730,6 +746,8 @@ def catch_video(url, timeout=30, click=None):
         return None
     found, got = [], threading.Event()
     click = learned_click(url, click)
+    if click and click.get("quick"):
+        timeout = min(timeout, 15)
     opts = {"adblock": True, "click": click}
 
     def catch(video, headers):

@@ -340,3 +340,13 @@ class NothingPlayedTest(unittest.TestCase):
         clicks = [c.kwargs["click"] for c in s.catch.call_args_list]
         self.assertEqual(clicks[1]["label"], "Backup")          # (the other server first, not the one that didn't play)
         self.assertEqual(clicks[1]["frame"], "embed.test")
+
+
+class EpisodeButtonTest(unittest.TestCase):
+    def test_episodes_that_are_buttons_are_pressed(self):
+        page = ('<button class="btn season-btn" data-season="1"> Season 1 </button>'
+                '<button class="btn episode-btn" idepisode="a1"> S05-E16 </button><button class="btn episode-btn" idepisode="a2"> S05-E15 </button>')
+        with mock.patch.object(scrape, "fetch", return_value=(page, "https://site.test/watch-x.html")):
+            self.assertEqual(scrape._episode_button("https://site.test/watch-x.html", 5, 15), "S05-E15")
+            self.assertEqual(scrape._episode_button("https://site.test/watch-x.html", 1, 1), "S01-E01|Season 1")
+            self.assertIsNone(scrape._episode_button("https://site.test/watch-x.html", None, 400))

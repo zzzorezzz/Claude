@@ -541,6 +541,8 @@ def catch_video(url, timeout=30, click=None, open_page=None):
     open_page = open_page or _chromium_page
     page = None
     click = webtools.learned_click(url, click)
+    if click and click.get("quick"):
+        timeout = min(timeout, 15)
     found, got, opts = [], threading.Event(), {"subs": []}
 
     def keep(video, headers):
