@@ -415,7 +415,17 @@ class PartyServerTest(ServerListTest):
         app._servers.clear()
         party.share_server.reset_mock()
         with mock.patch.object(app, "use_server") as use:
-            app._party_server(party, choice)
+            app._party_server_choice(party, choice)
         sid = use.call_args.args[1]
         self.assertEqual(app._servers[(self.item["id"], "1:1")]["items"][sid]["label"], "Edge")
         self.assertEqual(use.call_args.kwargs, {"share": False})
+
+
+class NoClashTest(unittest.TestCase):
+    def test_the_app_has_no_two_methods_of_the_same_name(self):
+        import ast
+        from pathlib import Path
+        tree = ast.parse(Path(__file__).resolve().parent.parent.joinpath("watchlist", "server.py").read_text(encoding="utf-8"))
+        for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+            names = [f.name for f in cls.body if isinstance(f, ast.FunctionDef)]
+            self.assertEqual(sorted({n for n in names if names.count(n) > 1}), [], cls.name)

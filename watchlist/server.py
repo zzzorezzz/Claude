@@ -779,7 +779,7 @@ class App:
 
     def _start_party(self, party):
         party.on_role = self._party_role
-        party.on_server = self._party_server
+        party.on_server = self._party_server_choice
         with self._party_lock:
             old, self.party = self.party, party
         if old and old.active:
@@ -2503,7 +2503,7 @@ class App:
             party.share_server({"k": key, "h": urllib.parse.urlsplit(site["url"]).netloc.lower().removeprefix("www."),
                                 "l": "" if whole else x["label"], "d": "" if whole else x["kind"], "w": 1 if whole else 0})
 
-    def _party_server(self, party, choice):
+    def _party_server_choice(self, party, choice):
         """Someone in the party chose another server (or site) for the episode playing: this
         player moves to it too, from where it is (the same server on the same site)."""
         session = party.session
