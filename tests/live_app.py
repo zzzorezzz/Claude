@@ -105,10 +105,14 @@ def one_site(site, root):
             t = time.time()
             app.use_server(s, pick["id"])
             row["switched_to"] = pick["label"] + (f" ({pick['kind']})" if pick["kind"] else "")
-            # (playing again: past where it was, or on from wherever the new copy starts)
+            # (playing again: the new copy's position moving on, from about where it was)
+            seen = None
             while time.time() - t < 90 and not s.ended:
-                if s.loaded and s.pos and abs(s.pos - before) < 30 and time.time() - t > 3:
-                    break
+                if s.loaded and s.pos and abs(s.pos - before) < 60 and time.time() - t > 3:
+                    if seen is None:
+                        seen = s.pos
+                    elif s.pos > seen + 1:
+                        break
                 time.sleep(0.5)
             row["switch_secs"] = round(time.time() - t, 1)
             row["switch_played_20s"] = _goes_on(s)

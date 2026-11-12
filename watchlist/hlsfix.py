@@ -34,6 +34,11 @@ def _get(url, headers, limit=None, timeout=20):
         return r.read(limit) if limit else r.read()
 
 
+def _open(url, headers, timeout=60):
+    """The answer to read as it comes (read(n), close())."""
+    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
+
+
 def _uris(text):
     """The addresses a playlist points to (its lines, and URI="..." in its tags)."""
     for line in text.splitlines():
@@ -107,32 +112,62 @@ def _sync(data):
     return None
 
 
-def serve(sid, url, base):
-    """(content type, body) for a playlist or piece asked for through the app, or None."""
+def open_piece(sid, url, base):
+    """(content type, body) for a playlist asked for through the app; (content type, chunks) for a
+    piece - its bytes passed on as they come, without the picture in front of them; or None."""
     with _lock:
         s = _streams.get(sid)
     if not s:
         return None
-    data = _get(url, s["headers"], timeout=60)
-    if data.lstrip()[:7] == b"#EXTM3U":
-        text = data.decode("utf-8", "replace")
-
-        def point(u):
-            return _local(base, sid, urllib.parse.urljoin(url, u))
-        out = []
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                line = point(stripped)
-            else:
-                line = re.sub(r'URI="([^"]+)"', lambda m: f'URI="{point(m.group(1))}"', line)
-            out.append(line)
-        return "application/vnd.apple.mpegurl", ("\n".join(out) + "\n").encode("utf-8")
-    if data.startswith(PICTURES):
-        start = _sync(data)
+    r = _open(url, s["headers"])
+    try:
+        head = r.read(65536)
+        if head.lstrip()[:7] == b"#EXTM3U":
+            return _playlist(sid, url, base, head + r.read())
+    except BaseException:
+        r.close()
+        raise
+    if head.startswith(PICTURES):
+        start = _sync(head)
         if start is not None:
-            data = data[start:]
-    return "video/mp2t", data
+            head = head[start:]
+
+    def chunks():
+        try:
+            yield head
+            while True:
+                more = r.read(65536)
+                if not more:
+                    return
+                yield more
+        finally:
+            r.close()
+    return "video/mp2t", chunks()
+
+
+def serve(sid, url, base):
+    """(content type, body) for a playlist or piece asked for through the app, or None."""
+    got = open_piece(sid, url, base)
+    if got is None or isinstance(got[1], bytes):
+        return got
+    return got[0], b"".join(got[1])
+
+
+def _playlist(sid, url, base, data):
+    """A playlist with its addresses pointed at the app."""
+    text = data.decode("utf-8", "replace")
+
+    def point(u):
+        return _local(base, sid, urllib.parse.urljoin(url, u))
+    out = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            line = point(stripped)
+        else:
+            line = re.sub(r'URI="([^"]+)"', lambda m: f'URI="{point(m.group(1))}"', line)
+        out.append(line)
+    return "application/vnd.apple.mpegurl", ("\n".join(out) + "\n").encode("utf-8")
 
 
 def playable(found, base):

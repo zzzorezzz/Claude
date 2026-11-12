@@ -2394,7 +2394,9 @@ class App:
             state = self._servers[slot] = {"site": site["id"], "page": found.get("page"), "items": {}, "order": [],
                                            "running": False, "listed": False}
         playing = (found.get("stream") or {}).get("id")
-        if start and not state["running"]:
+        if start and not state["running"] and time.time() - state.get("checked_at", 0) > self.FOUND_FOR:
+            # (once per episode - a page with no other servers isn't listed again and again while the
+            # list is open - and again once what was found has run out)
             state["running"] = True
             threading.Thread(target=self._check_servers, args=(session.item_id, key, slot), daemon=True).start()
         items = []
@@ -2477,6 +2479,7 @@ class App:
         except Exception:  # noqa: BLE001 - the list shows what was checked; the rest stays unchecked
             pass
         finally:
+            state["checked_at"] = time.time()
             state["running"] = False
 
     def use_server(self, session, server_id, share=True):
@@ -3990,12 +3993,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
         base = f"http://127.0.0.1:{self.server.server_address[1]}/hls/{m.group(1)}"
         try:
-            got = hlsfix.serve(m.group(2), target, base)
+            got = hlsfix.open_piece(m.group(2), target, base)
         except Exception as e:  # noqa: BLE001 - the site's answer, passed on
             return self._send(HTTPStatus.BAD_GATEWAY, str(e).encode("utf-8", "replace"), "text/plain")
         if not got:
             return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
-        return self._send(HTTPStatus.OK, got[1], got[0])
+        if isinstance(got[1], bytes):
+            return self._send(HTTPStatus.OK, got[1], got[0])
+        # A piece: passed on as it comes (the answer ends when the connection closes).
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", got[0])
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            for chunk in got[1]:
+                if self.command != "HEAD":
+                    self.wfile.write(chunk)
+        except OSError:
+            pass                                  # (the player let go of it)
+        finally:
+            got[1].close()
 
     STREAM_TYPES = {".mkv": "video/x-matroska", ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
                     ".avi": "video/x-msvideo", ".mov": "video/quicktime", ".ts": "video/mp2t"}

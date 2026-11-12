@@ -218,7 +218,8 @@ class ServersTest(unittest.TestCase):
 
 class ServerListTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        # (the background matching of the season can still be writing as the test ends)
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         self.app = App(self.tmp.name)
         self.app.settings.update({"video_sites": [{"name": "Site", "url": "https://site.test/explore?q={title}", "types": ["tv"]}]})
