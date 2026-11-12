@@ -2597,12 +2597,16 @@ class Scraper:
     def episode_servers(self, found):
         """Every server of the episode's page found ([{"id", "label", "kind"}]): those found with it,
         else the ones its player lists (the page opened again, hidden)."""
-        if found.get("streams"):
-            return found["streams"]
+        have = found.get("streams") or []
+        if have and {x["kind"] for x in have} != {"sub"}:
+            return have
         if not found.get("page") or not self.servers or not self.can_catch():
-            return []
+            return have
+        # (only sub servers seen while it played: its page listed again - a Sub / Dub menu's other
+        # language has its own servers)
         listed, _ = clicked_streams(self.servers(found["page"]) or [])
-        return listed
+        seen = {(x["label"].lower(), x["kind"]) for x in have}
+        return have + [x for x in listed if (x["label"].lower(), x["kind"]) not in seen]
 
     def diagnose(self, site, item, season=None, episode=None):
         """The site's Test: everything again from scratch (nothing remembered is

@@ -79,6 +79,21 @@ class AlikeNamesTest(unittest.TestCase):
         self.assertEqual(s.remembered(ITEM["id"], SITE)["entries"][""]["url"], S1)    # (kept from now on)
 
 
+class ServersListTest(unittest.TestCase):
+    def test_only_sub_servers_seen_its_page_is_listed_again(self):
+        s = scrape.Scraper(tempfile.mkdtemp())
+        s.servers = mock.Mock(return_value=[{"label": "sun DL S-SUB", "kind": "sub", "on": True, "frame": ""},
+                                            {"label": "sun DL", "kind": "dub", "on": False, "frame": ""}])
+        have = [{"id": "click||sun DL S-SUB|sub", "label": "sun DL S-SUB", "kind": "sub"}]
+        got = s.episode_servers({"page": "https://site.test/watch/1?ep=1", "streams": have})
+        self.assertEqual([(x["label"], x["kind"]) for x in got], [("sun DL S-SUB", "sub"), ("sun DL", "dub")])
+        # Sub and dub seen already: nothing more to look for.
+        s.servers.reset_mock()
+        both = have + [{"id": "4:dub:HD-1", "label": "HD-1", "kind": "dub"}]
+        self.assertEqual(s.episode_servers({"page": "https://site.test/watch/1?ep=1", "streams": both}), both)
+        s.servers.assert_not_called()
+
+
 class HiddenPagesTest(unittest.TestCase):
     def test_one_is_always_left_for_what_you_ask(self):
         """The app's background look-ups take two of the three hidden pages at most."""
