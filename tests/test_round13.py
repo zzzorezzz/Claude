@@ -103,6 +103,11 @@ class ServersListTest(unittest.TestCase):
 class HiddenPagesTest(unittest.TestCase):
     def test_one_is_always_left_for_what_you_ask(self):
         """The app's background look-ups take two of the three hidden pages at most."""
+        # (pages of its own: other tests' look-ups may still be going)
+        for name, n in (("_lock", 3), ("_background", 2)):
+            patch = mock.patch.object(webtools, name, threading.BoundedSemaphore(n))
+            patch.start()
+            self.addCleanup(patch.stop)
         held, release = [], threading.Event()
 
         def behind():

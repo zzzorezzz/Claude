@@ -657,28 +657,47 @@ TYPE_SEARCH_JS = r"""(() => {
   const boxes = () => [...document.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]), [contenteditable=true][role=searchbox]')]
     .filter((el) => el.type === 'search' || SEARCHY.test([el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.className, el.getAttribute('role')].join(' ')));
   const fire = (el, type, init) => el.dispatchEvent(new (type.startsWith('key') ? KeyboardEvent : Event)(type, Object.assign({ bubbles: true, cancelable: true }, init || {})));
+  const named = () => [...document.querySelectorAll('a[href]')].filter((a) => shown(a)
+    && (a.textContent + ' ' + a.href).toLowerCase().includes(q.toLowerCase())).length;
   const type = (box) => {
+    const before = named();
     box.focus();
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     try { setter.call(box, q); } catch (e) { box.value = q; }
     fire(box, 'input'); fire(box, 'change');
     setTimeout(() => {
+      // (results shown as it's typed, and no search form to go to: left as they are - Enter can close them)
+      if (named() > before && !box.closest('form[action]')) return;
       const enter = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13 };
       fire(box, 'keydown', enter); fire(box, 'keypress', enter); fire(box, 'keyup', enter);
       setTimeout(() => {
         const form = box.closest('form');
         if (form && location.href === start) { try { form.requestSubmit ? form.requestSubmit() : form.submit(); } catch (e) { /* fine */ } }
       }, 600);
-    }, 300);
+    }, 1500);
   };
   const start = location.href;
-  let box = boxes().find(shown);
-  if (box) { type(box); return; }
-  // (a magnifier button that opens the box)
-  const opener = [...document.querySelectorAll('button, a, [role=button], label, i, span, div')].find((el) => shown(el)
-    && el.children.length <= 2 && SEARCHY.test([el.getAttribute('aria-label'), el.title, el.className && String(el.className), el.id, (el.textContent || '').trim().slice(0, 12)].join(' ')));
-  if (opener) { try { opener.click(); } catch (e) { /* fine */ } }
-  setTimeout(() => { box = boxes().find(shown) || boxes()[0]; if (box) type(box); }, 700);
+  // (a magnifier button that opens the box - or only its icon says so: "lucide-search")
+  const open = () => {
+    const opener = [...document.querySelectorAll('button, a, [role=button], label, i, span, div, svg')].find((el) => shown(el)
+      && el.children.length <= 2 && SEARCHY.test([el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('class'),
+        el.id, el.tagName === 'svg' ? '' : (el.textContent || '').trim().slice(0, 12)].join(' ')));
+    const press = opener && (opener.closest('button, a, [role=button], label') || opener);
+    if (press) { try { press.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); } catch (e) { /* fine */ } }
+    return !!press;
+  };
+  // (a page its scripts are still drawing: looked at again, for a few seconds)
+  let tries = 0;
+  const attempt = () => {
+    const box = boxes().find(shown);
+    if (box) { type(box); return; }
+    if (tries % 3 === 0) open();          // (pressed again: a page not ready yet doesn't answer the first)
+    tries += 1;
+    if (tries < 12) { setTimeout(attempt, 500); return; }
+    const any = boxes()[0];
+    if (any) type(any);
+  };
+  attempt();
 })();"""
 
 

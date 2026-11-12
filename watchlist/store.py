@@ -146,8 +146,8 @@ def _read_quiet(path: Path):
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
             return data if isinstance(data, dict) else None
-        except FileNotFoundError:
-            return None
+        except (FileNotFoundError, NotADirectoryError):
+            return None                  # (not there - its folder or drive gone too)
         except OSError:
             busy = True
             time.sleep(0.2)

@@ -226,6 +226,10 @@ class ServerListTest(unittest.TestCase):
         self.site = self.app.settings.get()["video_sites"][0]
         self.item = self.app.store.add(dict(new_item("tv", {"source": "tmdb", "source_id": "tv/1396", "title": "Breaking Bad"}),
                                             format="series"))
+        # (no look-ahead at the season's other episodes: it would go to the real sites, in a hidden browser)
+        patch = mock.patch.object(self.app, "_link_around")
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def test_every_server_checked_and_one_chosen(self):
         app, site = self.app, self.site
