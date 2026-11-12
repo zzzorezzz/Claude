@@ -97,7 +97,7 @@ def read(text):
     short = re.search(re.escape(SHORT) + r"([A-Za-z0-9_-]+)", text)
     m = re.search(re.escape(PREFIX) + r"([A-Za-z0-9_-]+)", text)
     if not (short or m):
-        raise ShareError("that isn't a shared collection - it should start with " + SHORT)
+        raise ShareError("that isn't a shared collection - its link starts with WLC3. (or " + SHORT + " for a copy of one)")
     try:
         if short:
             data = _from_short(short.group(1))

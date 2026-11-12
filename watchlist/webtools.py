@@ -121,6 +121,59 @@ AUTOPLAY_JS = r"""(() => {
   else setTimeout(kick, 700);
 })();"""
 
+# Search results that are cards without a link (a picture and a name; a press of it takes you to the
+# title by the page's own script - MeguAnimes): each pressed with the page's address changes held
+# back, and given a link to where it would have gone. Only while that's how the page moves on (the
+# first press that goes nowhere stops it).
+CARD_LINKS_JS = r"""(() => {
+  const named = (e) => (e.getAttribute('aria-label') || e.querySelector('img[alt]')?.alt || e.getAttribute('title') || '').trim();
+  const cards = [...document.querySelectorAll('[role="button"], [tabindex], [onclick], [data-id], [data-href], [data-url], [data-link]')]
+    .filter((e) => !e.closest('a[href]') && !e.querySelector('a[href]') && e.querySelector('img') && named(e)
+      && e.getBoundingClientRect().width > 50 && e.getBoundingClientRect().height > 50
+      && !e.parentElement.closest('[role="button"], [data-id], [data-href], [data-url], [onclick]'));
+  const alike = cards.filter((e) => cards.some((o) => o !== e && o.className === e.className));
+  if (alike.length < 2) return 0;
+  // (kept apart from the page: its own script may draw the results again as each is pressed)
+  const box = document.createElement('div');
+  box.hidden = true;
+  box.setAttribute('data-wa-cards', '1');
+  document.documentElement.appendChild(box);
+  const link = (e, url) => {
+    const a = document.createElement('a');
+    a.href = new URL(url, location.href).href;
+    a.textContent = named(e);
+    a.setAttribute('data-wa-card', '1');
+    box.appendChild(a);
+  };
+  const push = history.pushState, replace = history.replaceState, open = window.open;
+  let went = null;
+  history.pushState = function (s, t, u) { went = u; };
+  history.replaceState = function (s, t, u) { if (u && String(u) !== location.href) went = u; };
+  window.open = function (u) { went = u; return null; };
+  const done = () => { history.pushState = push; history.replaceState = replace; window.open = open; };
+  let n = 0;
+  (async () => {
+    try {
+      // (each kind of card on its own: one whose first press goes nowhere - a slide, a menu's - is let be)
+      const kinds = [...new Set(alike.map((e) => e.className))];
+      for (const kind of kinds) {
+        // (the cards as they are now: pressing one may draw them again)
+        for (const e of alike.filter((x) => x.className === kind).slice(0, 40)) {
+          const given = e.dataset.href || e.dataset.url || e.dataset.link;
+          if (given) { link(e, given); n += 1; continue; }
+          went = null;
+          try { e.click(); } catch (_) { /* fine */ }
+          for (let w = 0; w < 10 && went === null; w += 1) await new Promise((r) => setTimeout(r, 30));
+          if (went === null) break;
+          link(e, went);
+          n += 1;
+        }
+      }
+    } finally { done(); }
+  })();
+  return alike.length;
+})()"""
+
 EPISODES_TAB_JS = r"""(() => {
   const el = [...document.querySelectorAll('button, [role="tab"], [role="button"], li, span, div')]
     .find((e) => /^episodes?\b/i.test((e.textContent || '').trim()) && (e.textContent || '').trim().length < 24
@@ -633,7 +686,7 @@ def type_search(url, query, timeout=20):
     """(the page, its address) once `query` is typed into a site's own search box - the address
     it went to, or the page showing its results itself - or None."""
     import json
-    return render(url, timeout, then=TYPE_SEARCH_JS.replace("__Q__", json.dumps(query)))
+    return render(url, timeout, then=TYPE_SEARCH_JS.replace("__Q__", json.dumps(query)), cards=True)
 
 
 def can_catch():
@@ -916,12 +969,13 @@ def _hidden_window(url, opts, title="Watch Anything"):
         return None
 
 
-def render(url, timeout=20, settle=2.5, then=None):
+def render(url, timeout=20, settle=2.5, then=None, cards=False):
     """(page's HTML after its JavaScript has run, its address), or None. `then`: a script run once
-    it has loaded (one that may take it to another address, which is waited for)."""
+    it has loaded (one that may take it to another address, which is waited for). `cards`: results
+    that are cards without a link given one (CARD_LINKS_JS) - for a search's results."""
     if _chromium():
         from . import cdp
-        return cdp.render(url, timeout, settle, then=then)
+        return cdp.render(url, timeout, settle, then=then, cards=cards)
     if _phone():
         from . import droidweb
         return droidweb.render(url, timeout, settle, then=then)
@@ -956,12 +1010,17 @@ def render(url, timeout=20, settle=2.5, then=None):
                 win.evaluate_js(EPISODES_TAB_JS)
             except Exception:  # noqa: BLE001
                 pass
-            while time.time() < deadline:
-                time.sleep(settle / 3)
-                count = win.evaluate_js("document.getElementsByTagName('a').length + document.getElementsByTagName('iframe').length")
-                if count == last:
+            for again in (False, True):
+                while time.time() < deadline:
+                    time.sleep(settle / 3)
+                    count = win.evaluate_js("document.getElementsByTagName('a').length + document.getElementsByTagName('iframe').length")
+                    if count == last:
+                        break
+                    last = count
+                # (results that are cards without links: given them, once they're all there)
+                if again or not cards or not win.evaluate_js(CARD_LINKS_JS):
                     break
-                last = count
+                last, deadline = -1, time.time() + max(settle, 1) * 3
             page = win.evaluate_js("document.documentElement.outerHTML")
             if not isinstance(page, str):
                 # (it was moving to another address just then - ShuttleTV's .su to .pk: once more)

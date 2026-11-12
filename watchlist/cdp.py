@@ -683,7 +683,7 @@ def list_servers(url, timeout=24, open_page=None):
             page.close()
 
 
-def render(url, timeout=20, settle=2.5, open_page=None, then=None):
+def render(url, timeout=20, settle=2.5, open_page=None, then=None, cards=False):
     """As webtools.render: (the page's HTML after its scripts ran, its address), or None."""
     from . import webtools
     open_page = open_page or _chromium_page
@@ -714,13 +714,17 @@ def render(url, timeout=20, settle=2.5, open_page=None, then=None):
                 page.run(webtools.EPISODES_TAB_JS)
             except (CDPError, OSError):
                 pass
-            last, deadline = -1, time.time() + max(settle, 1) * 3
-            while time.time() < deadline:
-                time.sleep(settle / 3)
-                count = page.run("document.getElementsByTagName('a').length + document.getElementsByTagName('iframe').length")
-                if count == last:
+            for again in (False, True):
+                last, deadline = -1, time.time() + max(settle, 1) * 3
+                while time.time() < deadline:
+                    time.sleep(settle / 3)
+                    count = page.run("document.getElementsByTagName('a').length + document.getElementsByTagName('iframe').length")
+                    if count == last:
+                        break
+                    last = count
+                # (results that are cards without links: given them, once they're all there)
+                if again or not cards or not page.run(webtools.CARD_LINKS_JS):
                     break
-                last = count
             return page.run("document.documentElement.outerHTML"), page.run("location.href") or url
         except (CDPError, OSError):
             return None

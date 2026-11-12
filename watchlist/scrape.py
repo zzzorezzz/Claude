@@ -211,7 +211,7 @@ def find_search(url, kind="anime", renderer=None, log=None, typer=None):
         new = hits(page_text, page_url, wanted) - hits(text, final, wanted)
         shown = page_text, page_url
         if not new and render:
-            got = renderer(q)
+            got = _with_cards(renderer, q)
             if got:
                 new = hits(got[0], got[1], wanted) - hits(text, final, wanted)
                 shown = got
@@ -260,6 +260,15 @@ def find_search(url, kind="anime", renderer=None, log=None, typer=None):
             note("Its results show on its page as the title is typed in")
             return {"url": home.split("#")[0] + TYPED + "{title}", "how": "typed into its search box (its results show on its page)"}
     return None
+
+
+def _with_cards(render, url):
+    """A search's results page read in the hidden browser, its cards without links given them
+    (webtools.CARD_LINKS_JS) where the renderer can."""
+    try:
+        return render(url, cards=True)
+    except TypeError:                    # (one that can't)
+        return render(url)
 
 
 # A site whose search is only its search box, its results shown on its page as you type: its
@@ -1940,8 +1949,8 @@ class Scraper:
             return None
         render = self.render
 
-        def safe(url):
-            got = render(url)
+        def safe(url, cards=False):
+            got = _with_cards(render, url) if cards else render(url)
             return got if got and isinstance(got[0], str) else None      # (a page that came back empty: not read)
         return safe
 
@@ -2045,7 +2054,7 @@ class Scraper:
             if weak and self._renderer():
                 # Results the site only shows with JavaScript (the page as it is may hold
                 # nothing but its menus: "Trending", "Schedule"...).
-                got = self._renderer()(url)
+                got = self._renderer()(url, cards=True)
                 if got:
                     shown = candidates(parse(got[0], got[1]), got[1])
                     if shown:

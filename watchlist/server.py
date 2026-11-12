@@ -66,6 +66,9 @@ class OnlineError(Exception):
 # reads, deletes in and syncs to are chosen on the computer itself.
 REMOTE_KEEPS_OFF = ("phone_access", "phone_port", "player", "vlc_path", "custom_player_path", "browser_path",
                     "sync_folder", "downloads_folder", "last_folder")
+# Your keys, shown to a phone only as set or not (never the key itself); one left as shown stays as it is.
+SECRET_SETTINGS = ("tmdb_api_key", "mal_client_id", "gemini_api_key", "groq_api_key", "openrouter_api_key")
+MASK = "•" * 8
 
 
 class ApiError(Exception):
@@ -3548,9 +3551,9 @@ class App:
                               entry=(found.get("entry") or {}).get("url") or "", page=found.get("page") or "")
         return entry
 
-    def _render_page(self, url):
+    def _render_page(self, url, cards=False):
         webtools.ADBLOCK = self.settings.get()["adblock"]
-        return webtools.render(url)
+        return webtools.render(url, cards=cards)
 
     def _catch_video(self, url, click=None):
         return webtools.catch_video(url, click=click)
@@ -5515,7 +5518,11 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True}
 
     def api_get_settings(self, body):
-        return {"settings": self.app.settings.get(), "status": self.app.status(),
+        settings = self.app.settings.get()
+        if self.remote:
+            settings = dict(settings, **{k: MASK for k in SECRET_SETTINGS if settings.get(k)},
+                            ai_custom=[dict(x, key=MASK if x.get("key") else "") for x in settings.get("ai_custom") or []])
+        return {"settings": settings, "status": self.app.status(),
                 "browsers": launcher.list_browsers(), "players": launcher.list_players()}
 
     def api_put_settings(self, body):
@@ -5524,6 +5531,13 @@ class Handler(BaseHTTPRequestHandler):
             # nor which of its folders the app reads, deletes in or syncs to)
             for key in REMOTE_KEEPS_OFF:
                 body.pop(key, None)
+            for key in SECRET_SETTINGS:
+                if body.get(key) == MASK:
+                    body.pop(key)                 # (left as the phone was shown it)
+            if isinstance(body.get("ai_custom"), list):
+                kept = {x.get("id"): x.get("key") for x in self.app.settings.get().get("ai_custom") or []}
+                body["ai_custom"] = [dict(x, key=kept.get(x.get("id"), "")) if isinstance(x, dict) and x.get("key") == MASK
+                                     else x for x in body["ai_custom"]]
         if "downloads_folder" in body:
             folder = str(body["downloads_folder"] or "").strip().strip('"')
             if folder and not os.path.isdir(folder):

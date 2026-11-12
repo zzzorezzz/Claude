@@ -1,6 +1,7 @@
 """Round 15 (1.3.9): the whole-app check's problems fixed - episode names read wrongly, torrents
 that lost files or stopped (a pack other titles use, "Keep" while files are checked, "Download
 whole" while playing, a full disk, resume data)."""
+import json
 import os
 import subprocess
 import tempfile
@@ -440,6 +441,25 @@ class ListAndSortingTest(unittest.TestCase):
             t.join()
         self.assertEqual(failed, [])
         self.assertIn("n", read_json(path, {}))
+
+
+class PhoneKeysTest(RemoteBase):
+    def test_a_phone_sees_whether_a_key_is_set_never_the_key(self):
+        token, _ = self.pair()
+        self.app.settings.update({"gemini_api_key": "AIza-secret", "ai_custom": [{"id": "h1", "name": "Mine",
+                                                                                   "url": "https://ai.example/v1", "key": "sk-secret"}]})
+        status, got, _ = self.phone("GET", "/api/settings", cookie=token)
+        self.assertEqual(status, 200)
+        text = json.dumps(got)
+        self.assertNotIn("AIza-secret", text)
+        self.assertNotIn("sk-secret", text)
+        self.assertNotIn("tok", got["settings"]["tmdb_api_key"])                  # (set by the test copy)
+        # Saved back from the phone as it was shown: the keys stay as they are.
+        status, r, _ = self.phone("PUT", "/api/settings", {k: got["settings"][k] for k in ("tmdb_api_key", "gemini_api_key", "ai_custom")} | {"theme": "ocean"}, cookie=token)
+        self.assertEqual(status, 200, r)
+        s = self.app.settings.get()
+        self.assertEqual((s["gemini_api_key"], s["ai_custom"][0]["key"], s["tmdb_api_key"], s["theme"]),
+                         ("AIza-secret", "sk-secret", "tok", "ocean"))
 
 
 class SaveToDeviceStuckTest(unittest.TestCase):

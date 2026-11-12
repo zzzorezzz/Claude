@@ -498,7 +498,9 @@ function renderNavButtons() {
 $('#btn-year').addEventListener('click', (e) => {
   e.stopPropagation();
   const menu = $('#sort-menu');
-  if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
+  const open = !menu.classList.contains('hidden');
+  closeMenu();                           // (one menu at a time)
+  if (open) return;
   menu.innerHTML = SORTS.map(([k, label]) => `<button data-sort="${k}" class="${k === S.sort ? 'sel' : ''}">${esc(label)}</button>`).join('');
   menu.classList.remove('hidden');
 });
@@ -514,7 +516,9 @@ $('#sort-menu').addEventListener('click', (e) => {
 $('#btn-genre').addEventListener('click', (e) => {
   e.stopPropagation();
   const menu = $('#genre-menu');
-  if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
+  const open = !menu.classList.contains('hidden');
+  closeMenu();                           // (one menu at a time)
+  if (open) return;
   const genres = [...new Set(S.items.flatMap((i) => i.genres || []))].sort();
   menu.innerHTML = `<button data-genre="" class="${S.genre ? '' : 'sel'}">All genres</button><span></span><hr>`
     + (genres.length ? genres.map((g) => `<button data-genre="${esc(g)}" class="${g === S.genre ? 'sel' : ''}">${esc(g)}</button>`).join('')
@@ -524,7 +528,9 @@ $('#btn-genre').addEventListener('click', (e) => {
 $('#btn-browse').addEventListener('click', (e) => {
   e.stopPropagation();
   const menu = $('#browse-menu');
-  if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
+  const open = !menu.classList.contains('hidden');
+  closeMenu();                           // (one menu at a time)
+  if (open) return;
   const r = route();
   menu.innerHTML = $$('.nav-links a').map((a) => `<button data-href="${a.getAttribute('href')}" class="${a.dataset.route === r.name && !S.query ? 'sel' : ''}">${esc(a.textContent)}</button>`).join('');
   menu.classList.remove('hidden');
@@ -1467,7 +1473,10 @@ function renderSearch(view) {
 
 /* ============================================================== menus */
 
-function closeMenu() { $('#menu-root').innerHTML = ''; }
+function closeMenu() {
+  $('#menu-root').innerHTML = '';
+  ['#sort-menu', '#genre-menu', '#browse-menu'].forEach((sel) => $(sel)?.classList.add('hidden'));   // (the top bar's too)
+}
 
 function placeMenu(menu, anchor) {
   const r = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: anchor.x, bottom: anchor.y, top: anchor.y };
@@ -1631,9 +1640,21 @@ function openModal(html, cls = '') {
   wrap.innerHTML = `<div class="modal ${cls}">${html}</div>`;
   wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) closeModal(wrap); });
   wrap.addEventListener('click', (e) => { if (e.target.closest('.modal-close')) closeModal(wrap); });
+  // The keyboard goes to the window (not to the page behind it, which can't be reached meanwhile),
+  // and back to where it was when the window closes.
+  wrap.returnFocus = document.activeElement;
   $('#modal-root').append(wrap);
   document.body.classList.add('noscroll');
+  modalsInert();
+  const modal = $('.modal', wrap);
+  modal.tabIndex = -1;
+  modal.focus({ preventScroll: true });
   return wrap;
+}
+
+function modalsInert() {
+  const open = $('#modal-root').children.length > 0;
+  ['#view', '#nav', '#tabbar'].forEach((sel) => { const el = $(sel); if (el) el.inert = open; });
 }
 
 // The bar at the bottom of a phone: a section, from wherever you are (what's open closes).
@@ -1645,15 +1666,22 @@ $('#tabbar')?.addEventListener('click', (e) => {
 
 function closeModal(wrap) {
   if (!wrap || !wrap.isConnected) return;
+  const had = wrap.contains(document.activeElement);
   wrap.remove();
   sfx('close');
   if (wrap.onClose) wrap.onClose();
   if (!$('#modal-root').children.length) document.body.classList.remove('noscroll');
+  modalsInert();
+  const back = wrap.returnFocus;
+  if ((had || document.activeElement === document.body) && back?.isConnected && !back.closest('[inert]')) back.focus({ preventScroll: true });
 }
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if ($('#menu-root').children.length) { closeMenu(); return; }
+  if ($('#menu-root').children.length || $$('#sort-menu, #genre-menu, #browse-menu').some((m) => !m.classList.contains('hidden'))) {
+    closeMenu();
+    return;
+  }
   const top = $('#modal-root').lastElementChild;
   if (top && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) closeModal(top);
   else if (top && document.activeElement?.id !== 'search') document.activeElement.blur();
@@ -6338,8 +6366,9 @@ async function openSettings(focus = '') {
         <button class="btn btn-ghost btn-sm" type="button" data-s="rec-torrent">★ Add recommended</button></div></div>`)}
     ${simple ? '' : card('downloads', 'Downloads', `
     <label class="field"><span>Downloads folder</span>
-      <div class="input-row"><input class="input" name="downloads_folder" value="${esc(s.downloads_folder)}" placeholder="The one folder all your downloads go into">
-      <button class="btn btn-ghost btn-sm" type="button" data-s="dl-browse">Choose…</button></div>
+      <div class="input-row"><input class="input" name="downloads_folder" value="${esc(s.downloads_folder)}" placeholder="The one folder all your downloads go into" ${REMOTE ? 'readonly' : ''}>
+      ${REMOTE ? '' : '<button class="btn btn-ghost btn-sm" type="button" data-s="dl-browse">Choose…</button>'}</div>
+      ${REMOTE ? `<small class="muted">Chosen on the ${esc(pcName())} itself.</small>` : ''}
       <small>${S.library.error ? `<span class="bad">${esc(S.library.error)}</span>`
         : s.downloads_folder ? `<span class="ok">✓</span> ${S.library.videos || 0} videos found, ${Object.keys(S.library.items || {}).length} titles matched${(S.library.questions || []).length ? `, ${S.library.questions.length} to sort` : ''}.` : ''}</small></label>
     <div class="btns folder-btns">

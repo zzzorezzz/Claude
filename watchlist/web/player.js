@@ -809,8 +809,10 @@ function wpWire(el) {
     } else if (a === 'airplay') v.webkitShowPlaybackTargetPicker?.();
     else if (a === 'keys') wpKeys();
   });
-  document.addEventListener('keydown', (e) => {
-    if (!WP.s || WP.el.classList.contains('hidden') || e.target.closest('input, textarea')) return;
+  document.addEventListener('keydown', (ev) => {
+    if (!WP.s || WP.el.classList.contains('hidden') || ev.target.closest('input, textarea')) return;
+    // (a letter the same with Shift or Caps Lock on)
+    const e = { key: ev.key.length === 1 ? ev.key.toLowerCase() : ev.key, preventDefault: () => ev.preventDefault() };
     if (e.key === ' ' || e.key === 'k') { e.preventDefault(); if (v.paused) v.play(); else v.pause(); }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); wpSeek(wpNow() - 10); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); wpSeek(wpNow() + 10); }

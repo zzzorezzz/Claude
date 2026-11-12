@@ -436,6 +436,7 @@ if (REMOTE && typeof window !== 'undefined') window.addEventListener('load', () 
 
 function homeScreenOnce() {
   if (!REMOTE || !isIOS() || standalone()) return;
+  if (layerCount()) { setTimeout(homeScreenOnce, 5000); return; }     // (not over what you're doing: once it's closed)
   try { if (localStorage.getItem('a2hs-tip')) return; localStorage.setItem('a2hs-tip', '1'); } catch { return; }
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad a2hs">
     <h2>Put it on your Home Screen</h2>
@@ -585,10 +586,14 @@ function showPairAsk(p) {
   pairShown.set(p.id, wrap);
   sfx?.('add');
   const timer = setTimeout(() => wrap.isConnected && closeModal(wrap), 120000);
+  // (closed without an answer - Escape, a click beside it: asked again while the phone still waits)
+  let answered = false;
+  wrap.onClose = () => { if (!answered) pairShown.delete(p.id); };
   wrap.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-pa]')?.dataset.pa;
     if (!a) return;
     clearTimeout(timer);
+    answered = true;
     closeModal(wrap);
     try {
       await api('POST', '/api/pair/answer', { id: p.id, allow: a === 'allow' });
