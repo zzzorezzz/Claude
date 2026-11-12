@@ -189,5 +189,5 @@ def list_servers(url, timeout=16):
     return cdp.list_servers(url, timeout + 6, open_page=Page)
 
 
-def render(url, timeout=20, settle=2.5):
-    return cdp.render(url, timeout, settle + 1, open_page=Page)
+def render(url, timeout=20, settle=2.5, then=None):
+    return cdp.render(url, timeout, settle + 1, open_page=Page, then=then)

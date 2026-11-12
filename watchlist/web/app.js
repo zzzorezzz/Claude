@@ -790,7 +790,7 @@ $('#view').addEventListener('contextmenu', (e) => {
 // Drag a poster: press and hold, and it lifts and follows the pointer like a file; the
 // others glide aside to make room where it would go (drop it for your own order), or drop
 // it onto a folder chip to move it there. On a touch screen a long press picks it up.
-const drag = { card: null, start: null, timer: 0, float: null, grid: null, dx: 0, dy: 0, moved: false, scroll: 0, last: null };
+const drag = { card: null, start: null, timer: 0, float: null, grid: null, dx: 0, dy: 0, moved: false, scroll: 0, last: null, into: null };
 function dragReset() {
   clearTimeout(drag.timer);
   drag.start = null;
@@ -861,7 +861,6 @@ function scrollSpeed(y) {
   return 0;
 }
 function dragMove(x, y) {
-  drag.float.style.transform = `translate(${x - drag.dx}px, ${y - drag.dy}px) scale(1.06) rotate(-1.5deg)`;
   drag.last = { x, y };
   // Near the top or bottom of the window: the page scrolls along.
   if (scrollSpeed(y) && !drag.scroll) {
@@ -869,17 +868,40 @@ function dragMove(x, y) {
       const v = drag.float && drag.last ? scrollSpeed(drag.last.y) : 0;
       if (!v) { drag.scroll = 0; return; }
       scrollBy(0, v);
-      dragOver(drag.last.x, drag.last.y);
+      dragMove(drag.last.x, drag.last.y);
       drag.scroll = requestAnimationFrame(step);
     };
     drag.scroll = requestAnimationFrame(step);
   }
   dragOver(x, y);
+  const float = drag.float;
+  if (drag.into) {
+    // Over a folder: it shrinks and goes into it (the folder lit up) - let go, and it's in there.
+    float.classList.add('drag-into');
+    float.style.transform = intoFolder(float, drag.into, 1);
+  } else {
+    if (float.classList.contains('drag-into')) {
+      // ...away again: it comes back out to the pointer, as it was.
+      float.classList.remove('drag-into');
+      float.classList.add('drag-out');
+      clearTimeout(drag.outTimer);
+      drag.outTimer = setTimeout(() => float.classList.remove('drag-out'), 200);
+    }
+    float.style.transform = `translate(${x - drag.dx}px, ${y - drag.dy}px) scale(1.06) rotate(-1.5deg)`;
+  }
+}
+// Where a poster sits going into a folder chip: small, over its middle (`size` 1), or all the way in.
+function intoFolder(float, chip, size) {
+  const c = chip.getBoundingClientRect();
+  const w = float.offsetWidth, h = float.offsetHeight;
+  const s = Math.min(0.34, (c.height * 1.8) / h) * size;
+  return `translate(${c.left + c.width / 2 - w / 2}px, ${c.top + c.height / 2 - h / 2 - (size === 1 ? 8 : 0)}px) scale(${s}) rotate(${size === 1 ? -4 : 0}deg)`;
 }
 function dragOver(x, y) {
   const under = document.elementFromPoint(x, y);
   $$('.drop-over').forEach((el) => { if (!el.contains(under)) el.classList.remove('drop-over'); });
   const chip = under && under.closest('[data-drop]');
+  drag.into = chip || null;
   if (chip) { chip.classList.add('drop-over'); return; }
   const grid = drag.grid;
   if (!grid || !under || under.closest('.grid, .row-track') !== grid) return;
@@ -901,7 +923,7 @@ function dragEnd(x, y, cancel) {
   $$('.drop-over').forEach((el) => el.classList.remove('drop-over'));
   document.body.classList.remove('dragging');
   cancelAnimationFrame(drag.scroll);
-  Object.assign(drag, { float: null, card: null, grid: null, last: null, scroll: 0 });
+  Object.assign(drag, { float: null, card: null, grid: null, last: null, scroll: 0, into: null });
   dragReset();
   setTimeout(() => { drag.moved = false; }, 50);
   const finish = () => {
@@ -909,8 +931,16 @@ function dragEnd(x, y, cancel) {
     $$('.drag-place').forEach((c) => c.classList.remove('drag-place'));
   };
   if (chip) {
-    finish();
-    moveToFolder(card.dataset.id, chip.dataset.drop === 'none' ? '' : chip.dataset.drop);
+    // In it goes: the poster shrinks away into the folder, which glows as it takes it.
+    float.classList.remove('drag-out');
+    float.classList.add('drag-into', 'drag-gone');
+    float.style.transform = intoFolder(float, chip, 0.15);
+    chip.classList.add('drop-gulp');
+    setTimeout(() => {
+      finish();
+      chip.classList.remove('drop-gulp');
+      moveToFolder(card.dataset.id, chip.dataset.drop === 'none' ? '' : chip.dataset.drop);
+    }, 320);
     return;
   }
   if (cancel || !grid) {

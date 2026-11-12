@@ -936,10 +936,15 @@ class Torrents:
 
     def _piece(self, h, handle, piece):
         deadline = time.time() + WAIT_FOR_DATA
-        while not handle.have_piece(piece):
-            if time.time() > deadline:
-                raise TorrentError("the torrent stopped sending data")
-            time.sleep(0.05)
+        try:
+            while not handle.have_piece(piece):
+                if time.time() > deadline:
+                    raise TorrentError("the torrent stopped sending data")
+                if h not in self.handles:
+                    raise TorrentError("the torrent was removed")
+                time.sleep(0.05)
+        except RuntimeError as e:                 # (libtorrent: "invalid torrent handle used" - it was removed)
+            raise TorrentError("the torrent was removed") from e
         if getattr(lt, "PIECES_FROM_DISK", False):
             return lt.piece_bytes(handle, piece, self.records[h]["save_path"])
         with self._piece_cond:
@@ -1155,6 +1160,10 @@ class Torrents:
         .torrent files, peeks at torrents never added - is deleted now, not some hours later.
         Only the app's own torrents folders are looked in. Returns how many things went."""
         gone = 0
+        if self.state_path.with_suffix(self.state_path.suffix + ".broken").exists():
+            # (the list of torrents couldn't be read: every download would look left over - kept
+            # until it's sorted out, rather than deleted)
+            return 0
         playing = self._playing_paths()
         with self.lock:
             known = {os.path.normcase(self.path_of(rec, f)) for rec in self.records.values() for f in rec.get("files") or []}

@@ -186,6 +186,9 @@ def write_json(path: Path, data, compact=False) -> None:
             fh.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
         else:
             json.dump(data, fh, indent=2, ensure_ascii=False)
+        # (on the disk before it takes the old one's place: a power cut can't leave an empty file)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
 
 

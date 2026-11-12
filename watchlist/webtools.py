@@ -133,11 +133,22 @@ EPISODES_TAB_JS = r"""(() => {
 CLICKED = "https://watchanything.invalid/clicked"
 # ...or that the page has nothing to click for it (what it plays by itself is taken at once).
 NO_CLICK = "https://watchanything.invalid/nothing-to-click"
+# A menu button named by words (a "Server" dropdown): by its own few words or a short label beside
+# it - never an episode's button (Miruro's hold the episode's summary, where "source" may be a word).
+MENU_NAMED_JS = r"""const EPISODE = /\b(ep|episode|eps|chapter)\.?\s*\d|^\d{1,4}$/i;
+  const menuNamed = (el, words) => {
+    const own = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    const aria = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`;
+    if (own.length > 40 || EPISODE.test(own) || EPISODE.test(aria)) return false;
+    const beside = ((el.parentElement || {}).textContent || '').replace(/\s+/g, ' ').trim();
+    return words.test(`${own} ${aria} ${beside.length <= 40 ? beside : ''}`);
+  };"""
 CLICK_JS = r"""(() => {
   const want = __WANT__;
   if (want.frame ? location.host !== want.frame : window.top !== window) return;
   if (window.__waClick) return; window.__waClick = true;
   const norm = (t) => (t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  __MENU_NAMED__
   const kindOk = (el) => {
     if (!want.kind || (langNow() === want.kind && langTrigger())) return true;
     for (let n = el, i = 0; n && i < 6; n = n.parentElement, i += 1) {
@@ -212,7 +223,7 @@ CLICK_JS = r"""(() => {
       .filter((el) => !opened.has(el) && !(langDone && el === langTrigger()) && (/^(sub|dub|raw|soft ?sub|hard ?sub|japanese|english|audio|language|server)/i.test((el.textContent || '').trim())
         // (a "Server" dropdown named by its label or the words beside it: only when a server is
         // wanted - looking for Sub / Dub, a server list is no place to open)
-        || (!/^(sub|dub|raw)$/i.test(want.label) && /\b(servers?|sources?|mirrors?)\b/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${norm((el.parentElement || {}).textContent || '').slice(0, 40)}`))));
+        || (!/^(sub|dub|raw)$/i.test(want.label) && menuNamed(el, /\b(servers?|sources?|mirrors?)\b/i))));
     if (triggers.length) { opened.add(triggers[0]); press(triggers[0]); return 'opened'; }
     return '';
   };
@@ -269,7 +280,7 @@ CLICK_JS = r"""(() => {
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(() => first(0), 400));
   else setTimeout(() => first(0), 400);
-})();""".replace("__CLICKED__", CLICKED).replace("__NO_CLICK__", NO_CLICK)
+})();""".replace("__CLICKED__", CLICKED).replace("__MENU_NAMED__", MENU_NAMED_JS).replace("__NO_CLICK__", NO_CLICK)
 
 # The servers (sources, mirrors) an episode's page offers, read in every frame of it - the
 # player is often another site's frame with its own list. Any page's: a box named for servers
@@ -280,6 +291,7 @@ SERVERS = "https://watchanything.invalid/servers?d="
 SERVERS_JS = r"""(() => {
   if (window.__waServers) return; window.__waServers = true;
   const norm = (t) => (t || '').replace(/\s+/g, ' ').trim();
+  __MENU_NAMED__
   const NAMED = /server|mirror|provider|embed|sources?(?:[-_ ]?(?:list|box|item|btn|button|wrap|tab))?$|^sources?\b|\bsources?\b/i;
   const HEAD = /^(servers?|video servers?|streaming servers?|sources?|video sources?|mirrors?|providers?|(choose|select|switch)( a| the)? (server|source|mirror))\s*:?$/i;
   const NOT = /^(home|log ?in|sign ?(in|up)|register|menu|search|share|report|download|trailer|comments?|next|prev(ious)?|episodes?|seasons?|settings|close|cancel|ok|auto|quality|speed|subtitles?|audio|captions?|\d{3,4}p|[\d.]+x|on|off|more|less|all|watch( now)?|play|pause|embed|direct|server|servers|source|sources|sub|dub|language|lang)$/i;
@@ -370,8 +382,10 @@ SERVERS_JS = r"""(() => {
   };
   // A "Server" dropdown whose options only exist while it's open (drawn in a pop-up elsewhere in
   // the page): opened, its pop-up read with the rest, then closed again.
+  // (named so by its own few words, or a short label beside it - not a word somewhere in an
+  // episode's summary: Miruro's episode buttons hold theirs, and pressing one changes episode)
   const openers = () => [...document.querySelectorAll('button, [role=button], [role=combobox], [aria-haspopup]')]
-    .filter((el) => /\b(servers?|sources?|mirrors?|providers?)\b/i.test(`${norm(el.textContent)} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${norm((el.parentElement || {}).textContent || '').slice(0, 40)}`)
+    .filter((el) => menuNamed(el, /\b(servers?|sources?|mirrors?|providers?)\b/i)
       && !el.closest(POPUP) && el.getBoundingClientRect().width > 0 && el !== langTrigger());
   let opened = 0;
   const peek = (then, again = false) => {
@@ -451,7 +465,7 @@ SERVERS_JS = r"""(() => {
     tell('__SERVERS__' + encodeURIComponent(JSON.stringify({ f: location.host, i: items.slice(0, 40), m: more ? 1 : 0 })));
   };
   for (const ms of [1200, 3000, 6000, 10000, 16000]) setTimeout(report, ms);
-})();""".replace("__SERVERS__", SERVERS)
+})();""".replace("__SERVERS__", SERVERS).replace("__MENU_NAMED__", MENU_NAMED_JS)
 
 
 LIST_ALL_JS = "window.__waListAll = true;"     # (SERVERS_JS: every language's servers - the Servers list)
@@ -496,6 +510,16 @@ _patched = False
 _lock = threading.BoundedSemaphore(3)       # up to three hidden windows at once (several sites searched together)
 _background = threading.BoundedSemaphore(2)  # ...of which the app's own look-ups in the background take two at most
 _here = threading.local()
+
+
+def unwanted(skip):
+    """What this thread's next video catches leave out: skip(video, referer) True for a video that
+    isn't the one wanted (another episode's player) - waited past, not taken. None: nothing."""
+    _here.skip = skip
+
+
+def _skip():
+    return getattr(_here, "skip", None) or (lambda video, referer: False)
 
 
 def background():
@@ -556,6 +580,48 @@ def _phone():
     """On a phone: pages open in the phone app's hidden WebView (droidweb.py)."""
     from . import droidweb
     return droidweb.available()
+
+# A site's own search box used as you would: the title typed in and Enter pressed (a search
+# only its scripts run - no form, no link with the words in it). A search button that only
+# opens the box is pressed first. render(..., then=...) runs it, and the address it goes to is
+# the site's search link.
+TYPE_SEARCH_JS = r"""(() => {
+  const q = __Q__;
+  const shown = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; };
+  const SEARCHY = /search|find|query|keyword|搜索/i;
+  const boxes = () => [...document.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]), [contenteditable=true][role=searchbox]')]
+    .filter((el) => el.type === 'search' || SEARCHY.test([el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.className, el.getAttribute('role')].join(' ')));
+  const fire = (el, type, init) => el.dispatchEvent(new (type.startsWith('key') ? KeyboardEvent : Event)(type, Object.assign({ bubbles: true, cancelable: true }, init || {})));
+  const type = (box) => {
+    box.focus();
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    try { setter.call(box, q); } catch (e) { box.value = q; }
+    fire(box, 'input'); fire(box, 'change');
+    setTimeout(() => {
+      const enter = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13 };
+      fire(box, 'keydown', enter); fire(box, 'keypress', enter); fire(box, 'keyup', enter);
+      setTimeout(() => {
+        const form = box.closest('form');
+        if (form && location.href === start) { try { form.requestSubmit ? form.requestSubmit() : form.submit(); } catch (e) { /* fine */ } }
+      }, 600);
+    }, 300);
+  };
+  const start = location.href;
+  let box = boxes().find(shown);
+  if (box) { type(box); return; }
+  // (a magnifier button that opens the box)
+  const opener = [...document.querySelectorAll('button, a, [role=button], label, i, span, div')].find((el) => shown(el)
+    && el.children.length <= 2 && SEARCHY.test([el.getAttribute('aria-label'), el.title, el.className && String(el.className), el.id, (el.textContent || '').trim().slice(0, 12)].join(' ')));
+  if (opener) { try { opener.click(); } catch (e) { /* fine */ } }
+  setTimeout(() => { box = boxes().find(shown) || boxes()[0]; if (box) type(box); }, 700);
+})();"""
+
+
+def type_search(url, query, timeout=20):
+    """(the page, its address) once `query` is typed into a site's own search box - the address
+    it went to, or the page showing its results itself - or None."""
+    import json
+    return render(url, timeout, then=TYPE_SEARCH_JS.replace("__Q__", json.dumps(query)))
 
 
 def can_catch():
@@ -838,14 +904,15 @@ def _hidden_window(url, opts, title="Watch Anything"):
         return None
 
 
-def render(url, timeout=20, settle=2.5):
-    """(page's HTML after its JavaScript has run, its address), or None."""
+def render(url, timeout=20, settle=2.5, then=None):
+    """(page's HTML after its JavaScript has run, its address), or None. `then`: a script run once
+    it has loaded (one that may take it to another address, which is waited for)."""
     if _chromium():
         from . import cdp
-        return cdp.render(url, timeout, settle)
+        return cdp.render(url, timeout, settle, then=then)
     if _phone():
         from . import droidweb
-        return droidweb.render(url, timeout, settle)
+        return droidweb.render(url, timeout, settle, then=then)
     if not can_render():
         return None
     with slot():
@@ -855,6 +922,21 @@ def render(url, timeout=20, settle=2.5):
         try:
             if not win.events.loaded.wait(timeout):
                 return None
+            if then:
+                start = win.get_current_url() or url
+                try:
+                    win.evaluate_js(then)
+                except Exception:  # noqa: BLE001 - it may have left the page already
+                    pass
+                wait = time.time() + 10
+                while time.time() < wait:
+                    time.sleep(0.5)
+                    try:
+                        if (win.get_current_url() or start) != start:
+                            time.sleep(settle)
+                            break
+                    except Exception:  # noqa: BLE001 - between pages
+                        pass
             # Wait for what scripts add (an episode list, search results) to settle.
             last, deadline = -1, time.time() + max(settle, 1) * 3
             try:
@@ -900,9 +982,12 @@ def catch_video(url, timeout=30, click=None):
     if click and click.get("quick"):
         timeout = min(timeout, 15)
     opts = {"adblock": True, "click": click}
+    skip = _skip()
 
     def catch(video, headers):
         u = video.lower()
+        if skip(video, headers.get("Referer") or headers.get("referer") or ""):
+            return
         if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
                 or re.search(r"/(?:tiles?|thumbs?|thumbnails?|sprites?|storyboards?|previews?|trickplay)(?:/|[^/?]*\.m3u8)", u) \
                 or trailer(video):

@@ -165,8 +165,17 @@ svg { fill: currentColor; }
 .folder-chip.on { background: #fff; color: #000; border-color: #fff; }
 .folder-chip.on small { color: #4c5677; }
 body.dragging .folder-chip[data-drop] { border-style: dashed; border-color: #868fac; }
-.folder-chip.drop-over { background: var(--red) !important; border-color: var(--red) !important; color: #fff !important; transform: scale(1.06); }
+/* A folder a poster is held over lights up (and its icon with it); one taking a poster glows once more. */
+.folder-chip.drop-over { background: var(--red) !important; border-color: var(--red) !important; color: #fff !important; transform: scale(1.08);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, .12), 0 0 22px 2px var(--red); }
 .folder-chip.drop-over svg, .folder-chip.drop-over small { color: #fff; }
+.folder-chip.drop-over svg { transform: scale(1.25); filter: drop-shadow(0 0 6px rgba(255, 220, 140, .9)); transition: transform .15s; }
+.folder-chip.drop-gulp { animation: drop-gulp .42s cubic-bezier(.2, .8, .2, 1); }
+@keyframes drop-gulp {
+  0% { transform: scale(1.08); box-shadow: 0 0 22px 2px var(--red); background: var(--red); color: #fff; }
+  45% { transform: scale(1.16); box-shadow: 0 0 34px 8px var(--red); background: var(--red); color: #fff; }
+  100% { transform: scale(1); box-shadow: none; }
+}
 .hint { color: var(--dim); font-size: 13px; margin: 6px 0 20px; }
 .folder-head { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; }
 .folder-head h2 { margin: 0 8px 0 0; font-size: 22px; display: flex; align-items: center; gap: 8px; }
@@ -1620,8 +1629,12 @@ body.simple .ep-file { display: none !important; }
 
 /* Dragging a poster: the others wiggle, the one moved is a faint placeholder where it would land. */
 /* A poster being dragged: it follows the pointer; its place waits for it, outlined. */
-.card.drag-float { position: fixed; left: 0; top: 0; z-index: 1000; pointer-events: none; margin: 0;
-  box-shadow: 0 22px 50px rgba(0, 0, 0, .6); transition: none; will-change: transform; }
+/* (a little see-through, so where it would go shows through it) */
+.card.drag-float { position: fixed; left: 0; top: 0; z-index: 1000; pointer-events: none; margin: 0; opacity: .72;
+  box-shadow: 0 22px 50px rgba(0, 0, 0, .6); transition: opacity .15s; will-change: transform, opacity; }
+.card.drag-float.drag-into { transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .22s; opacity: .95; }
+.card.drag-float.drag-out { transition: transform .18s cubic-bezier(.2, .8, .2, 1), opacity .18s; }
+.card.drag-float.drag-gone { transition: transform .3s cubic-bezier(.5, 0, .75, 0), opacity .3s ease-in; opacity: 0; }
 .card.drag-float .card-info { opacity: 0; }
 .card.drag-place { opacity: .28; outline: 2px dashed var(--accent); outline-offset: 3px; transform: none !important; }
 body.dragging, body.dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
@@ -1643,6 +1656,8 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none;
   .card-buttons .cb svg { width: 18px; height: 18px; }
 }
 body.dragging .card:hover, body.dragging .card:focus-visible { transform: none; box-shadow: none; }
+/* (nor its details: they would show through the poster held over it) */
+body.dragging .card:not(.drag-float):hover .card-info { opacity: 0; }
 
 /* ---------- Finding a video yourself ---------- */
 .picker-opts { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 10px; }
@@ -1809,7 +1824,8 @@ body.wp-open { overflow: hidden; }
 .wp-mid { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; gap: 34px; align-items: center; }
 .wp-btn { min-width: 44px; min-height: 44px; display: inline-grid; place-items: center; background: none; border: 0; color: #fff;
   font: 700 13px/1 inherit; border-radius: 22px; padding: 0 8px; cursor: pointer; }
-.wp-btn svg { width: 24px; height: 24px; fill: currentColor; }
+/* (the icons are redrawn as it plays: a press lands on the button, not on an icon that went) */
+.wp-btn svg { width: 24px; height: 24px; fill: currentColor; pointer-events: none; }
 .wp-btn:disabled { opacity: .3; }
 .wp-btn.on { color: var(--accent, #7c5cff); }
 .wp-big { width: 64px; height: 64px; background: rgba(0,0,0,.35); border-radius: 50%; }
@@ -1852,6 +1868,10 @@ body.wp-open { overflow: hidden; }
 .wp-sheet { position: absolute; left: 0; right: 0; bottom: 0; max-height: 72%; overflow: auto; background: rgba(18,18,26,.97);
   border-radius: 18px 18px 0 0; padding: 12px 16px max(16px, env(safe-area-inset-bottom)); animation: sheet-up .2s ease-out; }
 .wp-sheet-head { display: flex; align-items: center; justify-content: space-between; }
+.wp-keys { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; margin: 10px 0 4px; }
+.wp-keys dt { font: 600 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #fff; background: rgba(255,255,255,.1);
+  border-radius: 6px; padding: 0 8px; justify-self: start; }
+.wp-keys dd { margin: 0; color: rgba(255,255,255,.85); font-size: 14px; line-height: 1.6; }
 .wp-sheet h5 { margin: 12px 0 6px; color: rgba(255,255,255,.7); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
 .wp-opts { display: flex; flex-wrap: wrap; gap: 6px; }
 .wp-opts button { min-height: 40px; padding: 0 12px; border-radius: 20px; border: 1px solid rgba(255,255,255,.25); background: none; color: #fff; font: inherit; }

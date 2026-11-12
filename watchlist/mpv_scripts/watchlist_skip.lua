@@ -294,3 +294,213 @@ mp.register_event("start-file", function()
     stuck_hide()
 end)
 mp.register_event("end-file", stuck_hide)
+
+-- Every key the player answers to and what it does (the right-click menu's "Keyboard shortcuts",
+-- or ? / F1): read from the player's own key list, so whatever is bound is there. Choosing one
+-- does it.
+local KEY_NAMES = {
+    SPACE = "Space", ENTER = "Enter", ESC = "Esc", BS = "Backspace", DEL = "Delete", TAB = "Tab",
+    LEFT = "←", RIGHT = "→", UP = "↑", DOWN = "↓", PGUP = "Page Up", PGDWN = "Page Down",
+    HOME = "Home", END = "End", INS = "Insert", SHARP = "#", MENU = "Menu key",
+    MBTN_LEFT = "Click", MBTN_LEFT_DBL = "Double-click", MBTN_RIGHT = "Right-click", MBTN_MID = "Middle-click",
+    MBTN_BACK = "Mouse back button", MBTN_FORWARD = "Mouse forward button",
+    WHEEL_UP = "Wheel up", WHEEL_DOWN = "Wheel down", WHEEL_LEFT = "Wheel left", WHEEL_RIGHT = "Wheel right",
+    KP_ADD = "Num +", KP_SUBTRACT = "Num −", KP_MULTIPLY = "Num *", KP_DIVIDE = "Num /", KP_ENTER = "Num Enter",
+    KP_BEGIN = "Num 5", KP_UP = "Num ↑", KP_DOWN = "Num ↓", KP_LEFT = "Num ←", KP_RIGHT = "Num →",
+    KP_HOME = "Num Home", KP_END = "Num End", KP_PGUP = "Num Page Up", KP_PGDWN = "Num Page Down",
+    PLAY = "Media Play", PAUSE = "Media Pause", PLAYPAUSE = "Media Play/Pause", PLAYONLY = "Media Play",
+    PAUSEONLY = "Media Pause", STOP = "Media Stop", NEXT = "Media Next", PREV = "Media Previous",
+    FORWARD = "Media Forward", REWIND = "Media Rewind", MUTE = "Media Mute", VOLUME_UP = "Volume up key",
+    VOLUME_DOWN = "Volume down key", POWER = "Power key", ZOOMIN = "Zoom in key", ZOOMOUT = "Zoom out key",
+    CLOSE_WIN = "Closing the window",
+}
+local function one_key(k)
+    local mods, last = k:match("^(.*%+)(.+)$")                       -- ("Ctrl+Shift+a", "Alt++")
+    if not mods then mods, last = "", k end
+    last = KEY_NAMES[last] or (last:gsub("^KP(%d)$", "Num %1"))
+    if #last == 1 and last:match("%u") and not mods:find("Shift") then mods = mods .. "Shift+" end
+    return mods .. last
+end
+local function key_name(key)
+    local a, b = key:match("^(%w)%-(%w+)$")                           -- ("g-a": g, then a)
+    if a then return one_key(a) .. " then " .. one_key(b) end
+    return one_key(key)
+end
+
+-- What a command does, in words (the first pattern that fits).
+local function amount(n) return tostring(math.abs(tonumber(n))) end
+local SAYS = {
+    {"^cycle pause$", "Play / pause"}, {"^set pause yes$", "Pause"}, {"^set pause no$", "Play"},
+    {"^quit%-watch%-later", "Close the player (the player remembers where you were)"}, {"^quit", "Close the player"},
+    {"^seek%s+0%s+absolute", "Back to the start"}, {"^revert%-seek mark", "Mark this spot to go back to"},
+    {"^revert%-seek", "Undo the last jump"},
+    {"sub%-seek %-1", "Back to the previous subtitle line"}, {"sub%-seek", "On to the next subtitle line"},
+    {"seek%s+(%-?[%d.]+)%s+exact", function(n) return (tonumber(n) < 0 and "Back " or "Forward ") .. amount(n) .. " s (exactly)" end},
+    {"seek%s+(%-?[%d.]+)", function(n) return (tonumber(n) < 0 and "Back " or "Forward ") .. amount(n) .. " s" end},
+    {"^frame%-back%-step", "One frame back (paused)"}, {"^frame%-step", "One frame on (paused)"},
+    {"^add chapter %-1", "Previous chapter"}, {"^add chapter 1", "Next chapter"},
+    {"^ab%-loop", "Repeat a part (press at its start, then at its end; again to stop)"},
+    {"loop%-file", "Repeat this video on / off"},
+    {"add volume%s+(%-?[%d.]+)", function(n) return (tonumber(n) < 0 and "Volume down " or "Volume up ") .. amount(n) .. "%" end},
+    {"^cycle mute", "Mute on / off"}, {"^cycle audio", "Next audio track (language)"},
+    {"add audio%-delay%s+(%-?[%d.]+)", function(n) return "Sound " .. (tonumber(n) < 0 and "earlier" or "later") .. " by " .. amount(n) .. " s" end},
+    {"^set speed 1$", "Normal speed"}, {"cycle%-values speed", "Speed 1.25× / 1.5× / 2×"},
+    {"add speed%s+(%-?[%d.]+)", function(n) return (tonumber(n) < 0 and "Slower" or "Faster") .. " (" .. amount(n) .. "× a press)" end},
+    {"multiply speed 0%.5", "Half the speed"}, {"multiply speed 2", "Double the speed"},
+    {"multiply speed 1/", "A little slower"}, {"multiply speed", "A little faster"},
+    {"^cycle sub%-visibility", "Subtitles on / off"}, {"^cycle secondary%-sub%-visibility", "Second subtitles on / off"},
+    {"^cycle sub down", "Previous subtitle track"}, {"^cycle sub$", "Next subtitle track"},
+    {"add sub%-delay%s+(%-?[%d.]+)", function(n) return "Subtitles " .. (tonumber(n) < 0 and "earlier" or "later") .. " by " .. amount(n) .. " s" end},
+    {"sub%-step %-1", "Subtitles one line earlier"}, {"sub%-step", "Subtitles one line later"},
+    {"add sub%-scale%s+%-", "Smaller subtitles"}, {"add sub%-scale", "Bigger subtitles"},
+    {"add sub%-pos%s+%-", "Subtitles higher"}, {"add sub%-pos", "Subtitles lower"},
+    {"sub%-ass%-override", "Subtitles in the player's style / their own"},
+    {"sub%-ass%-use%-video%-data", "Subtitles sized to the video / the window"},
+    {"watchlist_skip next", "Next episode"}, {"watchlist_skip prev", "Previous episode"},
+    {"watchlist_skip show%-source", "Where this is playing from"}, {"watchlist_skip servers", "Servers (other copies of this episode)"},
+    {"watchlist_skip other%-site", "Find it on another of your sites"}, {"watchlist_skip switch%-version", "Switch sub / dub"},
+    {"watchlist_skip load%-subtitle", "Add a subtitle file"}, {"watchlist_skip shortcuts", "These keyboard shortcuts"},
+    {"watchlist%-toggle%-skip", "Skip openings and endings on / off"},
+    {"playlist%-next", "Next episode"}, {"playlist%-prev", "Previous episode"},
+    {"playlist%-pos 0", "First episode in the list"}, {"playlist%-pos%-1", "Last episode in the list"},
+    {"uosc/menu", "The player's menu"}, {"uosc/items", "Episodes"}, {"uosc/subtitles", "Subtitles"}, {"uosc/audio", "Audio tracks"},
+    {"select/context%-menu", "The player's menu"}, {"select/menu", "Search every command"},
+    {"select/select%-sid", "Choose subtitles"}, {"select/select%-aid", "Choose the audio track"},
+    {"select/select%-chapter", "Choose a chapter"}, {"select/select%-playlist", "Choose an episode"},
+    {"select/select%-binding", "Search every key"}, {"select/select%-audio%-device", "Choose where the sound goes"},
+    {"select/select%-subtitle%-line", "Jump to a subtitle line"}, {"select/select%-track", "Choose a track"},
+    {"select/select%-vid", "Choose the video track"}, {"select/show%-properties", "Show the player's settings"},
+    {"select/select%-secondary", "Choose second subtitles"}, {"select/select%-edition", "Choose an edition"},
+    {"select/select%-watch", "Recently played (the player's own list)"},
+    {"^cycle fullscreen", "Full screen on / off"}, {"set fullscreen no", "Leave full screen"},
+    {"^cycle ontop", "Keep the window on top on / off"},
+    {"set window%-scale 0%.5", "Window at half the video's size"}, {"set window%-scale 1", "Window at the video's size"},
+    {"set window%-scale 2", "Window at twice the video's size"},
+    {"show%-progress", "Show the time"}, {"osd%-level", "Always show the time on / off"},
+    {"stats/display%-stats%-toggle", "Video details (stay on)"}, {"stats/display%-stats", "Video details"},
+    {"stats/display%-page", "Video details: a page"}, {"show%-text %${playlist}", "Show the episode list"},
+    {"show%-text %${track%-list}", "Show the tracks"},
+    {"^screenshot window", "Screenshot (as shown)"}, {"^screenshot video", "Screenshot (without subtitles)"},
+    {"^screenshot each%-frame", "Screenshot every frame on / off"}, {"^screenshot", "Screenshot"},
+    {"video%-aspect%-override", "Change the picture's shape (16:9, 4:3…)"},
+    {"add panscan %-", "Zoom out (fill less)"}, {"add panscan", "Zoom in to fill the screen"},
+    {"add video%-zoom%s+%-", "Zoom out"}, {"add video%-zoom", "Zoom in"},
+    {"set video%-zoom 0", "Reset zoom and position"}, {"cursor%-centric%-zoom%s+%-", "Zoom out where the mouse is"},
+    {"cursor%-centric%-zoom", "Zoom in where the mouse is"},
+    {"drag%-to%-pan", "Drag the picture around"}, {"video%-pan", "Move the picture"}, {"video%-align", "Move the picture"},
+    {"video%-scale", "Stretch the picture"}, {"video%-rotate", "Turn the picture"},
+    {"add contrast %-", "Less contrast"}, {"add contrast", "More contrast"},
+    {"add brightness %-", "Darker"}, {"add brightness", "Brighter"}, {"add gamma %-", "Less gamma"}, {"add gamma", "More gamma"},
+    {"add saturation %-", "Less colour"}, {"add saturation", "More colour"},
+    {"cycle deband", "Smooth banding on / off"}, {"cycle deinterlace", "Deinterlace on / off"},
+    {"cycle%-values hwdec", "Hardware decoding on / off"}, {"cycle edition", "Next edition"}, {"cycle video", "Video on / off"},
+    {"discnav", "Disc menu"}, {"playlist%-play%-index current", "Reload the video"},
+    {"update%-clipboard", "Play the address you copied"}, {"commands/open", "The player's command line"},
+    {"osc/visibility", "Controls: always / auto / never"},
+}
+local function says(cmd, comment)
+    if cmd == "ignore" or cmd == "" then return nil end
+    if cmd:find("osc/visibility") and mp.get_property("osc") == "no" then return nil end    -- (its controls aren't on)
+    for _, p in ipairs(SAYS) do
+        local a, b = cmd:match(p[1])
+        if a ~= nil then
+            if type(p[2]) == "function" then return p[2](a, b) end
+            return p[2]
+        end
+    end
+    if comment and comment ~= "" then return comment end
+    return cmd
+end
+
+local GROUPS = {
+    {"Playing", {"pause", "Pause", "Play", "Close", "speed", "Repeat", "frame", "Undo", "Mark", "start", "Reload", "Faster", "Slower"}},
+    {"Going back and on", {"Back ", "Forward ", "chapter", "subtitle line", "time"}},
+    {"Episodes and where they're from", {"episode", "Servers", "sites", "playing from", "sub / dub", "Episodes", "Recently", "Skip"}},
+    {"Sound", {"Volume", "Mute", "Sound", "audio", "sound"}},
+    {"Subtitles", {"ubtitle"}},
+    {"Picture and window", {"Full screen", "full screen", "Zoom", "picture", "Window", "window", "Screenshot", "Brighter", "Darker",
+                            "contrast", "gamma", "colour", "banding", "Deinterlace", "Hardware", "Video", "edition"}},
+}
+local function group_of(text)
+    for i, g in ipairs(GROUPS) do
+        for _, w in ipairs(g[2]) do
+            if text:find(w, 1, true) then return i end
+        end
+    end
+    return #GROUPS + 1
+end
+
+local function odd_key(k)
+    -- (mouse buttons, media keys and the number pad after the keys everyone has)
+    return k:find("MBTN") or k:find("WHEEL") or k:find("KP") or (KEY_NAMES[k] and KEY_NAMES[k]:find("key")) or KEY_NAMES[k] and KEY_NAMES[k]:find("^Media")
+end
+
+function shortcut_list()
+    local active = {}
+    for _, b in ipairs(mp.get_property_native("input-bindings") or {}) do
+        local section = b.section or ""
+        if (section == "default" or section:find("^input_")) and b.key ~= "MOUSE_MOVE"
+                and not (b.cmd or ""):find("uosc/__keybinding") then
+            local have = active[b.key]
+            if not have or (b.priority or 0) >= (have.priority or 0) then active[b.key] = b end
+        end
+    end
+    local by_text = {}
+    for key, b in pairs(active) do
+        local text = says(b.cmd or "", b.comment)
+        if text then
+            by_text[text] = by_text[text] or {text = text, cmd = b.cmd, keys = {}}
+            table.insert(by_text[text].keys, key)
+        end
+    end
+    local groups = {}
+    for _, row in pairs(by_text) do
+        table.sort(row.keys, function(a, b)
+            local oa, ob = odd_key(a) and true or false, odd_key(b) and true or false
+            if oa ~= ob then return not oa end
+            return #a < #b or (#a == #b and a < b)
+        end)
+        local g = group_of(row.text)
+        groups[g] = groups[g] or {}
+        table.insert(groups[g], row)
+    end
+    -- One list, a heading for each kind; a thing done by many keys takes a line for every three
+    -- (so no key is cut off at the menu's edge).
+    local items = {}
+    for i = 1, #GROUPS + 1 do
+        local rows = groups[i]
+        if rows then
+            table.sort(rows, function(a, b) return a.text < b.text end)
+            items[#items + 1] = {title = GROUPS[i] and GROUPS[i][1] or "Everything else", bold = true,
+                                 selectable = false, separator = false, value = "ignore"}
+            for _, row in ipairs(rows) do
+                for at = 1, #row.keys, 3 do
+                    local names = {}
+                    for j = at, math.min(at + 2, #row.keys) do names[#names + 1] = key_name(row.keys[j]) end
+                    items[#items + 1] = {title = row.text, hint = table.concat(names, "  ·  "), value = row.cmd,
+                                         muted = at > 1}
+                end
+            end
+            items[#items].separator = true
+        end
+    end
+    return items
+end
+
+mp.register_script_message("shortcuts", function()
+    local items = shortcut_list()
+    local utils = require "mp.utils"
+    local opts = mp.get_property_native("script-opts") or {}
+    if opts["uosc-color"] then
+        mp.commandv("script-message-to", "uosc", "open-menu", utils.format_json({
+            type = "watchlist-shortcuts", title = "Keyboard shortcuts", search_style = "on_demand",
+            footnote = "Choose one to do it now · type to search", items = items}))
+        return
+    end
+    -- (mpv's own controls: the list on the screen)
+    local lines = {}
+    for _, r in ipairs(items) do
+        lines[#lines + 1] = r.hint and (r.hint .. "   " .. r.title) or ("— " .. r.title .. " —")
+    end
+    mp.osd_message(table.concat(lines, "\n"), 20)
+end)

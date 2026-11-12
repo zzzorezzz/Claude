@@ -544,9 +544,12 @@ def catch_video(url, timeout=30, click=None, open_page=None):
     if click and click.get("quick"):
         timeout = min(timeout, 15)
     found, got, opts = [], threading.Event(), {"subs": []}
+    skip = webtools._skip()
 
     def keep(video, headers):
         u = video.lower()
+        if skip(video, _header(headers, "Referer") or ""):
+            return                               # (another episode's player: waited past)
         if webtools.blocked(video) or u.startswith(("blob:", "data:")) or re.search(
                 r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
                 or re.search(r"/(?:tiles?|thumbs?|thumbnails?|sprites?|storyboards?|previews?|trickplay)(?:/|[^/?]*\.m3u8)", u) \
@@ -658,7 +661,7 @@ def list_servers(url, timeout=24, open_page=None):
             page.close()
 
 
-def render(url, timeout=20, settle=2.5, open_page=None):
+def render(url, timeout=20, settle=2.5, open_page=None, then=None):
     """As webtools.render: (the page's HTML after its scripts ran, its address), or None."""
     from . import webtools
     open_page = open_page or _chromium_page
@@ -670,6 +673,21 @@ def render(url, timeout=20, settle=2.5, open_page=None):
         try:
             page.go(url)
             page.loaded.wait(timeout)
+            if then:
+                start = page.run("location.href") or url
+                try:
+                    page.run(then)
+                except (CDPError, OSError):
+                    pass                                    # (it may have left the page already)
+                wait = time.time() + 10
+                while time.time() < wait:
+                    time.sleep(0.5)
+                    try:
+                        if (page.run("location.href") or start) != start:
+                            time.sleep(settle)
+                            break
+                    except (CDPError, OSError):
+                        pass                                # (between pages)
             try:
                 page.run(webtools.EPISODES_TAB_JS)
             except (CDPError, OSError):

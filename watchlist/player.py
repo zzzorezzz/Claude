@@ -147,8 +147,9 @@ def why_it_stopped(session):
 
 
 def finished(pos, dur):
-    """Seen enough of it to count as watched: 90% in, or into the last two minutes."""
-    return bool(dur) and dur > 0 and pos is not None and (pos / dur >= 0.9 or dur - pos <= 120)
+    """Seen enough of it to count as watched: 90% in, or into the last two minutes of something
+    longer than ten (a short of a minute or two isn't watched by being opened)."""
+    return bool(dur) and dur > 0 and pos is not None and (pos / dur >= 0.9 or (dur > 600 and dur - pos <= 120))
 
 
 def resume_point(saved):

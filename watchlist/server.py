@@ -62,6 +62,12 @@ class OnlineError(Exception):
         self.choices, self.page = choices, page
 
 
+# Settings a phone (the phone link) can't change: the programs the PC runs and the folders it
+# reads, deletes in and syncs to are chosen on the computer itself.
+REMOTE_KEEPS_OFF = ("phone_access", "phone_port", "player", "vlc_path", "custom_player_path", "browser_path",
+                    "sync_folder", "downloads_folder", "last_folder")
+
+
 class ApiError(Exception):
     def __init__(self, message, status=HTTPStatus.BAD_REQUEST, code=""):
         super().__init__(message)
@@ -3899,8 +3905,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(data).encode("utf-8"), "application/json; charset=utf-8", self._out_headers)
 
     def _body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > 1_000_000:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise ApiError("bad Content-Length") from None
+        if length > 1_000_000 or length < 0:            # (-1 would read until the sender stops)
             raise ApiError("request too large")
         if not length:
             return {}
@@ -4080,7 +4089,9 @@ class Handler(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         csp = ("default-src 'self'; img-src 'self' https: data: blob:; style-src 'self' 'unsafe-inline'; "
                "frame-src https://www.youtube.com https://www.youtube-nocookie.com; "
-               "script-src 'self'; connect-src 'self'")
+               "script-src 'self'; connect-src 'self' blob:; "
+               # (videos saved on a phone play from blob: addresses, and so does hls.js's stream)
+               "media-src 'self' blob:; worker-src 'self' blob:")
         self._send(HTTPStatus.OK, target.read_bytes(), ctype,
                    {"Content-Security-Policy": csp, "Referrer-Policy": "strict-origin-when-cross-origin"})
 
@@ -4946,6 +4957,13 @@ class Handler(BaseHTTPRequestHandler):
     def api_update_item(self, body, item_id):
         item = self.app.item(item_id)
         patch = {}
+        if self.remote:
+            # (a phone picks among the title's own files - never another folder of the PC's)
+            mine = [x for x in (item["local_folder"], self.app.settings.get()["downloads_folder"]) if x]
+            for key in ("local_folder", "local_file"):
+                value = str(body.get(key) or "").strip().strip('"')
+                if key in body and value and value != item[key] and not any(_inside(value, x) for x in mine):
+                    raise ApiError("a title's folder is chosen on the computer", HTTPStatus.FORBIDDEN)
         if "progress" in body:
             p = body["progress"]
             patch["progress"] = {"season": max(1, int(p.get("season", 1))),
@@ -5161,7 +5179,7 @@ class Handler(BaseHTTPRequestHandler):
         types = body.get("types") or ["anime"]
         log = []
         for kind in [t for t in ("anime", "tv", "movie") if t in types] or ["anime"]:
-            got = scrape.find_search(url, kind, renderer=self.app._render_page, log=log)
+            got = scrape.find_search(url, kind, renderer=self.app._render_page, log=log, typer=webtools.type_search)
             if got:
                 return {"ok": True, "url": got["url"], "how": got["how"], "log": log}
         return {"ok": False, "log": log, "error": "its search link wasn't found - search for any title on the site and "
@@ -5408,7 +5426,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_put_settings(self, body):
         if self.remote:
-            for key in ("phone_access", "phone_port"):
+            # (a phone changes how the app looks and finds things - never which programs the PC runs,
+            # nor which of its folders the app reads, deletes in or syncs to)
+            for key in REMOTE_KEEPS_OFF:
                 body.pop(key, None)
         if "downloads_folder" in body:
             folder = str(body["downloads_folder"] or "").strip().strip('"')

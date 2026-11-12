@@ -46,10 +46,16 @@ class AlikeNamesTest(unittest.TestCase):
                 mock.patch.object(s, "_episodes", side_effect=episodes):
             self.assertEqual(s.episode_page(SITE, second, None, 3)[1]["url"], S2)
 
-    def test_no_count_known_the_one_without_a_year(self):
+    def test_no_count_known_you_are_asked(self):
+        # (both of the title's year, as far as anyone can tell: you pick - once - the two first)
         s = scrape.Scraper(tempfile.mkdtemp())
         with mock.patch.object(s, "search", return_value=ranked(S2, S1)), \
-                mock.patch.object(s, "_episodes", side_effect=episodes):
+                mock.patch.object(s, "_episodes", side_effect=episodes), \
+                self.assertRaises(scrape.ScrapeError) as asked:
+            s.episode_page(SITE, dict(ITEM, seasons=[]), None, 2)
+        self.assertEqual({c["url"] for c in asked.exception.choices[:2]}, {S1, S2})
+        s.pin_entry(ITEM, SITE, S1)
+        with mock.patch.object(s, "_episodes", side_effect=episodes):
             self.assertEqual(s.episode_page(SITE, dict(ITEM, seasons=[]), None, 2)[1]["url"], S1)
 
     def test_chosen_before_is_checked_once(self):

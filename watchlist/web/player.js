@@ -559,12 +559,28 @@ function wpMenu() {
     ${file ? `<h5>Quality</h5><div class="wp-opts">${[['', `As in Settings`], ['original', 'Original'], ['1080', '1080p'], ['720', '720p'], ['480', '480p']]
     .map(([v, l]) => `<button class="${q === v ? 'on' : ''}" data-q="${v}">${l}</button>`).join('')}</div>` : ''}
     <h5>Speed</h5><div class="wp-opts">${[0.5, 0.75, 1, 1.25, 1.5, 2].map((r) => `<button class="${s.speed === r ? 'on' : ''}" data-speed="${r}">${r}×</button>`).join('')}</div>
+    <div class="wp-opts"><button data-wp="keys">⌨ Keyboard shortcuts</button></div>
     ${keepable ? `<h5>On this ${deviceWord()}</h5><div class="wp-opts"><button data-wp="save-here">⬇ Save to this ${deviceWord()}</button>
       <button data-wp="saved-list">Saved…</button></div>` : ''}
     ${s.media ? `<p class="muted small wp-how">${{ saved: `Played from this ${typeof deviceWord === 'function' ? deviceWord() : 'device'} (saved) - deleted once you've watched it`, direct: 'Played as it is', copy: 'Repackaged for the phone (picture untouched)', encode: `Converted for the phone${s.media.encoder ? ` (${esc(s.media.encoder.replace('h264_', '').toUpperCase())})` : ''}`, site: `From ${esc(s.media.site || 'your site')}` }[s.media.how] || ''}</p>` : ''}`;
   sheet.classList.remove('hidden');
   wpShowUi(true);
   if (s.media?.how === 'site') wpServers();
+}
+
+// Every key the player answers to (a keyboard on an iPad, or a computer's browser): ? or the menu.
+const WP_KEYS = [
+  ['Space · K', 'Play / pause'], ['←', 'Back 10 s'], ['→', 'Forward 10 s'], ['↑', 'Volume up'], ['↓', 'Volume down'],
+  ['M', 'Mute on / off'], ['F', 'Full screen on / off'], ['N', 'Next episode'], ['P', 'Previous episode'],
+  ['Z', 'Subtitles earlier by 0.1 s'], ['X', 'Subtitles later by 0.1 s'], ['C', 'Subtitles on / off'],
+  ['?', 'These keyboard shortcuts'], ['Esc', 'Close the player'], ['Right-click', "The player's menu"],
+];
+function wpKeys() {
+  const sheet = wpQ('.wp-sheet');
+  sheet.innerHTML = `<div class="wp-sheet-head"><b>Keyboard shortcuts</b><button class="wp-btn" data-wp="menu" aria-label="Close">✕</button></div>
+    <dl class="wp-keys">${WP_KEYS.map(([k, what]) => `<dt>${esc(k)}</dt><dd>${esc(what)}</dd>`).join('')}</dl>`;
+  sheet.classList.remove('hidden');
+  wpShowUi(true);
 }
 
 // The Servers list in the menu: what the PC has found of the episode's servers (and your other
@@ -781,6 +797,7 @@ function wpWire(el) {
         else if (v.webkitSetPresentationMode) v.webkitSetPresentationMode(v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture');
       } catch { wpOsd("Picture in Picture isn't available here"); }
     } else if (a === 'airplay') v.webkitShowPlaybackTargetPicker?.();
+    else if (a === 'keys') wpKeys();
   });
   document.addEventListener('keydown', (e) => {
     if (!WP.s || WP.el.classList.contains('hidden') || e.target.closest('input, textarea')) return;
@@ -796,7 +813,19 @@ function wpWire(el) {
       WP.s.subDelay = Math.round(((WP.s.subDelay || 0) + (e.key === 'x' ? 0.1 : -0.1)) * 10) / 10;
       wpOsd(`Subtitle delay ${WP.s.subDelay > 0 ? '+' : ''}${WP.s.subDelay.toFixed(1)} s`, 1200);
     }
+    else if (e.key === 'm' || e.key === 'M') { v.muted = !v.muted; wpOsd(v.muted ? 'Muted' : 'Sound on', 900); }
+    else if (e.key === 'f' || e.key === 'F') wpQ('[data-wp="full"]')?.click();
+    else if (e.key === 'n' || e.key === 'N') { if (WP.s.index < WP.s.entries.length - 1) wpLoad(WP.s.index + 1, 0); }
+    else if (e.key === 'p' || e.key === 'P') { if (WP.s.index > 0) wpLoad(WP.s.index - 1, 0); }
+    else if (e.key === 'c' || e.key === 'C') wpQ('[data-wp="cc"]')?.click();
+    else if (e.key === '?') { e.preventDefault(); const sh = wpQ('.wp-sheet'); if (sh.classList.contains('hidden')) wpKeys(); else sh.classList.add('hidden'); }
     else if (e.key === 'Escape') wpClose();
+  });
+  // Right-click on the picture: the player's menu (where the keyboard shortcuts are too).
+  el.addEventListener('contextmenu', (e) => {
+    if (!WP.s || e.target.closest('.wp-sheet')) return;
+    e.preventDefault();
+    wpMenu();
   });
 }
 
