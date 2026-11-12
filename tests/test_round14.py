@@ -85,6 +85,22 @@ class CardNamesTest(unittest.TestCase):
         ranked = scrape.best_entry(scrape.candidates(page, "https://kaa.test/search?q=x"), wanted("Death Note"))
         self.assertEqual((ranked[0]["name"], ranked[0]["score"]), ("Death Note", 100))
 
+    def test_a_cards_numbers_and_placeholder_arent_its_name(self):
+        # (NestZone's "37 37 Death Note 8.4 TV 2006"; pressplayz's "No Image" card)
+        self.assertEqual(scrape.score("37 37 Death Note 8.4 TV 2006", wanted("Death Note")), 100)
+        page = scrape.parse('<a href="/watch/movie-inception-lbx9i"><img alt="No Image"></a>'
+                            '<a href="/watch/movie-inception-gyan6"><img alt="Inception"></a>', "https://pp.test/explore?q=x")
+        found = scrape.candidates(page, "https://pp.test/explore?q=x")
+        self.assertEqual(len(found), 2)
+        self.assertTrue(scrape._alike(found[0], found[1]))
+
+    def test_a_film_says_so_on_its_card(self):
+        found = [{"url": "a", "name": "tv 2006 Death Note", "names": ["tv 2006 Death Note", "death note"]},
+                 {"url": "b", "name": "movie 2006 Death Note", "names": ["movie 2006 Death Note", "death note"]}]
+        ranked = scrape.best_entry(found, wanted("Death Note", media_kind="tv"))
+        self.assertEqual(ranked[0]["url"], "a")
+        self.assertLess(ranked[1]["score"], scrape.MATCH_TO_PLAY)
+
 
 class ServersTest(unittest.TestCase):
     def test_a_comments_buttons_arent_servers(self):

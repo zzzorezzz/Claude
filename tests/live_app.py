@@ -144,6 +144,15 @@ def ok(row):
 
 
 def main(argv):
+    if not player.find_mpv():
+        # (from the source folder: the player that comes with it - without one, Play would open
+        # each episode's page in your browser instead)
+        bundled = Path(__file__).resolve().parent.parent / "packaging" / "mpv" / "mpv.exe"
+        if bundled.is_file():
+            os.environ["WATCHLIST_MPV"] = str(bundled)
+        else:
+            print("no mpv: set WATCHLIST_MPV")
+            return 2
     report = argv[0] if argv and argv[0].endswith(".json") else ""
     only = [a for a in argv if not a.endswith(".json")]
     root = tempfile.mkdtemp()

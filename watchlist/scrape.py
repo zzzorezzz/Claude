@@ -199,7 +199,8 @@ def find_search(url, kind="anime", renderer=None, log=None, typer=None):
                 if max(score(n, wanted) for n in c["names"]) >= 70}
 
     def finds(t, sample, item, render):
-        """Whether searching `t` for `sample` shows it (and not only what the home page shows anyway)."""
+        """(whether searching `t` for `sample` shows it - not only what the home page shows anyway -,
+        the addresses on the results page)."""
         wanted = wanted_of(item)
         q = t.replace("{title}", urllib.parse.quote_plus(sample)) if "?" in t else t.replace("{title}", urllib.parse.quote(sample))
         q = q.replace("{slug}", re.sub(r"[^a-z0-9]+", "-", sample.lower()).strip("-"))
@@ -208,11 +209,19 @@ def find_search(url, kind="anime", renderer=None, log=None, typer=None):
         except ScrapeError:
             page_text, page_url = "", q
         new = hits(page_text, page_url, wanted) - hits(text, final, wanted)
+        shown = page_text, page_url
         if not new and render:
             got = renderer(q)
             if got:
                 new = hits(got[0], got[1], wanted) - hits(text, final, wanted)
-        return bool(new)
+                shown = got
+        return bool(new), {c["url"] for c in candidates(parse(*shown), shown[1])}
+
+    def works(t, render):
+        """Both samples found - or, a smaller library, one of them, the other's search showing
+        other results (a real search, not a page that shows the same whatever is asked)."""
+        got = [finds(t, s, item, render) for s, item in samples]
+        return all(ok for ok, _ in got) or (any(ok for ok, _ in got) and got[0][1] != got[1][1])
     if not forms and renderer:
         got = renderer(home)
         if got:
@@ -224,8 +233,8 @@ def find_search(url, kind="anime", renderer=None, log=None, typer=None):
         if len(tried) > 14:
             break
         render = bool(renderer) and (t in forms or len(tried) <= 8)
-        ok = all(finds(t, sample, item, render) for sample, item in samples)
-        note(f"{t}: {'finds ' + ' and '.join(x for x, _ in samples) if ok else 'not a search that finds them'}")
+        ok = works(t, render)
+        note(f"{t}: {'finds what it has of ' + ' and '.join(x for x, _ in samples) if ok else 'not a search that finds them'}")
         if ok:
             return {"url": t, "how": "its search box" if t in forms else "the usual search link"}
     if typer:
@@ -237,15 +246,17 @@ def find_search(url, kind="anime", renderer=None, log=None, typer=None):
         t = _search_template(moved, sample)
         note(f"Typed {sample} into its search box: {moved or 'it stayed where it was'}")
         if t and t not in tried:
-            ok = all(finds(t, s, item, bool(renderer)) for s, item in samples)
-            note(f"{t}: {'finds ' + ' and '.join(x for x, _ in samples) if ok else 'not a search that finds them'}")
+            ok = works(t, bool(renderer))
+            note(f"{t}: {'finds what it has of ' + ' and '.join(x for x, _ in samples) if ok else 'not a search that finds them'}")
             if ok:
                 return {"url": t, "how": "typed into its search box"}
 
         def typed_finds(s, item):
             page = got if s == sample else (typer(home, s) or ("", ""))
-            return bool(hits(page[0], page[1] or home, wanted_of(item)) - hits(text, final, wanted_of(item)))
-        if got[0] and all(typed_finds(s, item) for s, item in samples):
+            return (bool(hits(page[0], page[1] or home, wanted_of(item)) - hits(text, final, wanted_of(item))),
+                    {c["url"] for c in candidates(parse(page[0], page[1] or home), page[1] or home)})
+        typed = [typed_finds(s, item) for s, item in samples] if got[0] else []
+        if typed and (all(ok for ok, _ in typed) or (any(ok for ok, _ in typed) and typed[0][1] != typed[1][1])):
             note("Its results show on its page as the title is typed in")
             return {"url": home.split("#")[0] + TYPED + "{title}", "how": "typed into its search box (its results show on its page)"}
     return None
@@ -596,9 +607,14 @@ def _fold(word):
 def _numbers(text):
     """The numbers in a name that are part of it ("Kaiju No. 8", "Jujutsu Kaisen 0", "Mob
     Psycho 100") - not a season's, a part's or a year."""
+    # (not what a card says beside it either: a rating "8.4", "37 eps", "24 min", "37 37")
+    text = re.sub(r"\d+[.,]\d+|\b\d+\s*(?:eps?|episodes?|min|mins|minutes|%|/\s*\d+)(?![a-z])", " ", str(text or ""), flags=re.I)
     n = library.norm(text)
     n = re.sub(r"\b(?:season|part|cour|s)\s*\d+\b|\b\d+(?:st|nd|rd|th)\s+season\b|\b(?:19|20)\d\d\b", " ", n)
-    return set(re.findall(r"\b\d{1,3}\b", n))
+    words = n.split()
+    # (only a number among its words - "Kaiju No 8", "Jujutsu Kaisen 0" - not one a card puts before its name)
+    first = next((i for i, w in enumerate(words) if not w.isdigit()), len(words))
+    return {w for w in words[first:] if w.isdigit() and len(w) <= 3}
 
 
 def score(text, wanted):
@@ -673,6 +689,10 @@ _NAV = re.compile(r"^(home|login|log in|sign in|sign up|register|contact|dmca|fa
                   r"\d{1,3}|»|«|>|<|›|‹)$", re.I)
 
 
+# A picture's stand-in text, not a name ("No Image" on a card without its poster).
+_NO_NAME = re.compile(r"^(?:no[ -]?image|image|img|poster|thumbnail|thumb|cover|loading\.*|placeholder|no[ -]?poster)$", re.I)
+
+
 def candidates(page, search_page):
     """The links on a results page that could be titles: [{"url", "name"}], one per address."""
     by = {}
@@ -688,6 +708,7 @@ def candidates(page, search_page):
         texts = [t for t in (link["title"], link["text"]) if t and not _NAV.match(t.strip())]
         if not texts:
             continue
+        texts = [t for t in texts if not _NO_NAME.match(t.strip())]       # (named by its address instead)
         entry = by.setdefault(href, {"url": href, "names": []})
         entry["names"] += [t[:160] for t in texts]
     out = []
@@ -721,7 +742,9 @@ def _same_but_year(a, b):
 
 def _alike(a, b):
     """Two results that name the same thing (but for a year): which one is meant isn't in the name."""
-    return bool(_bare_name(a["name"])) and _bare_name(a["name"]) == _bare_name(b["name"]) and a["url"] != b["url"]
+    def words(n):        # (its own words: "Movie Inception" from an address is "Inception")
+        return " ".join(_fold(w) for w in _base_words(_bare_name(n))) + "|" + str(_season_of_text(n) or 1)
+    return bool(_bare_name(a["name"])) and words(a["name"]) == words(b["name"]) and a["url"] != b["url"]
 
 
 def best_entry(found, wanted):
@@ -729,6 +752,12 @@ def best_entry(found, wanted):
     scored = []
     for c in found:
         s = max(score(n, wanted) for n in c["names"])
+        # A film (or an OVA...) says so in one of its names - its card's - not always in the one that
+        # scored best (its address: "death-note" for the film too): it's still not the series.
+        kinds = {_kind_of_text(n) for n in c["names"]} - {""}
+        if kinds and wanted["kind"] not in kinds and not (kinds == {"ona"} and wanted["kind"] == "tv") \
+                and not any(_kind_of_text(n) for n in c["names"] if score(n, wanted) == s):
+            s = max(0, s - 40)
         # A link saying it's an episode is an episode's page, not the title's.
         if re.search(r"\b(?:episode|ep)\s*\d", c["name"], re.I) and not re.search(r"\bepisodes\b", c["name"], re.I):
             s -= 8
@@ -1081,7 +1110,7 @@ def _anikoto_episode_links(page_url, text):
     else:
         return {}
     out = {}
-    for num in re.findall(r"\bdata-num=[\"'](\d{1,4})[\"']", text, re.I):
+    for num in re.findall(r"\bdata-num(?:ber)?=[\"'](\d{1,4})[\"']", text, re.I):
         number = int(num)
         if number > 0:
             out.setdefault((None, number), head + str(number))
@@ -1092,7 +1121,7 @@ def _anikoto_servers(page_url, text):
     """An AnikotoTV episode's Sub / Dub server buttons, as HTML the stream finder
     knows ("" when it isn't such a page). The watch page fills them in later by
     its scripts: the episode's ids come from its catalog, the buttons from them."""
-    show = re.search(r"\bid=[\"']watch-main[\"'][^>]*\bdata-id=[\"'](\d+)[\"']", text, re.I)
+    show = re.search(r"\bid=[\"'](?:watch-main|wrapper|main-wrapper)[\"'][^>]*\bdata-id=[\"'](\d+)[\"']", text, re.I)
     num = re.search(r"/ep-(\d+)", urllib.parse.urlsplit(page_url).path)
     if not show or not num:
         return ""
@@ -2062,7 +2091,7 @@ class Scraper:
             if _play_session(pin):
                 got["id"] = _play_session(pin)
             entries[key] = got
-            self._remember(item["id"], site, entries=entries, episodes={})
+            self._remember(item["id"], site, entries=entries, episodes={}, videos={})
             return got, mem.get("others") or []
         got = entries.get(key)
         if got and (got.get("pinned") or time.time() - got.get("at", 0) < ENTRY_DAYS * 86400):
@@ -2106,12 +2135,12 @@ class Scraper:
                 self._note(f"Nothing clear in the search ({guess} is another title's page)")
         others = [{"url": c["url"], "name": c["name"], "score": c["score"]} for c in ranked[:8]]
         by_id = bool(ranked and tid and _has_id(ranked[0]["url"], tid))
-        if ranked and 20 <= ranked[0]["score"] < MATCH_TO_PLAY and not by_id:
+        if ranked and 40 <= ranked[0]["score"] < MATCH_TO_PLAY and not by_id:
             # Only a little like it (another name for it - or another show): you pick, the closest
             # first, rather than it playing; what you pick is remembered.
             self._remember(item["id"], site, others=others)
             raise ScrapeError(f"is one of these on {site['name']} {item['title']}?", choices=others)
-        if not ranked or ranked[0]["score"] < 20:
+        if not ranked or ranked[0]["score"] < 40:
             self._remember(item["id"], site, others=others)
             raise ScrapeError(f"{site['name']} has nothing that looks like {item['title']}"
                               + (f" (closest: {ranked[0]['name']})" if ranked else ""), choices=others)
@@ -2222,8 +2251,19 @@ class Scraper:
         # AnikotoTV - and the many sites built like it (anichi, animesogo, hianimez...) - loads its
         # complete episode catalog asynchronously. The initial watch page otherwise contains only a
         # handful of current server/mirror controls, which looks like a six-episode series.
-        show = (re.search(r"\bdata-anime-id=[\"'](\d+)[\"']", text, re.I)
-                or re.search(r"\bid=[\"']watch-main[\"'][^>]*\bdata-id=[\"'](\d+)[\"']", text, re.I))
+        def anikoto_id(page_text):
+            return (re.search(r"\bdata-anime-id=[\"'](\d+)[\"']", page_text, re.I)
+                    or re.search(r"\bid=[\"'](?:watch-main|wrapper|main-wrapper)[\"'][^>]*\bdata-id=[\"'](\d+)[\"']", page_text, re.I))
+        show = anikoto_id(text)
+        if not show and len(eps) < 12:
+            # (a page without the id - hianimez's title page: its watch page, named like it, has it)
+            slug = re.sub(r"/ep-[^/]*$", "", urllib.parse.urlsplit(final).path.rstrip("/")).split("/")[-1]
+            watch = next((x["href"] for x in page.links if re.search(r"/watch/" + re.escape(slug) + r"(?:/|$)", x["href"])), "")
+            if watch and watch != final:
+                try:
+                    show = anikoto_id(fetch(watch, referer=final)[0])
+                except ScrapeError:
+                    show = None
         if show:
             base = final
             if "/watch/" not in urllib.parse.urlsplit(final).path:
@@ -2236,7 +2276,7 @@ class Scraper:
                 payload = fetch(f"{parts.scheme}://{parts.netloc}/ajax/episode/list/{show.group(1)}",
                                 referer=base, xhr=True)[0] if base else ""
                 rows = json.loads(payload) if payload else {}
-                catalog = _anikoto_episode_links(base, str(rows.get("result") or "")) if isinstance(rows, dict) else {}
+                catalog = _anikoto_episode_links(base, str(rows.get("result") or rows.get("html") or "")) if isinstance(rows, dict) else {}
                 if len(catalog) > len(eps):
                     eps = catalog
                     self._note(f"Read the site's complete episode index (built like AnikotoTV's): {len(eps)} episode links")
@@ -2579,8 +2619,12 @@ class Scraper:
                 got = self._stream_video(site, page_url, entry, prefs, x, text, final, caught_none=auto_missed)
                 if _trailer(got["url"]):
                     raise ScrapeError("that's a trailer, not the episode")
+                if not str(got["url"]).startswith(("http://", "https://")):
+                    raise ScrapeError(f"no video there ({str(got['url'])[:40]})")      # (about:blank, a player's own blob:)
                 if f"url:{got['url']}" in skip:
                     raise ScrapeError("the same video as the one that didn't play")
+                if got["url"] in (getattr(self._here, "taken", None) or ()):
+                    raise ScrapeError("the same video another episode played - not this one's")
             except ScrapeError as e:
                 errors.append(f"{x['label'] if x else 'the page'}: {e}")
                 self._note(f"  {errors[-1]}")

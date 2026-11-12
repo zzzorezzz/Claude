@@ -988,7 +988,7 @@ def catch_video(url, timeout=30, click=None):
         u = video.lower()
         if skip(video, headers.get("Referer") or headers.get("referer") or ""):
             return
-        if blocked(video) or u.startswith(("blob:", "data:")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
+        if blocked(video) or not u.startswith(("http://", "https://")) or re.search(r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
                 or re.search(r"/(?:tiles?|thumbs?|thumbnails?|sprites?|storyboards?|previews?|trickplay)(?:/|[^/?]*\.m3u8)", u) \
                 or trailer(video):
             return

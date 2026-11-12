@@ -533,6 +533,16 @@ def _chromium_page(scripts, on_request=None, on_response=None):
     return _Page(_get_browser(), scripts, on_request, on_response)
 
 
+def _opened(open_page, *args):
+    """A new page - once more a moment later when the first try fails (the browser still starting,
+    the first time it's used after the app opens: that first video isn't lost)."""
+    try:
+        return open_page(*args)
+    except (CDPError, OSError, ValueError, KeyError, StopIteration):
+        time.sleep(1.5)
+        return open_page(*args)
+
+
 def catch_video(url, timeout=30, click=None, open_page=None):
     """As webtools.catch_video: {"url", "headers", "subs"} for the video a page's player
     asks for (after clicking `click` when given), or None. `open_page` opens the page
@@ -550,7 +560,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
         u = video.lower()
         if skip(video, _header(headers, "Referer") or ""):
             return                               # (another episode's player: waited past)
-        if webtools.blocked(video) or u.startswith(("blob:", "data:")) or re.search(
+        if webtools.blocked(video) or not u.startswith(("http://", "https://")) or re.search(
                 r"\.(ts|m4s|aac|key|vtt|srt|mp3|m4a|ogg|oga|opus|wav|flac)(\?|$)", u) \
                 or re.search(r"/(?:tiles?|thumbs?|thumbnails?|sprites?|storyboards?|previews?|trickplay)(?:/|[^/?]*\.m3u8)", u) \
                 or webtools.trailer(video):
@@ -601,7 +611,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
         scripts.append(webtools.ADBLOCK_JS)
     with webtools.slot(_lock):
         try:
-            page = open_page(scripts, on_request, on_response)
+            page = _opened(open_page, scripts, on_request, on_response)
         except (CDPError, OSError, ValueError, KeyError, StopIteration):
             return None
         try:
@@ -649,7 +659,7 @@ def list_servers(url, timeout=24, open_page=None):
     scripts = [webtools.AUTOPLAY_JS, webtools.LIST_ALL_JS, webtools.SERVERS_JS] + ([webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
     with webtools.slot(_lock):
         try:
-            page = open_page(scripts, lambda u, headers, kind: webtools.servers_signal(u, opts), None)
+            page = _opened(open_page, scripts, lambda u, headers, kind: webtools.servers_signal(u, opts), None)
         except (CDPError, OSError, ValueError, KeyError, StopIteration):
             return []
         try:
@@ -667,7 +677,7 @@ def render(url, timeout=20, settle=2.5, open_page=None, then=None):
     open_page = open_page or _chromium_page
     with webtools.slot(_lock):
         try:
-            page = open_page([webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
+            page = _opened(open_page, [webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
         except (CDPError, OSError, ValueError, KeyError, StopIteration):
             return None
         try:
