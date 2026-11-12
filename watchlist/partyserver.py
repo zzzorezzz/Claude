@@ -214,6 +214,10 @@ class PartyServer:
         if "server" in ignore and ignore["server"] == client.server_ignoring:
             client.server_ignoring = 0             # (it has the last change we sent it)
         playstate = state.get("playstate")
+        if "client" in ignore and playstate is None:
+            # (a change it's still waiting to hear back about, without its place: heard, as
+            # Syncplay's servers answer - else it would wait for ever)
+            client.send({"State": {"ignoringOnTheFly": {"client": ignore["client"]}, "ping": self._ping(client)}})
         if "client" in ignore and playstate is not None:
             # A change it made (pause, play, seek): the room's, and everyone else's now.
             room = self.rooms.setdefault(client.room, _Room())

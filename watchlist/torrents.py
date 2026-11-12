@@ -88,6 +88,35 @@ def kind_of(path):
     return "video" if ext in scanner.VIDEO_EXTS else "subtitle" if ext in scanner.SUB_EXTS else "other"
 
 
+class _Handles(dict):
+    """The added torrents' handles; one that's no longer valid is added again as it's used."""
+
+    def __init__(self, heal):
+        super().__init__()
+        self._heal = heal
+
+    def _fresh(self, h, handle):
+        try:
+            if handle is not None and not handle.is_valid():
+                return self._heal(h)
+        except Exception:  # noqa: BLE001 - (it's handed out as it is)
+            pass
+        return handle
+
+    def get(self, h, default=None):
+        handle = super().get(h, default)
+        return self._fresh(h, handle) if handle is not default else default
+
+    def __getitem__(self, h):
+        return self._fresh(h, super().__getitem__(h))
+
+    def values(self):
+        return [self[h] for h in list(self.keys())]
+
+    def items(self):
+        return [(h, self[h]) for h in list(self.keys())]
+
+
 class _Peeker:
     """Looking inside torrents that aren't added, one by one as they come:
     add() starts fetching a torrent's list of files, poll() gives every one
@@ -197,7 +226,8 @@ class Torrents:
         self.port_in = int(state.get("port") or 0) if isinstance(state, dict) else 0     # (the port others reach it on)
         self._last_clean = time.time() - CLEAN_EVERY + 120      # the first look, two minutes after starting
         self.lock = threading.RLock()
-        self.handles = {}
+        self.handles = _Handles(self._heal)
+        self._peekers = []           # looks inside torrents that aren't added (_Peeker), open now
         self.ses = None
         self.error = "" if lt else "Torrents need libtorrent, which is missing from this copy of the app."
         self.token = secrets.token_hex(8)
@@ -241,6 +271,7 @@ class Torrents:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _add_handle(self, h, rec):
+        self._release_peek(h)
         meta = self.dir / f"{h}.torrent"
         if meta.exists():
             p = lt.add_torrent_params()
@@ -257,7 +288,7 @@ class Torrents:
         else:
             p.flags &= ~lt.torrent_flags.paused
         handle = self.ses.add_torrent(p)
-        self.handles[h] = handle
+        dict.__setitem__(self.handles, h, handle)
         if meta.exists():
             handle.set_flags(lt.torrent_flags.sequential_download)
         return handle
@@ -1265,7 +1296,43 @@ class Torrents:
             peeker.close()
 
     def peeker(self):
-        return _Peeker(self)
+        peeker = _Peeker(self)
+        with self.lock:
+            self._peekers = [p for p in self._peekers if p.handles] + [peeker]
+        return peeker
+
+    def _release_peek(self, h):
+        """A torrent being added that's also being looked inside: the look lets it go first (else
+        it would take the added one's handle with it as it closes), and libtorrent is given a moment
+        to finish letting it go."""
+        for peeker in list(self._peekers):
+            handle = peeker.handles.pop(h, None)
+            if handle is None:
+                continue
+            try:
+                self.ses.remove_torrent(handle)
+            except Exception:  # noqa: BLE001
+                pass
+            for _ in range(50):
+                try:
+                    if not handle.is_valid():
+                        break
+                except Exception:  # noqa: BLE001
+                    break
+                time.sleep(0.1)
+
+    def _heal(self, h):
+        """A handle libtorrent let go of, for a torrent that's still added: added again."""
+        with self.lock:
+            rec = self.records.get(h)
+            if rec is None:
+                dict.pop(self.handles, h, None)
+                return None
+            try:
+                return self._add_handle(h, rec)
+            except Exception:  # noqa: BLE001 - it stays gone (shown as not loaded)
+                dict.pop(self.handles, h, None)
+                return None
 
     # ---- packs: which title each file is, worked out across the franchise
 

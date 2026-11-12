@@ -806,10 +806,17 @@ class App:
         note = ""
         if current and current.active and current.role == "host":
             party = current                  # already hosting: just play this in it
-        elif how == "direct":
-            party, note = self._party_direct()
         else:
-            party, note = self._party_somewhere()
+            if how == "direct":
+                party, note = self._party_direct()
+            else:
+                party, note = self._party_somewhere()
+            # Something already playing (a party started again mid-episode): the party takes it
+            # up now - everyone who joins gets that episode, without it being played again.
+            playing = self._open_player()
+            if playing is not None and item is None:
+                playing.party = True
+                party.attach(playing)
         out = {"ok": True, "code": party.invite, "room": party.room, "server": party.server, "file": "",
                "note": note, "via": getattr(party, "via", "syncplay")}
         if item is not None and source == "online":
@@ -931,6 +938,18 @@ class App:
         party.via, party.backend = "direct", [own]
         self._start_party(party)
         return party, note
+
+    def _open_player(self):
+        """The player open now on this device (the computer's, the phone app's, or this phone's
+        over the network), or None."""
+        web = self._web_device()
+        if web:
+            session = self.web_sessions.get(web["id"])
+        elif launcher.ANDROID:
+            session = phone_player.current()
+        else:
+            session = self.player.session
+        return session if session is not None and not session.ended else None
 
     @staticmethod
     def _party_hello(party):
@@ -1937,6 +1956,9 @@ class App:
         for e in entries:
             e["label"] = self._label(item, e["key"])
             e["party"] = self._party_meta(item, e["key"])
+            streamed = self.torrents.parse_url(e["path"])
+            if streamed and not e.get("torrent"):
+                e["torrent"] = {"hash": streamed[0], "index": streamed[1]}     # (a film's torrent too)
             if e.get("torrent"):
                 # The other side of a watch party can stream the same torrent: its exact
                 # file (no need to work out the whole torrent first), and from you.
@@ -2498,6 +2520,8 @@ class App:
             threading.Thread(target=self._link_around, args=(item["id"], site, key, session), daemon=True).start()
         with self._party_lock:
             party = self.party if self.party and self.party.active and self.party.session is session else None
+        if party:
+            party._announced = False         # (its new copy told to the room: guests take that very one)
         if share and party:
             whole = server_id.startswith("site|")
             party.share_server({"k": key, "h": urllib.parse.urlsplit(site["url"]).netloc.lower().removeprefix("www."),
@@ -2511,6 +2535,7 @@ class App:
         if not entry or not entry.get("web") or entry.get("key") != choice.get("k"):
             return
         item = self.store.get(session.item_id)
+        before = ((party.leader_file() or {}).get("watchlist") or {}).get("url")
         host = str(choice.get("h") or "")
         site = next((s for s in self._video_sites(item)
                      if urllib.parse.urlsplit(s["url"]).netloc.lower().removeprefix("www.") == host), None)
@@ -2540,6 +2565,20 @@ class App:
                 self._servers[slot]["order"].append(sid)
                 items[sid] = {"id": sid, "site_id": site["id"], "site": site["name"], "label": label, "kind": kind,
                               "state": "unchecked"}
+        # The host's very copy, once the host's app tells it (a server's name can give another copy
+        # here - seconds longer or shorter), when it plays from here too.
+        meta = {}
+        for _ in range(40):
+            meta = (party.leader_file() or {}).get("watchlist") or {}
+            if meta.get("url") and meta["url"] != before:
+                break
+            time.sleep(0.25)
+        url = meta.get("url") if meta.get("url") != before else ""
+        if url and scrape.plays_here(url, dict(meta.get("headers") or {}, Referer=meta.get("referer") or "")):
+            items[sid] = dict(items[sid], state="ok", url=url, at=time.time(),
+                              found={"url": url, "referer": meta.get("referer") or "", "headers": meta.get("headers") or {},
+                                     "subtitle": meta.get("sub") or "", "stream": meta.get("stream") or {},
+                                     "page": meta.get("page") or "", "entry": {"url": meta.get("entry") or ""}, "streams": []})
         self.use_server(session, sid, share=False)
 
     def _other_site(self, session):
@@ -2953,7 +2992,7 @@ class App:
         session.listeners.append(lambda sess, msg: self._online_event(sess, item["id"], msg))
         self._online_extras(session, item["id"], entry)
         if series:
-            self._link_around(item["id"], site, key, session)
+            threading.Thread(target=self._link_around, args=(item["id"], site, key, session), daemon=True).start()
         return dict(result, player="mpv", resumed_at=start, file=entry["name"], tried=tried)
 
     def _online_playlist(self, item, site, entry):
@@ -2992,8 +3031,26 @@ class App:
                               "party": dict(self._party_meta(item, key), track=track or "",
                                             site={"name": site_now["name"], "url": site_now["url"]})}
                 self._party_now(hosting, meta_entry, upcoming=True)
+        with self._party_lock:
+            guest = self.party if self.party and self.party.active and self.party.role == "guest" else None
+        if guest:
+            # A guest's player moving on: the host's copy of that episode (as for the first one) -
+            # once the host's app says it's on it too.
+            for _ in range(40):
+                meta = (guest.leader_file() or {}).get("watchlist") or {}
+                if (meta.get("season"), meta.get("episode")) == (season, episode) and meta.get("url"):
+                    entry = self._party_online_entry(item, meta, lambda *a: None)
+                    if entry:
+                        return entry["path"]
+                    break
+                time.sleep(0.25)
         site, found = self._episode_video(item, season, episode, track=track, prefer=site_id)
         playing = phone_player.current() if launcher.ANDROID else self.player.session
+        if playing is not None and not playing.ended:
+            details = self._web_entry(item, site, key, found)["party"]
+            for e in playing.entries:
+                if e.get("key") == key and e.get("online"):
+                    e["party"] = details
         threading.Thread(target=self._link_around, args=(item_id, site, key, playing), daemon=True).start()
         return self._playable(found)
 
@@ -3363,7 +3420,7 @@ class App:
                               headers=shared, sub=found.get("subtitle") or "", track=track,
                               stream={k: v for k, v in (found.get("stream") or {}).items() if k in ("id", "label", "kind")},
                               site={"name": site["name"], "url": site["url"]},
-                              entry=(found.get("entry") or {}).get("url") or "")
+                              entry=(found.get("entry") or {}).get("url") or "", page=found.get("page") or "")
         return entry
 
     def _render_page(self, url):
@@ -3386,22 +3443,36 @@ class App:
         site = self._party_site(source, item)
         track = meta.get("track") or ""
         report("preparing", 0.2, None, f"{label} - opening it on {source['name']}")
-        # Found by this app, from here: a site's video link is often good only for the computer
-        # that found it (Atlantic: "error code 14"), so the host's is the last resort.
+        # The very video the host plays, when it plays from here too: the same copy, so the same
+        # moment at the same time (another server's copy can be seconds longer or shorter).
         found = None
+        url = str(meta.get("url") or "")
+        hdrs = dict(meta.get("headers") or {}, Referer=meta.get("referer") or "")
+        if url.startswith(("http://", "https://")) and scrape.plays_here(url, hdrs):
+            found = {"url": url, "referer": meta.get("referer") or "", "headers": meta.get("headers") or {},
+                     "subtitle": meta.get("sub") or "", "stream": meta.get("stream") or {"kind": track or "sub"},
+                     "page": meta.get("page") or "", "entry": {"url": meta.get("entry") or ""}, "streams": []}
+            report("preparing", 0.6, None, f"{label} - the host's own copy")
         try:
-            pin = "" if self.scraper.remembered(item["id"], site) else str(meta.get("entry") or "")
+            # (else the host's own episode page - never this computer's idea of which page it is,
+            # which can be another episode, or another show - and the host's server on it)
+            pin = str(meta.get("entry") or "") or ("" if self.scraper.remembered(item["id"], site) else "")
+            page = str(meta.get("page") or "")
             want = meta.get("stream") or {}
-            if want.get("label") and not str(want.get("id") or "").startswith(("lang:", "switch:")):
+            if not found and want.get("label") and not str(want.get("id") or "").startswith(("lang:", "switch:")):
                 # The host's own server (another server is often another copy, seconds apart).
                 try:
-                    found = self.scraper.resolve(site, item, season, episode, pin=pin, remember=False,
+                    found = self.scraper.resolve(site, item, season, episode, pin=pin, remember=False, page=page,
                                                  stream=f"{want.get('id') or 'x'}:{want.get('kind') or track}:{want['label']}")
-                    self._online_found[(item["id"], key)] = (site, found, time.time())
+                except scrape.ScrapeError:
+                    found = None
+            if not (found and found.get("url")) and page:
+                try:
+                    found = self.scraper.resolve(site, item, season, episode, pin=pin, page=page, track=track)
                 except scrape.ScrapeError:
                     found = None
             if found and found.get("url"):
-                pass
+                found = self._same_copy(site, item, season, episode, found, page, pin, track)
             elif pin:
                 found = self.scraper.resolve(site, item, season, episode, pin=pin, track=track)
                 self._online_found[(item["id"], key)] = (site, found, time.time())
@@ -3409,9 +3480,8 @@ class App:
                 found = self._episode_video(item, season, episode, track=track, prefer=site["id"])[1]
         except (scrape.ScrapeError, OnlineError):
             found = None
-        url = str(meta.get("url") or "")
         if not (found and found.get("url")) and url.startswith(("http://", "https://")) \
-                and not scrape.scrambled_playlist(url, dict(meta.get("headers") or {}, Referer=meta.get("referer") or "")):
+                and not scrape.scrambled_playlist(url, hdrs):
             found = {"url": url, "referer": meta.get("referer") or "", "headers": meta.get("headers") or {},
                      "subtitle": meta.get("sub") or "", "stream": {"kind": track or "sub"}}
         if not (found and found.get("url")):
@@ -3428,6 +3498,29 @@ class App:
             threading.Thread(target=self._prefetch_online, args=(site, item, season, episode + 1, meta),
                              daemon=True).start()
         return entry
+
+    def _same_copy(self, site, item, season, episode, found, page, pin, track):
+        """A guest's video as long as the host's (the same copy of the episode): when it isn't,
+        the site's other servers are tried for one that is - else it plays, and says so."""
+        with self._party_lock:
+            party = self.party
+        host = ((party.leader_file() if party else None) or {}).get("duration") or 0
+        mine = scrape.hls_length(found["url"], dict(found.get("headers") or {}, Referer=found.get("referer") or ""))
+        if not host or not mine or abs(host - mine) <= 2:
+            return found
+        for x in [s for s in self.scraper.episode_servers(found) if s.get("id") != (found.get("stream") or {}).get("id")][:5]:
+            try:
+                other = self.scraper.resolve(site, item, season, episode, pin=pin, page=page, remember=False,
+                                             stream=f"{x['id']}:{x['kind']}:{x['label']}")
+            except scrape.ScrapeError:
+                continue
+            length = scrape.hls_length(other["url"], dict(other.get("headers") or {}, Referer=other.get("referer") or ""))
+            if length and abs(host - length) <= 2:
+                return dict(other, streams=found.get("streams") or other.get("streams"))
+        if party:
+            party.osd(f"Your copy is {abs(host - mine):.0f} s {'longer' if mine > host else 'shorter'} than the host's - "
+                      "you may be a little apart", 8)
+        return found
 
     def _party_site(self, source, item):
         """The host's video site, as one of this app's own (added to your sites if it isn't one,

@@ -414,10 +414,15 @@ class PartyServerTest(ServerListTest):
         app._online_found[(self.item["id"], "1:1")] = (site, dict(found, stream=playing), time.time())
         app._servers.clear()
         party.share_server.reset_mock()
-        with mock.patch.object(app, "use_server") as use:
+        # (the host's app then tells its new copy: the guest takes that very one)
+        files = iter([{"watchlist": {"url": "https://cdn.test/prism.m3u8"}}] + [{"watchlist": {"url": "https://cdn.test/host-edge.m3u8"}}] * 50)
+        party.leader_file.side_effect = lambda: next(files)
+        with mock.patch.object(app, "use_server") as use, mock.patch.object(scrape, "plays_here", return_value=True):
             app._party_server_choice(party, choice)
         sid = use.call_args.args[1]
-        self.assertEqual(app._servers[(self.item["id"], "1:1")]["items"][sid]["label"], "Edge")
+        chosen = app._servers[(self.item["id"], "1:1")]["items"][sid]
+        self.assertEqual(chosen["label"], "Edge")
+        self.assertEqual(chosen["found"]["url"], "https://cdn.test/host-edge.m3u8")
         self.assertEqual(use.call_args.kwargs, {"share": False})
 
 
@@ -429,3 +434,88 @@ class NoClashTest(unittest.TestCase):
         for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
             names = [f.name for f in cls.body if isinstance(f, ast.FunctionDef)]
             self.assertEqual(sorted({n for n in names if names.count(n) > 1}), [], cls.name)
+
+
+try:
+    import libtorrent as _lt  # noqa: F401
+except ImportError:
+    _lt = None
+
+
+@unittest.skipUnless(_lt, "needs libtorrent")
+class MagnetWhileLookingInsideTest(unittest.TestCase):
+    def test_a_magnet_added_while_its_files_are_being_looked_at_stays_added(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        app = App(tmp.name)
+        item = app.store.add(new_item("movie", {"source": "tmdb", "source_id": "movie/10378", "title": "Big Buck Bunny"}))
+        magnet = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny"
+        peeker = app.torrents.peeker()
+        peeker.add(magnet)                               # (its files being looked at - search results)
+        app.torrents.add(item["id"], magnet)             # ...and added meanwhile
+        peeker.close()
+        view = app.torrents.view("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")   # (was "invalid torrent handle used")
+        self.assertEqual(view["hash"], "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")
+        self.assertTrue(app.torrents.handles["dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c"].is_valid())
+
+
+class OwnPauseThenPlayTest(unittest.TestCase):
+    def test_play_after_your_own_pause_plays_for_everyone(self):
+        p, s = party(), FakeSession(pos=100.0)
+        p.session = s
+        playing_room(p, s, 100.0)
+        s.paused = True                                  # you pause...
+        p._update_player(s)
+        p._player_at -= 9                                # (nine seconds on)
+        p._client_ignoring = 0                           # (the server heard it)
+        s.paused = False                                 # ...and press play again
+        p._update_player(s)
+        self.assertFalse([c for c in s.sent if c[0] == "seek"], "it jumped to where it thought the others were")
+        states = [c.args[0]["State"]["playstate"] for c in p.conn.send.call_args_list if "playstate" in c.args[0].get("State", {})]
+        self.assertEqual([x["paused"] for x in states], [True, False], "the room wasn't told about the play")
+
+
+class TwoChangesQuicklyTest(unittest.TestCase):
+    def test_a_second_change_before_the_first_is_heard_doesnt_shut_the_player_out(self):
+        p, s = party(), FakeSession(pos=100.0)
+        p.session = s
+        playing_room(p, s, 100.0)
+        s.paused = True
+        p._update_player(s)                              # a pause...
+        s.paused = False
+        p._update_player(s)                              # ...and play, before the server answered the pause
+        p._handle_state({"ignoringOnTheFly": {"client": 1}})   # (the server hears the pause)
+        self.assertEqual(p._client_ignoring, 0, "waiting for an answer that never comes")
+        s.sent.clear()
+        p._handle_state({"playstate": {"position": 150.0, "paused": False, "doSeek": True, "setBy": "Ben"}})
+        self.assertIn(["seek", 150.0, "absolute"], s.sent, "what the others do no longer reached this player")
+
+
+class FilmTorrentPartyTest(unittest.TestCase):
+    def test_a_films_torrent_goes_with_the_party(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        app = App(tmp.name)
+        item = app.store.add(new_item("movie", {"source": "tmdb", "source_id": "movie/10378", "title": "Big Buck Bunny"}))
+        h = "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c"
+        app.torrents.records[h] = {"hash": h, "item_id": item["id"], "magnet": f"magnet:?xt=urn:btih:{h}", "files": []}
+        app.torrents.port, app.torrents.token = 5555, "tok"
+        path = f"http://127.0.0.1:5555/stream/tok/{h}/1/Big%20Buck%20Bunny.mp4"
+        entries, _ = app._entries(item, path, None)
+        self.assertEqual(entries[0]["party"]["th"], h)
+        self.assertEqual(entries[0]["party"]["ti"], 1)
+        self.assertTrue(entries[0]["party"]["magnet"].startswith("magnet:?xt=urn:btih:" + h))
+
+
+class AdTest(unittest.TestCase):
+    def test_a_video_minutes_too_short_is_an_ad(self):
+        short = "#EXTM3U\n" + "#EXTINF:10.0,\nseg.ts\n" * 3
+        long_ = "#EXTM3U\n" + "#EXTINF:10.0,\nseg.ts\n" * 150
+        r = mock.MagicMock()
+        r.__enter__.return_value.read.return_value = short.encode()
+        r.__enter__.return_value.geturl.return_value = "https://ads.test/a.m3u8"
+        with mock.patch("urllib.request.urlopen", return_value=r):
+            self.assertEqual(scrape.hls_length("https://ads.test/a.m3u8"), 30.0)
+        r.__enter__.return_value.read.return_value = long_.encode()
+        with mock.patch("urllib.request.urlopen", return_value=r):
+            self.assertEqual(scrape.hls_length("https://cdn.test/ep.m3u8"), 1500.0)

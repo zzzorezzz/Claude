@@ -1389,6 +1389,74 @@ def _sibling(url, name):
     return url[:m.start(2)] + name + url[m.end(2):]
 
 
+SHORTEST = 180          # seconds: a "video" shorter than this, for an episode or a film, is an ad
+
+
+def hls_length(url, headers=None):
+    """How long an HLS video is, in seconds (its first stream's pieces added up), or None."""
+    if ".m3u8" not in urllib.parse.unquote(url).lower() and "mpegurl" not in url.lower():
+        return None
+    req_headers = {"User-Agent": (headers or {}).get("User-Agent") or UA,
+                   **{k: v for k, v in (headers or {}).items() if k in ("Referer", "Origin", "Cookie") and v}}
+
+    def read(u):
+        try:
+            req = urllib.request.Request(safe_url(u), headers=req_headers)
+            with urllib.request.urlopen(req, timeout=10, context=metadata.ssl_context()) as r:
+                return r.read(4 * 1024 * 1024).decode("utf-8", "replace"), r.geturl()
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+            return "", u
+    text, final = read(url)
+    if "#EXT-X-STREAM-INF" in text:
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("#EXT-X-STREAM-INF"):
+                nxt = next((x.strip() for x in lines[i + 1:] if x.strip() and not x.startswith("#")), "")
+                if nxt:
+                    text, final = read(urllib.parse.urljoin(final, nxt))
+                break
+    if "#EXTINF" not in text:
+        return None
+    total = 0.0
+    for m in re.finditer(r"#EXTINF:\s*([\d.]+)", text):
+        total += float(m.group(1))
+    return total or None
+
+
+def plays_here(url, headers=None):
+    """Whether a video found elsewhere (a watch party's host's) plays from this computer too:
+    its playlist and its first piece both come (some sites' links work only where they were found)."""
+    req_headers = {"User-Agent": (headers or {}).get("User-Agent") or UA,
+                   **{k: v for k, v in (headers or {}).items() if k in ("Referer", "Origin", "Cookie") and v}}
+
+    def get(u, n):
+        try:
+            req = urllib.request.Request(safe_url(u), headers=dict(req_headers, Range=f"bytes=0-{n - 1}"))
+            with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
+                return r.read(n), r.geturl()
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+            return None, u
+    body, final = get(url, 2 * 1024 * 1024)
+    if not body:
+        return False
+    text = body.decode("utf-8", "replace")
+    if not text.lstrip().removeprefix("\ufeff").startswith("#EXTM3U"):
+        return not scrambled_video(url, headers)        # (a file: it answered)
+    for _ in range(2):                               # (the master, then its first stream)
+        nxt = next((x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")), "")
+        if not nxt:
+            return False
+        nxt = urllib.parse.urljoin(final, nxt)
+        if "#EXT-X-STREAM-INF" not in text:
+            piece, _ = get(nxt, 1024)
+            return bool(piece)
+        body, final = get(nxt, 2 * 1024 * 1024)
+        if not body:
+            return False
+        text = body.decode("utf-8", "replace")
+    return False
+
+
 def master_playlist(url, headers=None, seen=()):
     """The playlist a player should get: the master (every quality, the audio and subtitle tracks),
     not one of its streams - a stream caught on its own (a server pressed in the page, its player
@@ -2121,7 +2189,7 @@ class Scraper:
         return out
 
     def resolve(self, site, item, season=None, episode=None, pin="", stream="", quality="", skip=(),
-                track="", fresh=False, remember=True):
+                track="", fresh=False, remember=True, page=""):
         """Everything needed to play: {"url" (the video, or "" when only the page
         works), "page", "referer", "headers", "entry", "others", "site",
         "streams" (the episode's sub / dub / server choices), "stream" (the one
@@ -2134,7 +2202,17 @@ class Scraper:
         self.log = []
         if site.get("kind") == "archive":
             return self._archive(site, item, season, episode, pin, quality)
-        if site.get("kind") == "json_api":
+        if page and site.get("kind") not in ("json_api", "archive"):
+            # (the episode's page as given - a watch party host's - and remembered as this episode's)
+            page_url, entry, others = page, {"url": pin or page, "name": item.get("title") or ""}, []
+            if item.get("format") == "series" and episode:
+                tv_season = season if item.get("source") == "tmdb" else None
+                mem = self.remembered(item["id"], site) or {}
+                cached = dict(mem.get("episodes") or {})
+                if cached.get(f"{tv_season or ''}:{season}:{episode}") != page:
+                    cached[f"{tv_season or ''}:{season}:{episode}"] = page
+                    self._remember(item["id"], site, episodes=cached)
+        elif site.get("kind") == "json_api":
             page_url, entry, others = self._json_api_episode(site, item, season, episode, pin)
         else:
             page_url, entry, others = self.episode_page(site, item, season, episode, pin)
@@ -2436,6 +2514,10 @@ class Scraper:
         self._note(f"Caught the video its player asked for: {caught['url']}")
         if scrambled_playlist(caught["url"], headers) or scrambled_video(caught["url"], headers):
             self._note("  ...but it isn't a video a player can read (only the site's own player unscrambles it)")
+            return None
+        length = hls_length(caught["url"], dict(headers, Referer=headers.get("Referer") or page_url))
+        if length is not None and length < SHORTEST:
+            self._note(f"  ...but it's {int(length)} seconds long: an ad, not the episode")
             return None
         video = master_playlist(caught["url"], headers, caught.get("videos") or ())
         if video != caught["url"]:

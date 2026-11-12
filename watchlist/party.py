@@ -651,8 +651,9 @@ class Party:
                 waiting.append(name)
         if waiting and time.time() < self._hold_until:
             return
+        if session.send(["set_property", "pause", False]) is False:
+            return                           # (the player didn't get it: tried again in a moment)
         self._hold_until = 0.0
-        session.send(["set_property", "pause", False])
         self.osd("Everyone's ready - playing for all of you" if not waiting else "Playing (not everyone was ready)", 3)
 
     def _player_closed(self, session):
@@ -741,6 +742,9 @@ class Party:
         self._player_pos, self._player_paused, self._player_at = position, paused, time.time()
         if self._global_at and not first and (pause_change or seeked):
             self._send_state(position, paused, seeked, None, True)
+            # (what you did is the room's now - as far as this player knows until it hears back;
+            # else pressing play after your own pause would look like joining others who play)
+            self._global_pos, self._global_paused, self._global_at = position, paused, time.time()
 
     def _stall_step(self, session, position):
         """Whether a step back is the player having waited for its video (buffering)."""
@@ -846,7 +850,11 @@ class Party:
                 self.osd(f"{set_by} {'paused' if paused else 'pressed play'}", 2)
         if commands:
             self._quiet_until = time.time() + 1.0
-            session.send(*commands)
+            if session.send(*commands) is False:
+                # (the player didn't get them - busy opening a video: what it really does is what's
+                # known, so the room's next word tries again, instead of the two staying apart)
+                self._player_pos, self._player_paused, self._player_at = session.position() or position, session.paused, time.time()
+                self._quiet_until = 0.0
 
     def _looping(self):
         now = time.time()
@@ -862,7 +870,9 @@ class Party:
         state["ping"] = {"clientLatencyCalculation": time.time(), "clientRtt": self._ping.rtt}
         if latency:
             state["ping"]["latencyCalculation"] = latency
-        if state_change:
+        if state_change and "playstate" in state:
+            # (only a change that went: one that didn't is never answered, and waiting for that
+            # answer would shut this player out of the party - nothing it hears or does counts)
             self._client_ignoring += 1
         if self._server_ignoring or self._client_ignoring:
             state["ignoringOnTheFly"] = {}
