@@ -645,6 +645,13 @@ def candidates(page, search_page):
     return out
 
 
+def _same_but_year(a, b):
+    """Two names that are the same but for a year in one of them ("X" and "X (2026)")."""
+    def bare(n):
+        return library.norm(re.sub(r"[\(\[]\s*(?:19|20)\d\d\s*[\)\]]|\s(?:19|20)\d\d\s*$", " ", n or ""))
+    return a != b and bare(a) == bare(b) and bool(bare(a))
+
+
 def best_entry(found, wanted):
     """The results scored, best first: [{"url", "name", "score"}]."""
     scored = []
@@ -1936,7 +1943,20 @@ class Scraper:
             return got, mem.get("others") or []
         got = entries.get(key)
         if got and (got.get("pinned") or time.time() - got.get("at", 0) < ENTRY_DAYS * 86400):
-            return got, mem.get("others") or []
+            others = mem.get("others") or []
+            twins = [c for c in others if c["url"] != got["url"] and c.get("score", 0) >= got.get("score", 0) - 3
+                     and _same_but_year(c["name"], got["name"])]
+            if twins and not got.get("pinned") and not got.get("alike") and item.get("format") == "series":
+                # (chosen before results named alike were told apart by their episodes: once more)
+                pick = self._by_episodes([got, *twins], item)
+                if pick["url"] != got["url"]:
+                    got = {"url": pick["url"], "name": pick["name"], "score": pick.get("score", 0), "at": time.time()}
+                    entries[key] = dict(got, alike=True)
+                    self._remember(item["id"], site, entries=entries, episodes={}, eplists={}, videos={})
+                    return entries[key], others
+                entries[key] = dict(got, alike=True)
+                self._remember(item["id"], site, entries=entries)
+            return entries[key], others
         kind, tid = tmdb_id(item)
         prefs = self.memory.setdefault("_sites", {}).setdefault(site["url"], {})
         known = (prefs.get("by_tmdb") or {}).get(kind or "") if tid else ""
@@ -1976,7 +1996,10 @@ class Scraper:
             # Too close to call: you pick (and it's remembered).
             self._remember(item["id"], site, others=others)
             raise ScrapeError(f"which of these on {site['name']} is {item['title']}?", choices=others)
-        got = {"url": best["url"], "name": best["name"], "score": best["score"], "at": time.time()}
+        twins = [c for c in ranked[1:4] if c["score"] >= best["score"] - 3 and _same_but_year(c["name"], best["name"])]
+        if twins and item.get("format") == "series":
+            best = self._by_episodes([best, *twins], item)
+        got = {"url": best["url"], "name": best["name"], "score": best["score"], "at": time.time(), "alike": True}
         if best.get("id"):
             got["id"] = best["id"]
         self._note(f"Opened {best['name']} ({best['score']}% match): {best['url']}")
@@ -1986,6 +2009,26 @@ class Scraper:
         entries[key] = got
         self._remember(item["id"], site, entries=entries, others=others, episodes={})
         return got, others
+
+    def _by_episodes(self, alike, item):
+        """Of results named alike but for a year (a show's first season and its second, a remake),
+        the one whose episode list fits the title's number of episodes; else the one without a
+        year (the first of them)."""
+        total = sum(s.get("episodes") or 0 for s in item.get("seasons") or []) or int(item.get("episodes") or 0)
+        counts = []
+        for c in alike:
+            try:
+                eps = self._episodes(c["url"])[0] if total else {}
+            except ScrapeError:
+                eps = {}
+            counts.append(len({n for _, n in eps}))
+        if total and any(counts):
+            pick = min(range(len(alike)), key=lambda i: (abs(counts[i] - total) if counts[i] else 10 ** 6, i))
+            self._note("Results named alike: " + ", ".join(f"{c['name']} ({n} episodes)" for c, n in zip(alike, counts))
+                       + f" - {alike[pick]['name']} fits the title's {total}")
+            return alike[pick]
+        plain = [c for c in alike if not re.search(r"\(\s*(?:19|20)\d\d\s*\)", c["name"])]
+        return (plain or alike)[0]
 
     @staticmethod
     def _page_fits(url, wanted):
@@ -2088,6 +2131,37 @@ class Scraper:
         absolute = None
         if item.get("seasons") and season and season > 1:
             absolute = sum(s.get("episodes") or 0 for s in item["seasons"] if 0 < s["number"] < season) + episode
+        url, eps, final = self._episode_on(site, item, entry, tv_season, season, episode, absolute)
+        if not url and not entry.get("pinned"):
+            # (a result as good as it - the same name, another season or year - may be the one with it)
+            floor = max(MATCH_TO_PLAY, (entry.get("score") or 0) - 8)
+            for alt in others:
+                if alt["url"] == entry["url"] or (alt.get("score") or 0) < floor:
+                    continue
+                self._note(f"{entry['name']} has no episode {episode}: trying {alt['name']} ({alt['score']}% match)")
+                try:
+                    got = self._episode_on(site, item, alt, tv_season, season, episode, absolute, fallback=False)
+                except ScrapeError:
+                    continue
+                if got[0]:
+                    url, eps, final = got
+                    entry = {"url": alt["url"], "name": alt["name"], "score": alt["score"], "at": time.time()}
+                    entries = dict(mem.get("entries") or {})
+                    entries[str(tv_season or "")] = entry
+                    self._remember(item["id"], site, entries=entries, episodes={})
+                    cached = {}
+                    break
+        if not url:
+            raise ScrapeError(f"episode {episode} wasn't found on {site['name']}'s page for {entry['name']}"
+                              + (f" (it lists {len(eps)} episodes)" if eps else ""), page=final)
+        cached = dict(cached)
+        cached[key] = url
+        self._remember(item["id"], site, episodes=cached)
+        return url, entry, others
+
+    def _episode_on(self, site, item, entry, tv_season, season, episode, absolute, fallback=True):
+        """(the episode's page on a title's page or None, its episodes, the page's address).
+        `fallback` False: only an episode it lists (not one guessed from its address)."""
         want_season = season if tv_season else None
         url = None
         for fresh in (False, True):
@@ -2107,7 +2181,7 @@ class Scraper:
                 if button:
                     url = f"{final.split('#')[0]}{CLICK_MARK}{urllib.parse.quote(button)}"
                     self._note(f"The episodes are buttons on the page: pressing \"{button}\" there")
-            if not url and not eps and (episode == 1 or idx["itself"] or tv_season is not None):
+            if not url and not eps and fallback and (episode == 1 or idx["itself"] or tv_season is not None):
                 # The title's page plays its episodes itself, chosen by ?ep= (Miruro, ani.pm),
                 # or by ?s= and ?e= (TV shows on a site keyed by TMDB's ids).
                 url = _with_se(final, season, episode) if tv_season is not None else _with_ep(final, episode)
@@ -2117,13 +2191,7 @@ class Scraper:
                 self._note(f"No episode links on the page: trying {url}")
             if url or not idx.get("cached"):
                 break                                   # (else read again: a new episode may be out)
-        if not url:
-            raise ScrapeError(f"episode {episode} wasn't found on {site['name']}'s page for {entry['name']}"
-                              + (f" (it lists {len(eps)} episodes)" if eps else ""), page=final)
-        cached = dict(cached)
-        cached[key] = url
-        self._remember(item["id"], site, episodes=cached)
-        return url, entry, others
+        return url, eps, final
 
     def pin_entry(self, item, site, url):
         """The title on a site, chosen by you (its episodes are matched again)."""

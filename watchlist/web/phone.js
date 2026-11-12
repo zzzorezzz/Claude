@@ -120,7 +120,7 @@ function phoneTabs() {
     <button type="button" data-tab="lists">${ico('M3 5h2v2H3zm4 0h14v2H7zM3 11h2v2H3zm4 0h14v2H7zm-4 6h2v2H3zm4 0h14v2H7z')}<span>Lists</span></button>
     <a href="#/find" data-route="find">${ico('M10 3a7 7 0 1 0 4.2 12.6l5.1 5.1 1.4-1.4-5.1-5.1A7 7 0 0 0 10 3zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10z')}<span>Find</span></a>
     <button type="button" data-tab="party">${ico('M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm7.5-1a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM9 13c-3.3 0-7 1.6-7 4v3h14v-3c0-2.4-3.7-4-7-4zm7.5-1c-.5 0-1 0-1.6.1 1.3.9 2.1 2.2 2.1 3.9v3h5v-2.6c0-2.3-3.2-4.4-5.5-4.4z')}<span>Party</span></button>
-    <button type="button" data-tab="saved">${ico('M12 3v10.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3zM4 18h16v2H4z')}<span>Saved</span></button>
+    <button type="button" data-tab="saved">${ico('M12 3v10.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3zM4 18h16v2H4z')}<span>On ${deviceWord()}</span></button>
     <button type="button" data-tab="settings">${ico('M19.1 12.9a7.3 7.3 0 0 0 0-1.9l2-1.6-1.9-3.3-2.4 1a7 7 0 0 0-1.6-.9L14.8 3h-3.8l-.4 2.5c-.6.2-1.1.5-1.6.9l-2.4-1-1.9 3.3 2 1.6a7.3 7.3 0 0 0 0 1.9l-2 1.6 1.9 3.3 2.4-1c.5.4 1 .7 1.6.9l.4 2.5h3.8l.4-2.5c.6-.2 1.1-.5 1.6-.9l2.4 1 1.9-3.3zM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z')}<span>Settings</span></button>`;
   // A tablet (no bar at the bottom): Saved in the top bar, by Watch together.
   const party = document.getElementById('btn-party');
@@ -129,7 +129,7 @@ function phoneTabs() {
     b.id = 'btn-saved';
     b.className = 'icon-btn';
     b.type = 'button';
-    b.title = `Saved on this ${deviceWord()}`;
+    b.title = `Downloaded to this ${deviceWord()}`;
     b.setAttribute('aria-label', b.title);
     b.innerHTML = ico('M12 3v10.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3zM4 18h16v2H4z');
     b.addEventListener('click', (e) => { e.stopPropagation(); openSavedSheet(); });
@@ -267,7 +267,7 @@ async function saveToDevice({ itemId, key, label, path, title, sid, index }) {
     await savePut('files', { id: r.id, item_id: r.item_id, key: r.key, label: r.label, title: r.title, state: 'preparing', progress: 0,
       size: 0, got: 0, pieces: 0, savedAt: Date.now() });
   }
-  toast(`Saving ${r.label || r.title} to this ${deviceWord()} - see Saved`);
+  toast(`Saving ${r.label || r.title} to this ${deviceWord()} - it's under Downloaded to this ${deviceWord()} on the home page`);
   savePump(r.id);
 }
 
@@ -343,9 +343,10 @@ async function openSavedSheet() {
   closeMenu();
   saveResume();
   const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad saved-modal">
-    <h2>Saved on this ${deviceWord()}</h2>
-    <p class="sub">They play from here, without streaming - and are taken off by themselves once you've watched them.
-      Save more from an episode's ⋯, or from the player's menu.</p>
+    <h2>Downloaded to this ${deviceWord()}</h2>
+    <p class="sub">These are kept on this ${deviceWord()} and play from here, without streaming - each is deleted by itself once
+      you've watched it, or delete it here. A video you just play from the computer streams over Wi-Fi and isn't kept here:
+      to keep one, use ⋯ on a film or an episode, or the player's menu, and pick <b>Save to this ${deviceWord()}</b>.</p>
     <div id="saved-list"></div><p class="muted small" id="saved-space"></p>
     <div class="btns"><button class="btn btn-ghost" data-saved="all">Delete all</button></div></div>`, 'saved-sheet');
   wrap.addEventListener('click', async (e) => {
@@ -376,7 +377,7 @@ let savedTimer = 0;
 async function savedRefresh() {
   const box = document.getElementById('saved-list');
   clearTimeout(savedTimer);
-  if (!box) return;
+  if (!box) { deviceDownloadsButton(); return; }       // (the list isn't open: the home page's button)
   const files = await savedList();
   const word = { preparing: 'Getting it ready on the computer', saving: 'Saving', paused: 'Stopped', failed: "Couldn't save it", done: 'Saved' };
   box.innerHTML = files.length ? files.map((f) => {
@@ -389,14 +390,35 @@ async function savedRefresh() {
       <div class="saved-btns">${f.state === 'done' ? `<button class="btn btn-white btn-sm" data-saved="play" data-id="${f.id}">▶ Play</button>` : ''}
         ${f.state === 'paused' ? `<button class="btn btn-ghost btn-sm" data-saved="retry" data-id="${f.id}">Carry on</button>` : ''}
         <button class="btn btn-ghost btn-sm" data-saved="delete" data-id="${f.id}" aria-label="Delete">🗑</button></div></div>`;
-  }).join('') : `<p class="muted">Nothing saved on this ${deviceWord()}.</p>`;
+  }).join('') : `<p class="muted">Nothing is downloaded to this ${deviceWord()}.</p>`;
   const used = files.reduce((n, f) => n + (f.got || 0), 0);
   let free = '';
   try { const est = await navigator.storage.estimate(); if (est.quota) free = ` · about ${fmtSize(Math.max(0, est.quota - est.usage))} more can be kept`; } catch { /* fine */ }
   const space = document.getElementById('saved-space');
   if (space) space.textContent = `${fmtSize(used || 0)} used${free}`;
   if (files.some((f) => f.state === 'preparing' || f.state === 'saving')) savedTimer = setTimeout(savedRefresh, 1000);
+  deviceDownloadsButton();
 }
+
+// The home page's button for them: how many there are and how much room they take.
+async function deviceDownloadsButton() {
+  const box = document.getElementById('device-downloads');
+  if (!box || typeof indexedDB === 'undefined') return;
+  const files = await savedList();
+  const size = files.reduce((n, f) => n + (f.state === 'done' ? f.size || 0 : f.got || 0), 0);
+  const going = files.filter((f) => f.state === 'preparing' || f.state === 'saving').length;
+  const what = files.length
+    ? `${files.length} video${files.length === 1 ? '' : 's'} · ${fmtSize(size)}${going ? ` · ${going} saving now` : ''}`
+    : `Nothing yet - ⋯ on a downloaded film or episode, then Save to this ${deviceWord()}`;
+  box.innerHTML = `<button type="button" class="device-dl" data-device-dl>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3zM4 18h16v2H4z"/></svg>
+    <span><b>Downloaded to this ${deviceWord()}</b><small>${esc(what)}</small></span><i>›</i></button>`;
+  clearTimeout(deviceDownloadsButton.t);
+  if (going) deviceDownloadsButton.t = setTimeout(deviceDownloadsButton, 2000);
+}
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-device-dl]')) openSavedSheet();
+});
 
 if (REMOTE && typeof window !== 'undefined') window.addEventListener('load', () => setTimeout(saveResume, 3000));
 

@@ -18,6 +18,7 @@
    app every request, in every frame).
 """
 
+import contextlib
 import os
 import re
 import sys
@@ -138,7 +139,7 @@ CLICK_JS = r"""(() => {
   if (window.__waClick) return; window.__waClick = true;
   const norm = (t) => (t || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const kindOk = (el) => {
-    if (!want.kind) return true;
+    if (!want.kind || (langNow() === want.kind && langTrigger())) return true;
     for (let n = el, i = 0; n && i < 6; n = n.parentElement, i += 1) {
       const own = i || norm(n.textContent).length > 40 ? '' : n.textContent;
       const t = norm([n.getAttribute && n.getAttribute('data-type'), n.className, n.id, own].join(' '));
@@ -146,9 +147,54 @@ CLICK_JS = r"""(() => {
     }
     return false;
   };
-  let tries = 0;
+  // A press as a real click makes it (menus built with React open on the pointer going down,
+  // not on a bare click()).
+  const press = (el) => {
+    const r = el.getBoundingClientRect();
+    const o = { bubbles: true, cancelable: true, composed: true, button: 0, view: window, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
+    const p = Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, o);
+    try { el.dispatchEvent(new PointerEvent('pointerdown', p)); } catch (e) { /* no pointer events here */ }
+    el.dispatchEvent(new MouseEvent('mousedown', o));
+    try { el.dispatchEvent(new PointerEvent('pointerup', p)); } catch (e) { /* no pointer events here */ }
+    el.dispatchEvent(new MouseEvent('mouseup', o));
+    el.dispatchEvent(new MouseEvent('click', o));
+  };
+  const POPUP = '[role=listbox], [role=menu], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [class*=popover], [class*=Popover], [class*=dropdown-menu], [class*=Dropdown], [class*=popup]';
+  const shown = (p) => { const r = p.getBoundingClientRect(); return r.height > 0 && r.width > 0; };
+  const kindWord = (t) => (/\bdub/i.test(t) ? 'dub' : /(\b|-)sub(bed|s)?\b/i.test(t) ? 'sub' : /\braw\b/i.test(t) ? 'raw' : '');
+  // A Sub / Dub menu by the player (Miruro's "Language"): what it's set to is the servers' kind.
+  const langTrigger = () => [...document.querySelectorAll('[role=combobox], [aria-haspopup]')].find((el) => el.getBoundingClientRect().width > 0 && !el.closest(POPUP)
+    && (/^(language|audio|audio language|version|type|sub ?\/ ?dub|track)$/i.test((el.getAttribute('aria-label') || '').trim())
+      || /^(sub|dub|raw|soft ?sub|hard ?sub|subbed|dubbed)$/i.test((el.textContent || '').replace(/\s+/g, ' ').trim())));
+  // A menu opened by a press: its pop-up (only one that wasn't showing before), or null.
+  const openMenu = (el, then) => {
+    const before = new Map([...document.querySelectorAll(POPUP)].map((p) => [p, shown(p)]));
+    try { press(el); } catch (e) { /* fine */ }
+    setTimeout(() => then([...document.querySelectorAll(POPUP)].filter((p) => shown(p) && before.get(p) !== true)), 700);
+  };
+  const closeMenu = (el) => {
+    try { (document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) { /* fine */ }
+    setTimeout(() => { if (el && el.getAttribute('aria-expanded') === 'true') { try { press(el); } catch (e) { /* fine */ } } }, 150);
+  };
+  let tries = 0, langDone = false, langTries = 0;
   const opened = new Set();
   const done = () => fetch('__CLICKED__').catch(() => {});
+  // A server of the dub (say) where the page has a Sub / Dub menu: Dub chosen in it first.
+  const langNow = () => { const lt = langTrigger(); return lt ? kindWord((lt.textContent || '').trim()) : ''; };
+  const chooseLang = (then) => {
+    const lt = langTrigger();
+    langTries += 1;
+    if (!want.kind || !lt || langNow() === want.kind) { langDone = true; then(false); return; }
+    openMenu(lt, (popups) => {
+      const opt = popups.flatMap((p) => [...p.querySelectorAll('[role=option], [role=menuitem], [role=menuitemradio], button, li')])
+        .find((o) => kindWord(norm(o.textContent)) === want.kind && norm(o.textContent).length < 20);
+      // (a menu shown before the page's script is ready doesn't open yet: pressed again, a few times)
+      if (!opt) { closeMenu(lt); langDone = langTries >= 4; setTimeout(() => then(false), langDone ? 0 : 1200); return; }
+      langDone = true;
+      press(opt);
+      then(true);
+    });
+  };
   // Sub / dub (or a server) kept in a dropdown under the player: a <select> gets the
   // option chosen; a dropdown button ("Sub ▾") is opened, so its options can be clicked.
   const dropdowns = () => {
@@ -163,15 +209,24 @@ CLICK_JS = r"""(() => {
       }
     }
     const triggers = [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], [aria-haspopup="true"], [aria-haspopup="dialog"]')]
-      .filter((el) => !opened.has(el) && (/^(sub|dub|raw|soft ?sub|hard ?sub|japanese|english|audio|language|server)/i.test((el.textContent || '').trim())
+      .filter((el) => !opened.has(el) && !(langDone && el === langTrigger()) && (/^(sub|dub|raw|soft ?sub|hard ?sub|japanese|english|audio|language|server)/i.test((el.textContent || '').trim())
         // (a "Server" dropdown named by its label or the words beside it: only when a server is
         // wanted - looking for Sub / Dub, a server list is no place to open)
         || (!/^(sub|dub|raw)$/i.test(want.label) && /\b(servers?|sources?|mirrors?)\b/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${norm((el.parentElement || {}).textContent || '').slice(0, 40)}`))));
-    if (triggers.length) { opened.add(triggers[0]); triggers[0].click(); return 'opened'; }
+    if (triggers.length) { opened.add(triggers[0]); press(triggers[0]); return 'opened'; }
     return '';
   };
   const pick = () => {
     tries += 1;
+    if (!langDone && want.kind && langTrigger() && langNow() !== want.kind) {
+      // (the language asked for chosen in its menu first - once the page has drawn it; Sub / Dub
+      // itself is then all there is to do)
+      chooseLang((chosen) => {
+        if (chosen && /^(sub|dub|raw)$/i.test(want.label || '')) { done(); return; }
+        setTimeout(pick, chosen ? 2500 : 0);
+      });
+      return;
+    }
     const els = [...document.querySelectorAll('[role="option"], [role="menuitem"], [data-server-id], [data-server], [data-type] a, [data-type] li, [data-type] button,'
       + ' [data-link], [data-embed], [class*="server"] a, [class*="server"] li, [class*="server"] button, [class*="server-item"], [class*="episode"], a, button, li, span, div')]
       .filter((el) => !el.matches('[role="combobox"], [aria-haspopup]'));
@@ -192,13 +247,15 @@ CLICK_JS = r"""(() => {
     const hit = (want.exact ? named : exact.length ? exact : found).sort((a, b) => norm(a.textContent).length - norm(b.textContent).length)[0];
     if (hit) {
       const clickable = hit.closest('[role="option"], [role="menuitem"], a, button, li, [role="button"]') || hit;
-      clickable.click();
+      // (an option of a pop-up menu as a real click picks it; anything else as before)
+      if (clickable.matches('[role="option"], [role="menuitem"], [role="menuitemradio"]') || clickable.closest(POPUP)) press(clickable);
+      else clickable.click();
       done();
       return;
     }
     const d = dropdowns();
     if (d === 'chosen') { done(); return; }
-    if (want.exact && !d && !opened.size && tries >= 6) { fetch('__NO_CLICK__').catch(() => {}); return; }   // (no such switch here)
+    if (want.exact && !d && !opened.size && tries >= 12 && document.readyState === 'complete') { fetch('__NO_CLICK__').catch(() => {}); return; }   // (no such switch here)
     if (tries < 25) setTimeout(pick, d === 'opened' ? 350 : 600);
   };
   // A button to press before it (an episode's season, whose episodes only show once it's chosen).
@@ -282,27 +339,79 @@ SERVERS_JS = r"""(() => {
     }
     return out;
   };
-  // A "Server" dropdown whose options only exist while it's open (drawn in a pop-up elsewhere in
-  // the page): opened once, its pop-up read with the rest, then closed again.
+  // A press as a real click makes it (menus built with React open on the pointer going down,
+  // not on a bare click()).
+  const press = (el) => {
+    const r = el.getBoundingClientRect();
+    const o = { bubbles: true, cancelable: true, composed: true, button: 0, view: window, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
+    const p = Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, o);
+    try { el.dispatchEvent(new PointerEvent('pointerdown', p)); } catch (e) { /* no pointer events here */ }
+    el.dispatchEvent(new MouseEvent('mousedown', o));
+    try { el.dispatchEvent(new PointerEvent('pointerup', p)); } catch (e) { /* no pointer events here */ }
+    el.dispatchEvent(new MouseEvent('mouseup', o));
+    el.dispatchEvent(new MouseEvent('click', o));
+  };
   const POPUP = '[role=listbox], [role=menu], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [class*=popover], [class*=Popover], [class*=dropdown-menu], [class*=Dropdown], [class*=popup]';
+  const shown = (p) => { const r = p.getBoundingClientRect(); return r.height > 0 && r.width > 0; };
+  const kindWord = (t) => (/\bdub/i.test(t) ? 'dub' : /(\b|-)sub(bed|s)?\b/i.test(t) ? 'sub' : /\braw\b/i.test(t) ? 'raw' : '');
+  // A Sub / Dub menu by the player (Miruro's "Language"): what it's set to is the servers' kind.
+  const langTrigger = () => [...document.querySelectorAll('[role=combobox], [aria-haspopup]')].find((el) => el.getBoundingClientRect().width > 0 && !el.closest(POPUP)
+    && (/^(language|audio|audio language|version|type|sub ?\/ ?dub|track)$/i.test((el.getAttribute('aria-label') || '').trim())
+      || /^(sub|dub|raw|soft ?sub|hard ?sub|subbed|dubbed)$/i.test((el.textContent || '').replace(/\s+/g, ' ').trim())));
+  // A menu opened by a press: its pop-up (only one that wasn't showing before), or null.
+  const openMenu = (el, then) => {
+    const before = new Map([...document.querySelectorAll(POPUP)].map((p) => [p, shown(p)]));
+    try { press(el); } catch (e) { /* fine */ }
+    setTimeout(() => then([...document.querySelectorAll(POPUP)].filter((p) => shown(p) && before.get(p) !== true)), 700);
+  };
+  const closeMenu = (el) => {
+    try { (document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) { /* fine */ }
+    setTimeout(() => { if (el && el.getAttribute('aria-expanded') === 'true') { try { press(el); } catch (e) { /* fine */ } } }, 150);
+  };
+  // A "Server" dropdown whose options only exist while it's open (drawn in a pop-up elsewhere in
+  // the page): opened, its pop-up read with the rest, then closed again.
   const openers = () => [...document.querySelectorAll('button, [role=button], [role=combobox], [aria-haspopup]')]
     .filter((el) => /\b(servers?|sources?|mirrors?|providers?)\b/i.test(`${norm(el.textContent)} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${norm((el.parentElement || {}).textContent || '').slice(0, 40)}`)
-      && !el.closest(POPUP) && el.getBoundingClientRect().width > 0);
+      && !el.closest(POPUP) && el.getBoundingClientRect().width > 0 && el !== langTrigger());
   let opened = 0;
-  const peek = (then) => {
+  const peek = (then, again = false) => {
     const el = openers()[0];
-    if (!el || opened >= 2) { then([]); return; }
+    if (!el || (opened >= 2 && !again)) { then([]); return; }
     opened += 1;
-    const shown = (p) => { const r = p.getBoundingClientRect(); return r.height > 0 && r.width > 0; };
-    const before = new Map([...document.querySelectorAll(POPUP)].map((p) => [p, shown(p)]));
-    try { el.click(); } catch (e) { /* fine */ }
-    setTimeout(() => {
-      // (only what the click opened - not a menu that was open already)
-      const popups = [...document.querySelectorAll(POPUP)].filter((p) => shown(p) && before.get(p) !== true);
-      then(popups);
-      try { el.click(); } catch (e) { /* fine */ }
-      try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) { /* fine */ }
-    }, 700);
+    // (only what the press opened - not a menu that was open already)
+    openMenu(el, (popups) => { then(popups); closeMenu(el); });
+  };
+  // Listing every server (the app's Servers list, not while finding a video): each other
+  // language chosen in turn, its servers read too.
+  let others = [], more = false, cycled = false;
+  const kept = new Map();
+  const cycle = () => {
+    const lt = langTrigger();
+    cycled = true;
+    if (!lt) { more = false; report(); return; }
+    const start = kindWord(norm(lt.textContent));
+    openMenu(lt, (popups) => {
+      const kinds = [...new Set(popups.flatMap((p) => [...p.querySelectorAll('[role=option], [role=menuitem], [role=menuitemradio], button, li')])
+        .map((o) => kindWord(norm(o.textContent))).filter((k) => k && k !== start))];
+      closeMenu(lt);
+      if (!kinds.length) { more = false; report(); return; }
+      more = true;
+      const next = (i) => {
+        if (i >= kinds.length) { more = false; report(); return; }
+        setTimeout(() => openMenu(langTrigger() || lt, (menu) => {
+          const opt = menu.flatMap((p) => [...p.querySelectorAll('[role=option], [role=menuitem], [role=menuitemradio], button, li')])
+            .find((o) => kindWord(norm(o.textContent)) === kinds[i] && norm(o.textContent).length < 20);
+          if (!opt) { closeMenu(lt); next(i + 1); return; }
+          press(opt);
+          // (its servers once the page has shown them)
+          setTimeout(() => peek((list) => {
+            for (const box of list) for (const o of options(box)) others.push({ l: o.label, k: kindWord(o.label) || kinds[i], a: false });
+            next(i + 1);
+          }, true), 2500);
+        }), 400);
+      };
+      next(0);
+    });
   };
   let last = '';
   const tell = (url) => {
@@ -311,6 +420,8 @@ SERVERS_JS = r"""(() => {
   };
   const report = (extra = []) => {
     const items = [], taken = new Set(), names = new Set();
+    const lt = langTrigger();
+    const now = lt ? kindWord(norm(lt.textContent)) : '';
     for (const box of [...extra, ...boxes()]) {
       const opts = options(box);
       const distinct = new Set(opts.map((o) => o.label.toLowerCase()));
@@ -320,21 +431,30 @@ SERVERS_JS = r"""(() => {
         if (taken.has(o.el)) continue;
         taken.add(o.el);
         const said = /\bdub(bed)?\b/i.test(o.label) ? 'dub' : /(\b|-)sub(bed|s)?\b/i.test(o.label) ? 'sub' : /\braw\b/i.test(o.label) ? 'raw' : '';
-        const kind = said || kindOf(o.el, box);
+        const kind = said || kindOf(o.el, box) || now;
         const key = `${o.label.toLowerCase()}|${kind}`;
         if (names.has(key)) continue;
         names.add(key);
         items.push({ l: o.label, k: kind, a: activeOf(o.el) });
       }
     }
-    if (!items.length && !extra.length && openers().length) { peek((popups) => { if (popups.length) report(popups); }); return; }
-    const s = JSON.stringify(items.slice(0, 40));
+    if (!items.length && !extra.length && !kept.size && openers().length) { peek((popups) => { if (popups.length) report(popups); }); return; }
+    for (const o of [...items, ...others]) {
+      const key = `${o.l.toLowerCase()}|${o.k}`;
+      if (!kept.has(key) || items.includes(o)) kept.set(key, o);
+    }
+    items.splice(0, items.length, ...kept.values());
+    if (items.length && window.__waListAll && !cycled && langTrigger()) { more = true; cycle(); }
+    const s = JSON.stringify([items.slice(0, 40), more]);
     if (s === last || !items.length) return;
     last = s;
-    tell('__SERVERS__' + encodeURIComponent(JSON.stringify({ f: location.host, i: items.slice(0, 40) })));
+    tell('__SERVERS__' + encodeURIComponent(JSON.stringify({ f: location.host, i: items.slice(0, 40), m: more ? 1 : 0 })));
   };
   for (const ms of [1200, 3000, 6000, 10000, 16000]) setTimeout(report, ms);
 })();""".replace("__SERVERS__", SERVERS)
+
+
+LIST_ALL_JS = "window.__waListAll = true;"     # (SERVERS_JS: every language's servers - the Servers list)
 
 
 def servers_signal(url, opts):
@@ -351,6 +471,7 @@ def servers_signal(url, opts):
     if items:
         opts.setdefault("servers", {})[str(got.get("f") or "")] = items
         opts["servers_at"] = time.time()
+        opts["servers_more"] = bool(got.get("m"))      # (more coming: its other languages' servers)
     return True
 
 
@@ -373,6 +494,29 @@ _pending = {}                  # address -> options, for a window about to open 
 _by_window = {}                # window uid -> options
 _patched = False
 _lock = threading.BoundedSemaphore(3)       # up to three hidden windows at once (several sites searched together)
+_background = threading.BoundedSemaphore(2)  # ...of which the app's own look-ups in the background take two at most
+_here = threading.local()
+
+
+def background():
+    """This thread looks things up in the background (every server checked, the season's episodes
+    matched): it leaves a hidden window free for what you ask for."""
+    _here.background = True
+
+
+@contextlib.contextmanager
+def slot(lock=None):
+    """One of the hidden windows (or pages) - a background look-up only when one is left over."""
+    lock = lock or _lock
+    behind = getattr(_here, "background", False)
+    if behind:
+        _background.acquire()
+    try:
+        with lock:
+            yield
+    finally:
+        if behind:
+            _background.release()
 
 
 _TRAILER_HOSTS = re.compile(r"(?:^|\.)(?:youtube\.com|youtube-nocookie\.com|youtu\.be|googlevideo\.com|ytimg\.com|"
@@ -585,6 +729,8 @@ def _hook(opts, core):
         scripts.append(TRACK_JS)
     elif catch:
         scripts.append(AUTOPLAY_JS)
+        if opts.get("list_all"):
+            scripts.append(LIST_ALL_JS)
         scripts.append(SERVERS_JS)
         scripts.append(droidweb.MANIFEST_JS)
         if opts.get("click"):
@@ -702,7 +848,7 @@ def render(url, timeout=20, settle=2.5):
         return droidweb.render(url, timeout, settle)
     if not can_render():
         return None
-    with _lock:
+    with slot():
         win = _hidden_window(url, {"adblock": True})
         if win is None:
             return None
@@ -767,7 +913,7 @@ def catch_video(url, timeout=30, click=None):
                 got.set()
     opts["catch"] = catch
 
-    with _lock:
+    with slot():
         win = _hidden_window(url, opts, "Finding the video…")
         if win is None:
             return None
@@ -781,7 +927,8 @@ def catch_video(url, timeout=30, click=None):
                 got.wait(0.5)
                 if got.is_set():
                     time.sleep(1.2)         # a moment more: the playlist listing every quality often comes right after
-                    if videos() and (learned_found(url, videos()) or time.time() > deadline - timeout + 20):
+                    if videos() and (learned_found(url, videos()) or pressed(click, opts, videos())
+                                     or time.time() > deadline - timeout + 20):
                         break
                     got.clear()
                 if click and not opts.get("clicked_at") and videos() and (opts.get("no_click") or time.time() > deadline - timeout + 15):
@@ -809,7 +956,12 @@ def catch_video(url, timeout=30, click=None):
                 pass
 
 
-def list_servers(url, timeout=16):
+def pressed(click, opts, found):
+    """A video asked for by a press (a server, Sub / Dub) that came after it: that's the one."""
+    return bool(click and opts.get("clicked_at") and any(f[2] >= opts["clicked_at"] for f in found))
+
+
+def list_servers(url, timeout=24):
     """The servers an episode's page offers (its player started, as for catch_video):
     [{"label", "kind", "on", "frame"}], [] when it shows none."""
     if _chromium():
@@ -820,8 +972,8 @@ def list_servers(url, timeout=16):
         return droidweb.list_servers(url, timeout)
     if not can_catch():
         return []
-    opts = {"adblock": True, "catch": lambda video, headers: None}
-    with _lock:
+    opts = {"adblock": True, "catch": lambda video, headers: None, "list_all": True}
+    with slot():
         win = _hidden_window(url, opts, "Finding the video…")
         if win is None:
             return []
@@ -839,6 +991,6 @@ def wait_for_servers(opts, url, timeout):
     deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(0.4)
-        if opts.get("servers_at") and time.time() - opts["servers_at"] > 3:
+        if opts.get("servers_at") and time.time() - opts["servers_at"] > 3 and not opts.get("servers_more"):
             break
     return servers_of(opts, url)

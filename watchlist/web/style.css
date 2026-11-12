@@ -1934,3 +1934,13 @@ body.wp-open { overflow: hidden; }
 body.wp-open #modal-root .overlay { z-index: 2600; }
 body.wp-open #toasts { z-index: 2700; }
 @media (max-width: 700px) { body.remote #btn-saved { display: none; } }
+/* The home page's button for what's downloaded to this phone or tablet. */
+#device-downloads:empty { display: none; }
+#device-downloads { padding: 0 var(--side) 12px; }
+.device-dl { display: flex; align-items: center; gap: 14px; width: 100%; max-width: 560px; padding: 14px 16px; border-radius: 12px;
+  border: 1px solid var(--line); background: rgba(255,255,255,.06); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.device-dl:active { background: rgba(255,255,255,.12); }
+.device-dl svg { width: 28px; height: 28px; flex-shrink: 0; fill: var(--accent); }
+.device-dl span { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.device-dl small { color: var(--muted); font-size: 13px; }
+.device-dl i { font-style: normal; font-size: 24px; color: var(--muted); }

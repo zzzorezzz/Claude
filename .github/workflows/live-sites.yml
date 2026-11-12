@@ -61,6 +61,27 @@ jobs:
           sys.exit(live_sites.main(["live-report.json", *sites]))
           PY
 
+      - name: The whole app on each recommended site (played, another server, played again after a restart)
+        if: "always() && !contains(github.event.head_commit.message, '[diag]')"
+        continue-on-error: true
+        env:
+          WATCHLIST_CHROMIUM_HOME: chromium-home
+          SITES: ${{ github.event.inputs.sites }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          from pathlib import Path
+          from watchlist import cdp
+          cdp.HOME = Path("chromium-home")
+          from tests import live_app
+          named = re.search(r"\[live:([^\]]*)\]", os.environ.get("MESSAGE") or "")
+          sites = (os.environ.get("SITES") or (named.group(1) if named else "")).split()
+          code = live_app.main(["live-app-report.json", *sites])
+          sys.stdout.flush()
+          os._exit(code)
+          PY
+
       - name: More sites the finder wasn't made for (everythingmoe's lists), three titles each
         if: "always() && !contains(github.event.head_commit.message, '[diag]')"
         continue-on-error: true
@@ -83,4 +104,5 @@ jobs:
           name: live-sites-mac
           path: |
             live-report.json
+            live-app-report.json
             live-report-extra.json

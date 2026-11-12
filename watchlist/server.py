@@ -2438,6 +2438,7 @@ class App:
             todo = [x for x in state["items"].values() if x["state"] == "unchecked"]
 
             def check(x):
+                webtools.background()
                 if self._servers.get(slot) is not state:
                     return
                 x["state"] = "checking"
@@ -2455,6 +2456,7 @@ class App:
             others = [x for x in self._online_order(item, key) if x["id"] != site_id]
 
             def other(s):
+                webtools.background()
                 sid = f"site|{s['id']}"
                 if sid in state["items"]:
                     return
@@ -2495,6 +2497,10 @@ class App:
         if not site:
             return
         session.send(["show-text", f"Switching to {x['label']}…", 60000])
+        for _ in range(120):
+            if x.get("state") != "checking":
+                break
+            time.sleep(0.5)               # (being checked right now: that check's video, not a second look)
         new = x.get("found") if x.get("found") and time.time() - x.get("at", 0) < self.FOUND_FOR else None
         if not new:
             season, episode = self._key_numbers(key)
@@ -3110,6 +3116,7 @@ class App:
         the next one, the one before it, then on to the end, then back to the start. The
         next and previous videos themselves are found too (ready when you skip to them).
         Only the latest run for a title goes on."""
+        webtools.background()
         with self._lock:
             gen = self._link_runs[item_id] = self._link_runs.get(item_id, 0) + 1
         try:
@@ -3175,6 +3182,7 @@ class App:
         return {"ok": True, "site": site["name"]}
 
     def _link_around_first(self, item, site, start):
+        webtools.background()
         season, episode = self._key_numbers(start)
         try:
             self.scraper.episode_page(site, item, season, episode)

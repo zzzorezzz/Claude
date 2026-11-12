@@ -596,7 +596,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
         scripts.append(webtools.CLICK_JS.replace("__WANT__", json.dumps(click)))
     if webtools.ADBLOCK:
         scripts.append(webtools.ADBLOCK_JS)
-    with _lock:
+    with webtools.slot(_lock):
         try:
             page = open_page(scripts, on_request, on_response)
         except (CDPError, OSError, ValueError, KeyError, StopIteration):
@@ -611,7 +611,8 @@ def catch_video(url, timeout=30, click=None, open_page=None):
                 got.wait(0.5)
                 if got.is_set():
                     time.sleep(1.2)
-                    if videos() and (webtools.learned_found(url, videos()) or time.time() > deadline - timeout + 20):
+                    if videos() and (webtools.learned_found(url, videos()) or webtools.pressed(click, opts, videos())
+                                     or time.time() > deadline - timeout + 20):
                         break
                     got.clear()
                 if click and not opts.get("clicked_at") and videos() and (opts.get("no_click") or time.time() > deadline - timeout + 15):
@@ -637,13 +638,13 @@ def catch_video(url, timeout=30, click=None, open_page=None):
             page.close()
 
 
-def list_servers(url, timeout=16, open_page=None):
+def list_servers(url, timeout=24, open_page=None):
     """As webtools.list_servers: the servers an episode's page offers."""
     from . import webtools
     open_page = open_page or _chromium_page
     opts = {}
-    scripts = [webtools.AUTOPLAY_JS, webtools.SERVERS_JS] + ([webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
-    with _lock:
+    scripts = [webtools.AUTOPLAY_JS, webtools.LIST_ALL_JS, webtools.SERVERS_JS] + ([webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
+    with webtools.slot(_lock):
         try:
             page = open_page(scripts, lambda u, headers, kind: webtools.servers_signal(u, opts), None)
         except (CDPError, OSError, ValueError, KeyError, StopIteration):
@@ -661,7 +662,7 @@ def render(url, timeout=20, settle=2.5, open_page=None):
     """As webtools.render: (the page's HTML after its scripts ran, its address), or None."""
     from . import webtools
     open_page = open_page or _chromium_page
-    with _lock:
+    with webtools.slot(_lock):
         try:
             page = open_page([webtools.ADBLOCK_JS] if webtools.ADBLOCK else [])
         except (CDPError, OSError, ValueError, KeyError, StopIteration):

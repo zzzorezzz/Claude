@@ -1067,10 +1067,12 @@ function renderHome(view) {
   view.innerHTML = `${featured ? heroHTML(featured, { resume: featured === recent }) : ''}
     <div class="home-rows ${featured ? '' : 'no-hero'}">${setupBanner()}
     ${S.genre ? `<div class="row">${filterNote()}</div>` : ''}
+    ${typeof REMOTE !== 'undefined' && REMOTE ? '<div id="device-downloads"></div>' : ''}
     ${continueRowHTML()}
     ${simpleMode() ? '' : downloadsSectionHTML()}
     <div class="section-head"><h2>Your list</h2><span class="muted small">everything you've added, downloaded or not</span></div>
     ${rows}${aboutHTML()}</div>`;
+  if (typeof deviceDownloadsButton === 'function') deviceDownloadsButton();
 }
 
 // What Watch Anything is for (at the bottom of the home screen; it can be hidden).
@@ -1455,7 +1457,9 @@ function openItemMenu(item, anchor, { inTitle = false, local = null } = {}) {
   const inFolder = folders.find((f) => item.collections.includes(f.id));
   const folderBtns = folders.map((f) => `<button data-folder="${esc(f.id)}"><span class="check">${inFolder === f ? '●' : ''}</span>${esc(f.name)}</button>`).join('');
   const film = !isSeries(item) && local?.target;
-  const keepFilm = typeof REMOTE !== 'undefined' && REMOTE && film?.path && !film.stream;    // (Save to this iPad)
+  const remote = typeof REMOTE !== 'undefined' && REMOTE;
+  // (Save to this iPad: the film's file known already, or looked up when it's pressed)
+  const keepFilm = remote && !isSeries(item) && (film ? film.path && !film.stream : hasFiles(item));
   const cols = globalCollections().map((c) => `<button data-col="${esc(c.id)}"><span class="check">${item.collections.includes(c.id) ? '✓' : ''}</span>${esc(c.name)}</button>`).join('');
   menu.innerHTML = `${inTitle ? '' : `<button data-m="watch">▶&nbsp; Watch now</button><button data-m="info">ⓘ&nbsp; More info</button><hr>`}
     <div class="menu-label">Move to folder (${esc(TYPE_PLURAL[item.type])})</div>${folderBtns}
@@ -1516,7 +1520,12 @@ function openItemMenu(item, anchor, { inTitle = false, local = null } = {}) {
       else if (m === 'where' || m === 'cw-on') openWhereAmI(findItem(item.id), { adding: m === 'cw-on' });
       else if (m === 'cw-off') await setWatching(findItem(item.id), false);
       else if (m === 'use-mal') openUseMal(findItem(item.id));
-      else if (m === 'save-here') saveToDevice({ itemId: item.id, key: '', label: item.title, path: film.path, title: item.title });
+      else if (m === 'save-here') {
+        let file = film;
+        if (!file) file = (await api('GET', `/api/items/${item.id}/local`).catch(() => null))?.target;
+        if (!file?.path || file.stream) { toast(`There's no downloaded file of ${item.title} on the computer to save`, 'error'); return; }
+        saveToDevice({ itemId: item.id, key: '', label: item.title, path: file.path, title: item.title });
+      }
       else if (m === 'remove') removeItem(item.id);
     } catch (err) { fail(err); }
   });
