@@ -257,7 +257,7 @@ class Store:
             "items": list(self._items.values()),
             "collections": list(self._collections.values()),
             "deleted": self._deleted,
-        }, compact=True)
+        }, compact=True, durable=True)
         self._seen = self._signature()
         self.version += 1
 

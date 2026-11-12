@@ -307,7 +307,7 @@ class Torrents:
     def _save(self):
         with self.lock:
             write_json(self.state_path, {"torrents": self.records, "keep": self.keep, "seen": self.seen,
-                                         "port": self.port_in})
+                                         "port": self.port_in}, durable=True)
             self._dirty = False
 
     # ---- the background loop: alerts, newly found file lists, cleaning up
@@ -940,8 +940,6 @@ class Torrents:
             while not handle.have_piece(piece):
                 if time.time() > deadline:
                     raise TorrentError("the torrent stopped sending data")
-                if h not in self.handles:
-                    raise TorrentError("the torrent was removed")
                 time.sleep(0.05)
         except RuntimeError as e:                 # (libtorrent: "invalid torrent handle used" - it was removed)
             raise TorrentError("the torrent was removed") from e

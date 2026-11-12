@@ -175,9 +175,11 @@ def read_json(path: Path, default):
         return copy.deepcopy(default)
 
 
-def write_json(path: Path, data, compact=False) -> None:
+def write_json(path: Path, data, compact=False, durable=False) -> None:
     """Write atomically. compact=True is for big files written often: pretty
-    printing makes Python use its slow JSON encoder (about 10x slower)."""
+    printing makes Python use its slow JSON encoder (about 10x slower). durable=True: on the
+    disk itself before it replaces the old one (a power cut can't leave an empty file) - for
+    what losing would lose your things (your list, the list of torrents), as it's slower."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -186,9 +188,9 @@ def write_json(path: Path, data, compact=False) -> None:
             fh.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
         else:
             json.dump(data, fh, indent=2, ensure_ascii=False)
-        # (on the disk before it takes the old one's place: a power cut can't leave an empty file)
-        fh.flush()
-        os.fsync(fh.fileno())
+        if durable:
+            fh.flush()
+            os.fsync(fh.fileno())
     os.replace(tmp, path)
 
 
