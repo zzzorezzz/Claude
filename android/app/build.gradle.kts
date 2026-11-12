@@ -13,8 +13,8 @@ android {
         applicationId = "app.watchanything"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1381
-        versionName = "1.3.8.1"
+        versionCode = 1382
+        versionName = "1.3.8.2"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }

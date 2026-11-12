@@ -120,7 +120,21 @@ function phoneTabs() {
     <button type="button" data-tab="lists">${ico('M3 5h2v2H3zm4 0h14v2H7zM3 11h2v2H3zm4 0h14v2H7zm-4 6h2v2H3zm4 0h14v2H7z')}<span>Lists</span></button>
     <a href="#/find" data-route="find">${ico('M10 3a7 7 0 1 0 4.2 12.6l5.1 5.1 1.4-1.4-5.1-5.1A7 7 0 0 0 10 3zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10z')}<span>Find</span></a>
     <button type="button" data-tab="party">${ico('M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm7.5-1a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM9 13c-3.3 0-7 1.6-7 4v3h14v-3c0-2.4-3.7-4-7-4zm7.5-1c-.5 0-1 0-1.6.1 1.3.9 2.1 2.2 2.1 3.9v3h5v-2.6c0-2.3-3.2-4.4-5.5-4.4z')}<span>Party</span></button>
+    <button type="button" data-tab="saved">${ico('M12 3v10.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3zM4 18h16v2H4z')}<span>Saved</span></button>
     <button type="button" data-tab="settings">${ico('M19.1 12.9a7.3 7.3 0 0 0 0-1.9l2-1.6-1.9-3.3-2.4 1a7 7 0 0 0-1.6-.9L14.8 3h-3.8l-.4 2.5c-.6.2-1.1.5-1.6.9l-2.4-1-1.9 3.3 2 1.6a7.3 7.3 0 0 0 0 1.9l-2 1.6 1.9 3.3 2.4-1c.5.4 1 .7 1.6.9l.4 2.5h3.8l.4-2.5c.6-.2 1.1-.5 1.6-.9l2.4 1 1.9-3.3zM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z')}<span>Settings</span></button>`;
+  // A tablet (no bar at the bottom): Saved in the top bar, by Watch together.
+  const party = document.getElementById('btn-party');
+  if (party && !document.getElementById('btn-saved')) {
+    const b = document.createElement('button');
+    b.id = 'btn-saved';
+    b.className = 'icon-btn';
+    b.type = 'button';
+    b.title = `Saved on this ${deviceWord()}`;
+    b.setAttribute('aria-label', b.title);
+    b.innerHTML = ico('M12 3v10.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3zM4 18h16v2H4z');
+    b.addEventListener('click', (e) => { e.stopPropagation(); openSavedSheet(); });
+    party.before(b);
+  }
   bar.addEventListener('click', (e) => {
     const tab = e.target.closest('[data-tab]')?.dataset.tab;
     if (!tab) return;
@@ -128,6 +142,7 @@ function phoneTabs() {
     if (tab === 'party') document.getElementById('btn-party')?.click();
     else if (tab === 'settings') document.getElementById('btn-settings')?.click();
     else if (tab === 'lists') openListsSheet(e.target.closest('[data-tab]'));
+    else if (tab === 'saved') openSavedSheet();
   });
   const mark = () => {
     const name = (location.hash.replace(/^#\/?/, '').split('/')[0]) || 'home';
@@ -151,6 +166,239 @@ function openListsSheet(anchor) {
   });
   placeMenu(menu, anchor);
 }
+
+// ---- Save to this iPad: a video kept on the phone or tablet itself and played from there (no
+// streaming: no stalls, however the Wi-Fi is), taken off once it's been watched. The PC gets it
+// ready (the file itself when the phone plays it as it is; else repackaged or converted) and the
+// page keeps it in its own storage (IndexedDB), in pieces, fetched one after another - resumed
+// where it stopped when the app is opened again. "Saved" lists them, with their sizes.
+
+const SAVE_DB = 'wa-saved';
+const SAVE_PIECE = 8 * 1024 * 1024;
+const saveJobs = {};                         // id -> a save going on now (its fetching)
+
+function deviceWord() {
+  const ua = navigator.userAgent || '';
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'iPad';
+  if (/iPhone/.test(ua)) return 'iPhone';
+  return /Android|Mobile/.test(ua) ? 'phone' : 'device';
+}
+
+function saveDb() {
+  if (saveDb.p) return saveDb.p;
+  saveDb.p = new Promise((resolve, reject) => {
+    const req = indexedDB.open(SAVE_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains('files')) db.createObjectStore('files', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('pieces')) db.createObjectStore('pieces');
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => { saveDb.p = null; reject(req.error || new Error("this browser can't keep videos")); };
+  });
+  return saveDb.p;
+}
+
+async function saveDo(store, mode, fn) {
+  const db = await saveDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, mode);
+    let out;
+    Promise.resolve(fn(tx.objectStore(store), (v) => { out = v; })).catch(reject);
+    tx.oncomplete = () => resolve(out);
+    tx.onerror = () => reject(tx.error || new Error('saving failed'));
+    tx.onabort = () => reject(tx.error || new Error('there was no room left to save it'));
+  });
+}
+const saveGet = (store, key) => saveDo(store, 'readonly', (os, done) => { const r = os.get(key); r.onsuccess = () => done(r.result); });
+const savePut = (store, value, key) => saveDo(store, 'readwrite', (os) => { if (key === undefined) os.put(value); else os.put(value, key); });
+const saveAllFiles = () => saveDo('files', 'readonly', (os, done) => { const r = os.getAll(); r.onsuccess = () => done(r.result || []); });
+
+async function savedList() {
+  try { return (await saveAllFiles()).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0)); } catch { return []; }
+}
+
+// The saved copy of an episode (or film), when it's all there.
+async function savedFor(itemId, key) {
+  if (!REMOTE || typeof indexedDB === 'undefined') return null;
+  return (await savedList()).find((f) => f.item_id === itemId && f.key === key && f.state === 'done') || null;
+}
+
+// What the phone's player opens for a saved copy (its picture and sound from here, its subtitles too).
+async function savedMedia(file) {
+  const parts = [];
+  for (let n = 0; n < file.pieces; n += 1) {
+    const piece = await saveGet('pieces', `${file.id}:${n}`);
+    if (!piece) throw new Error('part of the saved video is missing');
+    parts.push(piece);
+  }
+  const url = URL.createObjectURL(new Blob(parts, { type: 'video/mp4' }));
+  return { index: undefined, key: file.key, label: file.label, offset: 0, duration: file.duration || null, how: 'saved',
+    type: 'mp4', src: url, savedId: file.id, audio: [],
+    subs: (file.subs || []).map((s) => ({ label: s.label, lang: s.lang, absolute: true,
+      url: URL.createObjectURL(new Blob([s.text], { type: 'text/vtt' })) })) };
+}
+
+async function savedRemove(id) {
+  const file = await saveGet('files', id).catch(() => null);
+  if (saveJobs[id]) saveJobs[id].stop = true;
+  await saveDo('pieces', 'readwrite', (os) => { for (let n = 0; n < Math.max(file?.pieces || 0, file?.expected || 0) + 1; n += 1) os.delete(`${id}:${n}`); });
+  await saveDo('files', 'readwrite', (os) => { os.delete(id); });
+  api('POST', `/api/web/save/${id}/done`, {}).catch(() => {});
+  savedRefresh();
+}
+
+// Start saving one of a title's files: {itemId, key, label, path} (an episode's ⋯), or {sid, index}
+// (the file the phone's player has open).
+async function saveToDevice({ itemId, key, label, path, title, sid, index }) {
+  if (typeof indexedDB === 'undefined') { toast("This browser can't keep videos", 'error'); return; }
+  try { navigator.storage?.persist?.(); } catch { /* fine: asked */ }
+  if (itemId) {
+    const mine = (await savedList()).find((f) => f.item_id === itemId && f.key === key);
+    if (mine && mine.state === 'done') { toast(`${label || title} is already on this ${deviceWord()}`); return; }
+  }
+  let r;
+  try {
+    r = await api('POST', '/api/web/save', sid ? { sid, index, caps: wpCaps() } : { item_id: itemId, key, path, label, caps: wpCaps() });
+  } catch (err) { toast(err.message, 'error'); return; }
+  const had = (await savedList()).find((f) => f.id === r.id || (f.item_id === r.item_id && f.key === r.key && f.state === 'done'));
+  if (had && had.state === 'done') { toast(`${r.label || r.title} is already on this ${deviceWord()}`); return; }
+  if (!had) {
+    await savePut('files', { id: r.id, item_id: r.item_id, key: r.key, label: r.label, title: r.title, state: 'preparing', progress: 0,
+      size: 0, got: 0, pieces: 0, savedAt: Date.now() });
+  }
+  toast(`Saving ${r.label || r.title} to this ${deviceWord()} - see Saved`);
+  savePump(r.id);
+}
+
+// One save, step by step: the PC getting it ready, then its pieces fetched and kept.
+async function savePump(id) {
+  if (saveJobs[id]) return;
+  const job = saveJobs[id] = { stop: false };
+  const update = async (patch) => {
+    const f = await saveGet('files', id);
+    if (!f) { job.stop = true; return null; }
+    Object.assign(f, patch);
+    await savePut('files', f);
+    savedRefresh();
+    return f;
+  };
+  try {
+    let state;
+    for (;;) {
+      if (job.stop) return;
+      try { state = await api('GET', `/api/web/save/${id}`); } catch (err) {
+        if (err.code === 'gone') { await update({ state: 'failed', error: 'the computer let go of it (it was a while ago) - save it again' }); return; }
+        await new Promise((res) => setTimeout(res, 4000));
+        continue;
+      }
+      if (state.state === 'failed') { await update({ state: 'failed', error: state.error }); return; }
+      if (state.state === 'ready') break;
+      await update({ state: 'preparing', progress: state.progress || 0, how: state.how });
+      await new Promise((res) => setTimeout(res, 1500));
+    }
+    let f = await update({ state: 'saving', size: state.size, duration: state.duration, subs: state.subs || [], audio: state.audio || [],
+      expected: Math.ceil(state.size / SAVE_PIECE), how: state.how, poster: state.poster || '' });
+    if (!f) return;
+    for (let n = f.pieces; n * SAVE_PIECE < state.size; n += 1) {
+      if (job.stop) return;
+      const start = n * SAVE_PIECE, end = Math.min(state.size, start + SAVE_PIECE) - 1;
+      let piece = null;
+      for (let tries = 0; tries < 5 && !piece; tries += 1) {
+        try {
+          const res = await fetch(state.url, { headers: { Range: `bytes=${start}-${end}` }, cache: 'no-store' });
+          if (res.status !== 206 && res.status !== 200) throw new Error(`the computer answered ${res.status}`);
+          piece = await res.blob();
+          if (piece.size !== end - start + 1) { piece = null; throw new Error('a piece came short'); }
+        } catch (err) {
+          if (tries === 4) throw err;
+          await new Promise((res) => setTimeout(res, 2000 * (tries + 1)));
+        }
+      }
+      await savePut('pieces', piece, `${id}:${n}`);
+      f = await update({ pieces: n + 1, got: end + 1 });
+      if (!f) return;
+    }
+    await update({ state: 'done', got: state.size, savedAt: Date.now() });
+    api('POST', `/api/web/save/${id}/done`, {}).catch(() => {});
+    toast(`${f.label || f.title} is on this ${deviceWord()} - it plays from here now`);
+  } catch (err) {
+    await update({ state: 'paused', error: `${err.message || err} - it carries on when you open Saved` }).catch(() => {});
+  } finally {
+    delete saveJobs[id];
+  }
+}
+
+// Saves left half-way (the app was closed): carried on.
+async function saveResume() {
+  for (const f of await savedList()) {
+    if (['preparing', 'saving', 'paused'].includes(f.state)) savePump(f.id);
+  }
+}
+
+const fmtSize = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
+
+// "Saved": everything kept on this device, how big, what it's doing; play or delete each.
+async function openSavedSheet() {
+  closeMenu();
+  saveResume();
+  const wrap = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad saved-modal">
+    <h2>Saved on this ${deviceWord()}</h2>
+    <p class="sub">They play from here, without streaming - and are taken off by themselves once you've watched them.
+      Save more from an episode's ⋯, or from the player's menu.</p>
+    <div id="saved-list"></div><p class="muted small" id="saved-space"></p>
+    <div class="btns"><button class="btn btn-ghost" data-saved="all">Delete all</button></div></div>`, 'saved-sheet');
+  wrap.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-saved]');
+    if (!b) return;
+    const what = b.dataset.saved, id = b.dataset.id;
+    if (what === 'delete') { await savedRemove(id); toast('Deleted from this ' + deviceWord()); }
+    else if (what === 'retry') { const f = await saveGet('files', id); if (f) { await savePut('files', { ...f, state: 'saving', error: '' }); savePump(id); } }
+    else if (what === 'play') {
+      const f = await saveGet('files', id);
+      const item = typeof findItem === 'function' ? findItem(f.item_id) : null;
+      if (!item) { toast("That title isn't in your list any more", 'error'); return; }
+      closeModal(wrap);
+      // (played as its file: the phone's player finds it saved here and plays it from here)
+      openWatch(item, f.key && f.key.includes(':') ? { season: +f.key.split(':')[0], episode: +f.key.split(':')[1] } : undefined, { how: 'file' });
+    } else if (what === 'all') {
+      const all = await savedList();
+      if (all.length && confirm(`Delete all ${all.length} saved video${all.length === 1 ? '' : 's'} from this ${deviceWord()}?`)) {
+        for (const f of all) await savedRemove(f.id);
+        toast('Everything saved here is deleted');
+      }
+    }
+  });
+  savedRefresh();
+}
+
+let savedTimer = 0;
+async function savedRefresh() {
+  const box = document.getElementById('saved-list');
+  clearTimeout(savedTimer);
+  if (!box) return;
+  const files = await savedList();
+  const word = { preparing: 'Getting it ready on the computer', saving: 'Saving', paused: 'Stopped', failed: "Couldn't save it", done: 'Saved' };
+  box.innerHTML = files.length ? files.map((f) => {
+    const pct = f.state === 'preparing' ? f.progress : f.size ? (f.got || 0) / f.size : 0;
+    return `<div class="saved-row" data-state="${f.state}">
+      <div class="saved-what"><b>${esc(f.title || '')}</b>${f.label && f.label !== f.title ? ` <span class="muted">${esc(f.label)}</span>` : ''}
+        <div class="small ${f.state === 'failed' || f.state === 'paused' ? 'bad' : 'muted'}">${word[f.state] || f.state}${f.state === 'done' ? '' : ` ${Math.round(pct * 100)}%`}
+          ${f.size ? ` · ${fmtSize(f.size)}` : ''}${f.how && f.how !== 'as it is' ? ` · ${esc(f.how)}` : ''}${f.error ? ` · ${esc(f.error)}` : ''}</div>
+        ${f.state !== 'done' && f.state !== 'failed' ? `<div class="saved-bar"><i style="width:${Math.round(pct * 100)}%"></i></div>` : ''}</div>
+      <div class="saved-btns">${f.state === 'done' ? `<button class="btn btn-white btn-sm" data-saved="play" data-id="${f.id}">▶ Play</button>` : ''}
+        ${f.state === 'paused' ? `<button class="btn btn-ghost btn-sm" data-saved="retry" data-id="${f.id}">Carry on</button>` : ''}
+        <button class="btn btn-ghost btn-sm" data-saved="delete" data-id="${f.id}" aria-label="Delete">🗑</button></div></div>`;
+  }).join('') : `<p class="muted">Nothing saved on this ${deviceWord()}.</p>`;
+  const used = files.reduce((n, f) => n + (f.got || 0), 0);
+  let free = '';
+  try { const est = await navigator.storage.estimate(); if (est.quota) free = ` · about ${fmtSize(Math.max(0, est.quota - est.usage))} more can be kept`; } catch { /* fine */ }
+  const space = document.getElementById('saved-space');
+  if (space) space.textContent = `${fmtSize(used || 0)} used${free}`;
+  if (files.some((f) => f.state === 'preparing' || f.state === 'saving')) savedTimer = setTimeout(savedRefresh, 1000);
+}
+
+if (REMOTE && typeof window !== 'undefined') window.addEventListener('load', () => setTimeout(saveResume, 3000));
 
 // ---- on the phone: "Add to Home Screen", said once
 

@@ -140,6 +140,69 @@ def plan(info, caps=None, quality="1080", burn=None, local=True):
             "audio": audio, "burn": burn}
 
 
+def keep_as_is(info, caps=None):
+    """Whether a phone can keep and play this file as it is (an MP4 of a picture it plays, with
+    sound it plays) - nothing to make."""
+    v = info["video"]
+    mp4 = any(x in info["format"] for x in ("mp4", "mov"))
+    # (HEVC is always repackaged: Apple's players want it marked "hvc1", which a file may not be)
+    return mp4 and v["codec"] == "h264" and video_fits(v, caps) and all(a["codec"] in PHONE_AUDIO for a in info["audio"][:MAX_AUDIO])
+
+
+class Mp4:
+    """The video made into one MP4 for a phone to keep (Save to this iPad): the picture copied
+    when the phone plays it (else converted, by the graphics card when there is one), every
+    sound as AAC, its index at the start (it plays at once, and from anywhere)."""
+
+    def __init__(self, source, info, out, caps=None, quality="1080"):
+        self.source, self.info, self.out = source, info, Path(out)
+        self.how = plan(info, caps, quality, local=True)
+        self.progress, self.error, self.done = 0.0, "", False
+        self.proc = None
+
+    def command(self):
+        ffmpeg, _ = find()
+        audio = self.info["audio"][:MAX_AUDIO]
+        cmd = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", self.source, "-map", "0:v:0"]
+        for a in audio:
+            cmd += ["-map", f"0:a:{a['n']}"]
+        if self.how["video"] == "copy":
+            cmd += ["-c:v", "copy"] + (["-tag:v", "hvc1"] if self.info["video"]["codec"] == "hevc" else [])
+        else:
+            vf, args = _encode_args(encoder(), self.how.get("height"), self.info["video"].get("fps") or 24.0)
+            cmd += (["-vf", ",".join(vf)] if vf else []) + args
+        for i, a in enumerate(audio):
+            if self.how["audio"][i] == "copy":
+                cmd += [f"-c:a:{i}", "copy"]
+            else:
+                cmd += [f"-c:a:{i}", "aac", f"-ac:a:{i}", "2", f"-b:a:{i}", "160k"]
+            cmd += [f"-metadata:s:a:{i}", f"title={track_name(a, i)}", f"-metadata:s:a:{i}", f"language={(a.get('lang') or 'und')[:3]}"]
+        return cmd + ["-sn", "-dn", "-map_chapters", "-1", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
+                      "-f", "mp4", str(self.out)]
+
+    def run(self):
+        """Makes it (blocks); progress 0-1 as it goes. Raises RuntimeError when it can't."""
+        self.out.parent.mkdir(parents=True, exist_ok=True)
+        total = float(self.info.get("duration") or 0)
+        self.proc = subprocess.Popen(self.command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                     encoding="utf-8", errors="replace", **_no_window())
+        for line in self.proc.stdout:
+            if line.startswith("out_time_us=") and total:
+                try:
+                    self.progress = min(0.99, int(line.split("=", 1)[1]) / 1e6 / total)
+                except ValueError:
+                    pass
+        err = self.proc.stderr.read()
+        if self.proc.wait() != 0:
+            self.out.unlink(missing_ok=True)
+            raise RuntimeError((err or "the video couldn't be made").strip().splitlines()[-1][:200])
+        self.progress, self.done = 1.0, True
+
+    def stop(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.kill()
+
+
 # ---- the encoder: the graphics card's when there is one
 
 _encoder = None

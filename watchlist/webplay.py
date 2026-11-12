@@ -290,6 +290,107 @@ def strip_picture(head):
 
 # ---- jobs: one per device
 
+class Copies:
+    """Videos made for a phone to keep (Save to this iPad): one MP4 each - the file itself when the
+    phone plays it as it is - and its subtitles as text. Made ones are deleted once the phone has
+    it (done()), or six hours after they were asked for."""
+
+    KEEP = 6 * 3600
+
+    def __init__(self, folder):
+        self.folder = Path(folder)
+        self.lock = threading.Lock()
+        self.jobs = {}                   # id -> {"id", "device", "state", "progress", "path", "made", ...}
+        shutil.rmtree(self.folder, ignore_errors=True)        # (what was left from before: never handed over)
+
+    def start(self, device, source, info, caps, quality, about):
+        """A copy of `source` being got ready for `device`; `about` is what the phone shows for it
+        ({"item_id", "key", "title", "label"}). Returns its id."""
+        with self.lock:
+            for old in [j for j in self.jobs.values() if j["device"] == device and j["source"] == source]:
+                if old["state"] in ("preparing", "ready"):
+                    return old["id"]
+            cid = uuid.uuid4().hex[:12]
+            job = dict(about, id=cid, device=device, source=source, state="preparing", progress=0.0, error="",
+                       path="", made=False, size=0, subs=[], audio=[], duration=info.get("duration"), at=time.time())
+            self.jobs[cid] = job
+        threading.Thread(target=self._make, args=(job, info, caps, quality), daemon=True).start()
+        if not getattr(self, "_tidying", False):
+            self._tidying = True
+            threading.Thread(target=self._tidy_loop, daemon=True).start()
+        return cid
+
+    def _tidy_loop(self):
+        while True:
+            time.sleep(600)
+            try:
+                self.tidy()
+            except Exception:  # noqa: BLE001 - tried again later
+                pass
+
+    def _make(self, job, info, caps, quality):
+        try:
+            texts = [s for s in info["subs"] if s["text"]][:6]
+            for s in texts:
+                try:
+                    job["subs"].append({"label": transcode.track_name(s, s["n"], "Subtitles"), "lang": s["lang"],
+                                        "text": transcode.to_vtt(job["source"], stream=s["n"])})
+                except Exception:  # noqa: BLE001 - that one's left out
+                    pass
+            job["audio"] = [transcode.track_name(a, i) for i, a in enumerate(info["audio"][:transcode.MAX_AUDIO])]
+            if transcode.keep_as_is(info, caps):
+                job.update(path=job["source"], how="as it is")
+            else:
+                mp4 = transcode.Mp4(job["source"], info, self.folder / f"{job['id']}.mp4", caps, quality)
+                job["how"] = "repackaged" if mp4.how["video"] == "copy" else "converted"
+                job["maker"] = mp4
+
+                def follow():
+                    while not mp4.done and job["state"] == "preparing":
+                        job["progress"] = mp4.progress
+                        time.sleep(0.5)
+                threading.Thread(target=follow, daemon=True).start()
+                mp4.run()
+                job.update(path=str(mp4.out), made=True)
+            job.update(size=Path(job["path"]).stat().st_size, progress=1.0, state="ready")
+        except Exception as e:  # noqa: BLE001 - told to the phone
+            job.update(state="failed", error=str(e) or "it couldn't be made")
+
+    def get(self, device, cid):
+        with self.lock:
+            job = self.jobs.get(cid)
+        return job if job and job["device"] == device else None
+
+    def of(self, device):
+        with self.lock:
+            return [j for j in self.jobs.values() if j["device"] == device]
+
+    def done(self, device, cid):
+        """The phone has it (or doesn't want it): what was made for it goes."""
+        with self.lock:
+            job = self.jobs.get(cid)
+            if not job or job["device"] != device:
+                return False
+            self.jobs.pop(cid, None)
+        self._drop(job)
+        return True
+
+    def _drop(self, job):
+        maker = job.get("maker")
+        if maker:
+            maker.stop()
+        if job.get("made") or maker:
+            Path(self.folder / f"{job['id']}.mp4").unlink(missing_ok=True)
+
+    def tidy(self):
+        with self.lock:
+            old = [j for j in self.jobs.values() if time.time() - j["at"] > self.KEEP]
+            for j in old:
+                self.jobs.pop(j["id"], None)
+        for j in old:
+            self._drop(j)
+
+
 class Jobs:
     def __init__(self, folder):
         self.folder = Path(folder)

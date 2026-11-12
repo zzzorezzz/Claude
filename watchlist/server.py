@@ -131,6 +131,8 @@ class App:
         # through, and the videos made playable for it (transcode.py).
         self.tickets = webplay.Tickets()
         self.web_jobs = webplay.Jobs(self.data_dir / "phone-cache")
+        self.web_copies = webplay.Copies(self.data_dir / "phone-copies")     # (Save to this iPad)
+        self._phone_convert = set()      # files a phone couldn't play as they were: converted from then on
         self.web_jobs.clear()
         self.web_sessions = {}           # device -> WebSession
         self.party_device = None         # the phone a watch party is for (its own player), or None
@@ -268,7 +270,16 @@ class App:
         t = self.tickets.make(device, dict(target, kind="sub"))
         return {"label": label, "lang": lang, "url": f"/stream/web/{t}/sub.vtt", "absolute": absolute, "styled": styled}
 
-    def web_media(self, session, index, at=0.0, caps=None, quality=None, burn=None):
+    def phone_converted(self, source, caps, info):
+        """A file a phone couldn't play as it was (a picture or sound its browser can't take, though
+        it said it could): all of it made into what every phone plays, from then on."""
+        if source not in self._phone_convert:
+            return caps, info
+        return (dict(caps or {}, hevc=False),
+                dict(info, video=dict(info["video"], codec=f"{info['video']['codec']}-converted"),
+                     audio=[dict(a, codec=f"{a['codec']}-converted") for a in info["audio"]]))
+
+    def web_media(self, session, index, at=0.0, caps=None, quality=None, burn=None, convert=False):
         """What the phone's player opens for an entry: {"src", "type" ("hls" / "mp4"), "offset" (where
         the video it gets starts, in the episode), "duration", "audio", "subs", "how"}."""
         if not 0 <= index < len(session.entries):
@@ -325,6 +336,9 @@ class App:
                 burn_spec = {"path": entry["sub"], "n": None}
             elif str(burn).isdigit():
                 burn_spec = {"path": source, "n": int(burn)}
+        if convert:
+            self._phone_convert.add(source)
+        caps, info = self.phone_converted(source, caps, info)
         how = transcode.plan(info, caps, quality, burn=burn_spec, local=local)
         out["duration"] = info["duration"]
         if how["direct"]:
@@ -3677,6 +3691,10 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/web/(\w+)/source", "web_source"),
         ("POST", r"/api/web/(\w+)/version", "web_version"),
         ("GET", r"/api/web/(\w+)/servers", "web_servers"),
+        ("POST", r"/api/web/save", "web_save"),
+        ("GET", r"/api/web/saves", "web_saves"),
+        ("GET", r"/api/web/save/(\w+)", "web_save_state"),
+        ("POST", r"/api/web/save/(\w+)/done", "web_save_done"),
         ("POST", r"/api/web/(\w+)/server", "web_server"),
         ("POST", r"/api/web/(\w+)/other-site", "web_other_site"),
         ("GET", r"/api/pair/status", "pair_status"),
@@ -4139,7 +4157,7 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             raise ApiError("which episode?") from None
         return self.app.web_media(session, index, float(body.get("at") or 0), body.get("caps") or {},
-                                  body.get("quality"), body.get("burn"))
+                                  body.get("quality"), body.get("burn"), convert=bool(body.get("convert")))
 
     def api_web_state(self, body, sid):
         """The phone's player: what it's doing (where it is, paused, which episode) - your place
@@ -4176,6 +4194,61 @@ class Handler(BaseHTTPRequestHandler):
         session = self._web_session(sid)
         threading.Thread(target=self.app._other_source, args=(session,), daemon=True).start()
         return {"ok": True}
+
+    def _save_device(self):
+        if not self.device:
+            raise ApiError("saving a video is for a phone or tablet using this app over the network")
+        return self.device["id"]
+
+    def api_web_save(self, body):
+        """Save to this iPad: one of the title's files got ready to keep (as it is when the phone plays
+        it; else repackaged or converted here). {"id"}; the phone follows it with web_save_state."""
+        device = self._save_device()
+        key, label = str(body.get("key") or ""), str(body.get("label") or "")
+        if body.get("sid"):
+            # (from the phone's player: the file it's playing - the phone never sees where it is)
+            session = self._web_session(str(body["sid"]))
+            try:
+                entry = session.entries[int(body.get("index", session.index))]
+            except (TypeError, ValueError, IndexError):
+                raise ApiError("which episode?") from None
+            if entry.get("web") or entry.get("online"):
+                raise ApiError("only a video on the computer can be saved - this one plays from a site")
+            item, path = self.app.item(session.item_id), str(entry.get("path") or "")
+            key, label = entry.get("key") or "", entry.get("label") or entry.get("name") or ""
+        else:
+            item = self.app.item(str(body.get("item_id") or ""))
+            path = str(body.get("path") or "")
+        if not path or not os.path.isfile(path) or not self.app.playable(item, path):
+            raise ApiError("that file isn't one of this title's on the computer")
+        if not transcode.find()[0]:
+            raise ApiError("saving to a phone needs ffmpeg, which is missing from this copy of the app")
+        caps, info = self.app.phone_converted(path, body.get("caps") or {}, self.app._probe(path))
+        about = {"item_id": item["id"], "key": key, "title": item["title"], "label": label[:80],
+                 "poster": item.get("poster") or ""}
+        quality = str(body.get("quality") or self.app.settings.get().get("phone_quality") or "1080")
+        return dict(about, id=self.app.web_copies.start(device, path, info, caps, quality, about))
+
+    def _save_view(self, job):
+        out = {k: job.get(k) for k in ("id", "item_id", "key", "title", "label", "poster", "state", "progress", "error",
+                                       "size", "audio", "duration", "how")}
+        if job["state"] == "ready":
+            t = self.app.tickets.make(job["device"], {"kind": "file", "path": job["path"]})
+            out["url"] = f"/stream/web/{t}/video.mp4"
+            out["subs"] = job.get("subs") or []
+        return out
+
+    def api_web_save_state(self, body, cid):
+        job = self.app.web_copies.get(self._save_device(), cid)
+        if not job:
+            raise ApiError("that copy isn't being made any more", HTTPStatus.NOT_FOUND, code="gone")
+        return self._save_view(job)
+
+    def api_web_saves(self, body):
+        return {"saves": [self._save_view(j) for j in self.app.web_copies.of(self._save_device())]}
+
+    def api_web_save_done(self, body, cid):
+        return {"ok": self.app.web_copies.done(self._save_device(), cid)}
 
     def api_web_servers(self, query, sid):
         return self.app.server_list(self._web_session(sid))

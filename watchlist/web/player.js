@@ -115,9 +115,10 @@ function wpCommands(list) {
   }
 }
 
-async function wpLoad(index, at = 0, { paused = false, reload = false } = {}) {
+async function wpLoad(index, at = 0, { paused = false, reload = false, convert = false, stream = false } = {}) {
   const s = WP.s;
   if (!s) return;
+  wpSavedWatched(s);
   const token = ++s.token;
   s.index = index;
   s.media = null;                                    // (no position told for it until it's open)
@@ -131,9 +132,16 @@ async function wpLoad(index, at = 0, { paused = false, reload = false } = {}) {
   wpLoading(reload ? 'Getting it again…' : `Getting ${label || 'it'} ready…`);
   wpReport(true);
   let media;
+  // Saved on this iPad: played from here (no streaming), its subtitles too.
+  const saved = !stream && !convert && typeof savedFor === 'function' ? await savedFor(s.launch.item_id, e.key || '').catch(() => null) : null;
+  if (saved) {
+    try { media = Object.assign(await savedMedia(saved), { index }); } catch { media = null; }
+    if (token !== s.token || WP.s !== s) return;
+    if (media) { wpAttach(media, at, paused); return; }
+  }
   try {
     media = await api('POST', `/api/web/${s.sid}/open`, { index, at, caps: wpCaps(), quality: s.quality || undefined,
-      burn: s.burn ?? undefined });
+      burn: s.burn ?? undefined, convert: convert || undefined });
   } catch (err) {
     if (token !== s.token) return;                    // (moved on meanwhile: Next pressed again)
     if (err.code === 'closed') { wpClose(true); return; }
@@ -144,8 +152,22 @@ async function wpLoad(index, at = 0, { paused = false, reload = false } = {}) {
   wpAttach(media, at, paused);
 }
 
+// A saved copy watched to (nearly) its end: taken off the iPad (it was only kept to be watched).
+function wpSavedWatched(s) {
+  const m = s?.media;
+  if (!m || m.how !== 'saved' || m.removed) return;
+  const total = wpTotal();
+  if (!total || wpNow() < total * 0.92) return;
+  m.removed = true;
+  if (typeof savedRemove === 'function') {
+    savedRemove(m.savedId).then(() => toast(`Watched - deleted from this ${deviceWord()}`)).catch(() => {});
+  }
+}
+
 function wpTeardownStream(empty = true) {
   if (WP.hls) { try { WP.hls.destroy(); } catch { /* gone */ } WP.hls = null; }
+  // (a saved copy's addresses let go once it's off: they hold the video in memory)
+  if (empty) { (WP.blobs || []).forEach((u) => URL.revokeObjectURL(u)); WP.blobs = []; }
   if (WP.el) {
     const v = wpV();
     v.pause();
@@ -160,6 +182,9 @@ async function wpAttach(media, at, paused) {
   const s = WP.s;
   const v = wpV();
   wpTeardownStream(false);
+  const old = WP.blobs || [];
+  WP.blobs = media.how === 'saved' ? [media.src, ...(media.subs || []).map((x) => x.url)] : [];
+  setTimeout(() => old.forEach((u) => URL.revokeObjectURL(u)), 2000);
   s.media = media;
   s.ready = 0;
   s.offset = media.offset || 0;
@@ -520,7 +545,8 @@ function wpMenu() {
   const audio = wpAudioTracks();
   const subs = s.media?.subs || [];
   const styled = subs.find((x) => x.styled && x.n !== undefined);
-  const file = s.media && s.media.how !== 'site';
+  const file = s.media && s.media.how !== 'site' && s.media.how !== 'saved';
+  const keepable = file && typeof saveToDevice === 'function' && typeof REMOTE !== 'undefined' && REMOTE;
   const q = s.quality || '';
   sheet.innerHTML = `<div class="wp-sheet-head"><b>Player</b><button class="wp-btn" data-wp="menu" aria-label="Close">✕</button></div>
     ${audio.length > 1 ? `<h5>Audio</h5><div class="wp-opts">${audio.map((a) => `<button class="${a.on ? 'on' : ''}" data-audio="${a.i}">${esc(a.label)}</button>`).join('')}</div>` : ''}
@@ -533,7 +559,9 @@ function wpMenu() {
     ${file ? `<h5>Quality</h5><div class="wp-opts">${[['', `As in Settings`], ['original', 'Original'], ['1080', '1080p'], ['720', '720p'], ['480', '480p']]
     .map(([v, l]) => `<button class="${q === v ? 'on' : ''}" data-q="${v}">${l}</button>`).join('')}</div>` : ''}
     <h5>Speed</h5><div class="wp-opts">${[0.5, 0.75, 1, 1.25, 1.5, 2].map((r) => `<button class="${s.speed === r ? 'on' : ''}" data-speed="${r}">${r}×</button>`).join('')}</div>
-    ${s.media ? `<p class="muted small wp-how">${{ direct: 'Played as it is', copy: 'Repackaged for the phone (picture untouched)', encode: `Converted for the phone${s.media.encoder ? ` (${esc(s.media.encoder.replace('h264_', '').toUpperCase())})` : ''}`, site: `From ${esc(s.media.site || 'your site')}` }[s.media.how] || ''}</p>` : ''}`;
+    ${keepable ? `<h5>On this ${deviceWord()}</h5><div class="wp-opts"><button data-wp="save-here">⬇ Save to this ${deviceWord()}</button>
+      <button data-wp="saved-list">Saved…</button></div>` : ''}
+    ${s.media ? `<p class="muted small wp-how">${{ saved: `Played from this ${typeof deviceWord === 'function' ? deviceWord() : 'device'} (saved) - deleted once you've watched it`, direct: 'Played as it is', copy: 'Repackaged for the phone (picture untouched)', encode: `Converted for the phone${s.media.encoder ? ` (${esc(s.media.encoder.replace('h264_', '').toUpperCase())})` : ''}`, site: `From ${esc(s.media.site || 'your site')}` }[s.media.how] || ''}</p>` : ''}`;
   sheet.classList.remove('hidden');
   wpShowUi(true);
   if (s.media?.how === 'site') wpServers();
@@ -565,6 +593,7 @@ async function wpClose(already) {
   const s = WP.s;
   if (!s || s.closing) return;
   s.closing = true;
+  wpSavedWatched(s);
   const v = wpV();
   if (!already) {
     try { await api('POST', `/api/web/${s.sid}/state`, { index: s.index, pos: s.media ? wpNow() : null, dur: wpTotal() || null, paused: true, closed: true }); } catch { /* it's closing anyway */ }
@@ -590,6 +619,7 @@ function wpWire(el) {
   v.addEventListener('ended', async () => {
     const s = WP.s;
     if (!s) return;
+    wpSavedWatched(s);
     try { await api('POST', `/api/web/${s.sid}/state`, { index: s.index, pos: wpTotal(), dur: wpTotal(), paused: true, ended: true, after: s.seq }); } catch { /* fine */ }
     if (s.index < s.entries.length - 1 && wpQ('.wp-upnext').dataset.cancel !== '1') wpLoad(s.index + 1, 0);
     else { wpShowUi(true); wpOsd('The end', 4000); }
@@ -599,7 +629,19 @@ function wpWire(el) {
     if (!WP.s || !WP.s.media || !v.getAttribute('src') || WP.hls) return;
     if (!v.currentSrc.endsWith(WP.s.media.src.split('/').pop())) return;      // (the one before)
     const code = v.error?.code;
-    wpError(code === 4 ? "The phone can't play this video as it is. Try again (it's converted then), or another server." : wpWhy(0, `error ${code}`), true);
+    const s = WP.s, how = s.media.how;
+    if ((code === 3 || code === 4) && how === 'saved') {
+      // (the saved copy won't play: streamed from the computer instead)
+      wpOsd("The saved copy won't play here - streaming it instead");
+      wpLoad(s.index, wpNow(), { stream: true });
+      return;
+    }
+    if ((code === 3 || code === 4) && (how === 'direct' || how === 'copy') && !s.media.converted) {
+      wpOsd('Converting it for this device…');
+      wpLoad(s.index, wpNow(), { convert: true });
+      return;
+    }
+    wpError(code === 4 ? "The phone can't play this video as it is. Try again, or another server." : wpWhy(0, `error ${code}`), true);
   });
   v.addEventListener('waiting', () => {
     if (!WP.s) return;
@@ -692,6 +734,8 @@ function wpWire(el) {
     const a = b.dataset.wp;
     if (a === 'play') { v.muted = false; wpQ('.wp-unmute').classList.add('hidden'); if (v.paused) v.play().catch(() => {}); else v.pause(); }
     else if (a === 'unmute') { v.muted = false; b.classList.add('hidden'); if (v.paused) wpPlay(); }
+    else if (a === 'save-here') { wpQ('.wp-sheet').classList.add('hidden'); saveToDevice({ sid: s.sid, index: s.index }); }
+    else if (a === 'saved-list') { wpQ('.wp-sheet').classList.add('hidden'); openSavedSheet(); }
     else if (a === 'other-site') {
       wpQ('.wp-sheet').classList.add('hidden');
       wpHideError();

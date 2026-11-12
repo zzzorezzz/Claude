@@ -1447,13 +1447,15 @@ function placeMenu(menu, anchor) {
   $('#menu-root').append(menu);
 }
 
-function openItemMenu(item, anchor, { inTitle = false } = {}) {
+function openItemMenu(item, anchor, { inTitle = false, local = null } = {}) {
   closeMenu();
   const menu = document.createElement('div');
   menu.className = 'menu ctx';
   const folders = sectionFolders(item.type);
   const inFolder = folders.find((f) => item.collections.includes(f.id));
   const folderBtns = folders.map((f) => `<button data-folder="${esc(f.id)}"><span class="check">${inFolder === f ? '●' : ''}</span>${esc(f.name)}</button>`).join('');
+  const film = !isSeries(item) && local?.target;
+  const keepFilm = typeof REMOTE !== 'undefined' && REMOTE && film?.path && !film.stream;    // (Save to this iPad)
   const cols = globalCollections().map((c) => `<button data-col="${esc(c.id)}"><span class="check">${item.collections.includes(c.id) ? '✓' : ''}</span>${esc(c.name)}</button>`).join('');
   menu.innerHTML = `${inTitle ? '' : `<button data-m="watch">▶&nbsp; Watch now</button><button data-m="info">ⓘ&nbsp; More info</button><hr>`}
     <div class="menu-label">Move to folder (${esc(TYPE_PLURAL[item.type])})</div>${folderBtns}
@@ -1467,6 +1469,7 @@ function openItemMenu(item, anchor, { inTitle = false } = {}) {
     <button data-m="watched">${item.in_watched ? '↩&nbsp; Move back to my list' : '✓&nbsp; Mark as watched'}</button>
     ${maybeAnimeOnTmdb(item) ? '<button data-m="use-mal">⇄&nbsp; Use MyAnimeList info</button>' : ''}
     <button data-m="refresh">↻&nbsp; Refresh info</button>
+    ${keepFilm ? `<button data-m="save-here">⬇&nbsp; Save to this ${deviceWord()}</button>` : ''}
     <button data-m="remove" class="danger">✕&nbsp; Remove from list</button>`;
   menu.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -1513,6 +1516,7 @@ function openItemMenu(item, anchor, { inTitle = false } = {}) {
       else if (m === 'where' || m === 'cw-on') openWhereAmI(findItem(item.id), { adding: m === 'cw-on' });
       else if (m === 'cw-off') await setWatching(findItem(item.id), false);
       else if (m === 'use-mal') openUseMal(findItem(item.id));
+      else if (m === 'save-here') saveToDevice({ itemId: item.id, key: '', label: item.title, path: film.path, title: item.title });
       else if (m === 'remove') removeItem(item.id);
     } catch (err) { fail(err); }
   });
@@ -3813,7 +3817,7 @@ async function titleClick(wrap, e) {
     else if (t === 'trailer') playTrailer(wrap, item);
     else if (t === 'close-trailer') { $('.tm-trailer', wrap)?.remove(); }
     else if (t === 'youtube') api('POST', '/api/open', { url: `https://www.youtube.com/watch?v=${item.trailer}` }).catch(fail);
-    else if (t === 'menu') { e.stopPropagation(); openItemMenu(item, e.target.closest('[data-t]'), { inTitle: true }); }
+    else if (t === 'menu') { e.stopPropagation(); openItemMenu(item, e.target.closest('[data-t]'), { inTitle: true, local: wrap.st.local }); }
     else if (t === 'remove') removeItem(item.id);
     else if (t === 'all-watched') toggleWatched(item.id);
     else if (t === 'list-it') {
@@ -5572,6 +5576,8 @@ function openEpisodeMenu(wrap, key, anchor) {
   const sites = videoSites(item);
   const per = wrap.st.links?.per_episode?.[key] || '';
   const full = !simpleMode();
+  const own = wrap.st.local?.by_episode?.[key];
+  const keepable = typeof REMOTE !== 'undefined' && REMOTE && own?.path && !own.stream;     // (Save to this iPad)
   const menu = document.createElement('div');
   menu.className = 'menu ctx';
   menu.innerHTML = `<button data-e="play">▶&nbsp; Play ${esc(epLabel({ season, episode }))}</button>
@@ -5589,6 +5595,7 @@ function openEpisodeMenu(wrap, key, anchor) {
       ${sites.length > 1 ? `<div class="menu-label">Site for this episode</div>
         <button data-site=""><span class="check">${per ? '' : '●'}</span>As the title's</button>
         ${sites.map((x) => `<button data-site="${esc(x.id)}"><span class="check">${per === x.id ? '●' : ''}</span>${esc(x.name)}</button>`).join('')}` : ''}` : ''}
+    ${keepable ? `<hr><button data-e="save-here">⬇&nbsp; Save to this ${deviceWord()}</button>` : ''}
     <hr><button data-e="trouble">🛠&nbsp; Troubleshoot…</button>
     <button data-e="next">⤳&nbsp; Set as next</button>`;
   menu.addEventListener('click', async (e) => {
@@ -5615,6 +5622,7 @@ function openEpisodeMenu(wrap, key, anchor) {
       else if (a === 'open-link') api('POST', '/api/open', { url: link.page }).catch(fail);
       else if (a === 'relink') openRelink(wrap, item, key);
       else if (a === 'trouble') openTroubleshoot(wrap, item, ep);
+      else if (a === 'save-here') saveToDevice({ itemId: item.id, key, label: epLabel(ep), path: own.path, title: item.title });
       else if (a === 'next') { upsert(await api('PUT', `/api/items/${item.id}`, { progress: ep })); render(); refreshOpenTitle(); }
     } catch (err) { fail(err); }
   });
