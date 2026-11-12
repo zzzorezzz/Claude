@@ -721,6 +721,8 @@ def candidates(page, search_page):
         # (...and a short one on the end: "death-note-aa92")
         slug = re.sub(r"\s(?!\d+(?:st|nd|rd|th)\s*$)(?=[a-z]*\d)(?=\d*[a-z])[a-z0-9]{3,4}\s*$", " ", slug, flags=re.I).strip()
         names = list(dict.fromkeys(e["names"] + ([slug] if slug.strip() else [])))
+        if not names:
+            continue                     # (a poster with no name, and an address of only an id: nothing to go by)
         years = re.findall(r"\b(19[2-9]\d|20[0-4]\d)\b", " ".join(e["names"]) + " " + e["url"])
         # The name with the most letters ("Death Note", not "37 37 37 TV" from a card's numbers) - the
         # address's when the link says no more than a year (its title is beside it, not in it: KickAssAnime).
@@ -2053,12 +2055,13 @@ class Scraper:
                             errors.pop()
             return found
 
+        from . import webtools
         found, seen, asked = [], set(), []
         with ThreadPoolExecutor(2) as pool:
             for at in range(0, len(queries), 2):
                 batch = queries[at:at + 2]
                 asked += batch
-                for rows in pool.map(one, batch):
+                for rows in pool.map(webtools.carried(one), batch):
                     for r in rows:
                         if r["url"] not in seen:
                             seen.add(r["url"])
@@ -2500,6 +2503,7 @@ class Scraper:
         else:
             page_url, entry, others = self.episode_page(site, item, season, episode, pin)
         press = None
+        page_key = page_url              # (an episode that's a button keeps its press: each its own video)
         if CLICK_MARK in page_url:
             page_url, _, press = page_url.partition(CLICK_MARK)
             press = urllib.parse.unquote(press)
@@ -2520,7 +2524,7 @@ class Scraper:
         if quality:
             prefs["quality"] = quality
         mem = self.remembered(item["id"], site) or {}
-        cache_key = f"{page_url}|{prefs.get('kind', '')}|{prefs.get('label', '')}"
+        cache_key = f"{page_key}|{prefs.get('kind', '')}|{prefs.get('label', '')}"
         hit = (mem.get("videos") or {}).get(cache_key)
         if hit and not skip and not fresh and time.time() - hit.get("at", 0) < VIDEO_FOR:
             out.update({k: hit.get(k) for k in ("url", "referer", "headers", "subtitle", "streams", "stream", "qualities")})
@@ -2530,7 +2534,7 @@ class Scraper:
         # (the videos the title's other episodes played: one caught again here is another
         # episode's - a page that went back to its first episode - not this one's)
         self._here.taken = {v.get("url") for k, v in (mem.get("videos") or {}).items()
-                            if k.split("|")[0] != page_url and v.get("url")}
+                            if k.split("|")[0] != page_key and v.get("url")}
         self._here.episode = (item, season, episode)
 
         # JavaScript-first sites often expose a row of mirror controls before

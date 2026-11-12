@@ -149,6 +149,13 @@ class App:
         webtools.LEARNED.update(read_json(self._learned_path, {}))
         # Sub or dub, switched in the player (the episodes after it follow); subtitle searches.
         self._online_track, self._subjobs = {}, {}
+        # The site a title's episodes play from now (Find it on another site, a server of another
+        # site, another source on the next site): the next episodes are found there too.
+        self._online_site_now = {}
+        # Each title's choice of server or version, counted: a video found under an older choice
+        # (the next episode, found ahead meanwhile) isn't kept.
+        self._online_gen = {}
+        self._play_seq = 0                  # the latest play asked for (any title): only it opens
         threading.Thread(target=self._clean_subs, daemon=True).start()
         # Elsewhere than Windows, videos are found in a hidden Chromium kept in the app's folder
         # (the one on the computer, or a small one fetched once - now, so it's ready).
@@ -187,7 +194,11 @@ class App:
         self.store.use_file(self._list_path())
 
     def retry_sync(self):
-        """A sync folder that was missing at startup (drive not ready) may be back."""
+        """A sync folder that was missing at startup (drive not ready), or went away while the app
+        ran (the list then saved here, store.away), may be back."""
+        if self.store.away and not self.sync_problem:
+            self.sync_problem = ("The sync folder stopped being reachable, so this computer's own copy of your list "
+                                 "is being used until it's back.")
         if self.sync_problem and self.settings.get()["sync_folder"]:
             path = self._list_path()
             if not self.sync_problem:
@@ -737,7 +748,18 @@ class App:
                      "positions": {**positions, **existing.get("positions", {})}}
             if existing["progress"] == {"season": 1, "episode": 1}:
                 patch["progress"] = progress
+            # What's yours of the one that goes is kept: your review, when you last played it, the
+            # Watched list, and this computer's folder for it (where the one kept has none).
+            for key in ("review", "in_watched", "watching"):
+                if item.get(key) and not existing.get(key):
+                    patch[key] = item[key]
+            if (item.get("last_played") or 0) > (existing.get("last_played") or 0):
+                patch["last_played"] = item["last_played"]
+            for key in ("local_folder", "local_file", "play_with", "keep_magnet"):
+                if item.get(key) and not existing.get(key):
+                    patch[key] = item[key]
             self.store.update(existing["id"], patch)
+            self.torrents.reassign(item["id"], existing["id"])
             self.store.delete(item["id"])
             return self.store.get(existing["id"])
         fresh = new_item("anime", info)
@@ -1366,9 +1388,17 @@ class App:
         for entry in self.library.undo(key):
             if entry.get("added") and not self.library.uses(entry["item"]):
                 try:
-                    self.store.delete(entry["item"])
+                    item = self.store.get(entry["item"])
                 except KeyError:
-                    pass
+                    continue
+                # (only a title untouched since Sort now added it goes: not one you've watched,
+                # reviewed or put somewhere since)
+                used = (item.get("last_played") or item.get("review") or item.get("collections") or item.get("in_watched")
+                        or item.get("watching") or item.get("positions")
+                        or (item.get("progress") or {}) not in ({}, {"season": 1, "episode": 1}))
+                if not used:
+                    self.store.delete(entry["item"])
+                    self.torrents.forget_item(entry["item"])
         self.library.rematch()
 
     # ---- everything connected to a title
@@ -1809,6 +1839,8 @@ class App:
         path = body.get("path") or ""
         if not self.playable(item, path):
             raise ApiError("that file isn't in this title's folder or your downloads folder")
+        with self._lock:
+            self._play_seq += 1              # (a site's video still being found for another play doesn't open now)
         subtitle = body.get("subtitle")
         if subtitle:
             if not os.path.isfile(subtitle) or Path(subtitle).suffix.lower() not in scanner.SUB_EXTS \
@@ -2305,6 +2337,9 @@ class App:
                 return
             try:
                 cands = subfinder.rank(item, s, e, subfinder.search(item, s, e))
+                # (only this episode's files: a search can turn up the others' too, the same release's)
+                cands = [c for c in cands if (str(c.get("episode") or "").isdigit() and int(c["episode"]) == e) or (
+                    not c.get("episode") and re.search(rf"(?<!\d)0*{e}(?!\d)", c.get("release") or c.get("name") or ""))]
                 best = subfinder.same_source(chosen, cands) if cands else None
                 if best:
                     self._save_sub(item["id"], k, self._store_sub(item["id"], k, best))
@@ -2389,6 +2424,7 @@ class App:
         picked = new.get("stream") or {}
         if where is site and picked.get("label"):
             self.scraper.prefer_stream(site, picked["label"], picked.get("kind") or track)
+        self._online_choice(item["id"], where)
         # The episodes found ahead (with the source that didn't work) are found again.
         for k in [k for k in self._online_found if k[0] == item["id"] and k[1] != key]:
             self._online_found.pop(k, None)
@@ -2467,6 +2503,7 @@ class App:
             if playing in state["items"]:
                 state["items"][playing].update(state="ok", found=found, url=found.get("url"))
             todo = [x for x in state["items"].values() if x["state"] == "unchecked"]
+            dub = "dub" if (found.get("stream") or {}).get("kind") == "dub" else ""     # (your other sites: the same version)
 
             def check(x):
                 webtools.background()
@@ -2495,7 +2532,7 @@ class App:
                                            "kind": "", "state": "checking"}
                 state["order"].append(sid)
                 try:
-                    new = self.scraper.resolve(s, item, season, episode, fresh=False)
+                    new = self.scraper.resolve(s, item, season, episode, fresh=False, track=dub)
                     ok = bool(new.get("url"))
                 except scrape.ScrapeError:
                     new, ok = None, False
@@ -2538,7 +2575,9 @@ class App:
             season, episode = self._key_numbers(key)
             try:
                 if server_id.startswith("site|"):
-                    new = self.scraper.resolve(site, item, season, episode, fresh=True)
+                    playing = (((self._online_found.get(slot) or (None, {}))[1]).get("stream") or {}).get("kind")
+                    new = self.scraper.resolve(site, item, season, episode, fresh=True,
+                                               track="dub" if playing == "dub" else "")
                 else:
                     new = self.scraper.resolve(site, item, season, episode, stream=f"{x['id']}:{x['kind']}:{x['label']}",
                                                fresh=True, remember=False)
@@ -2558,6 +2597,7 @@ class App:
                                                        for y in state["items"].values() if y["site_id"] == site["id"]])
         else:
             self._online_linked(item, key, site)
+        self._online_choice(item["id"], site)
         for k in [k for k in self._online_found if k[0] == item["id"] and k[1] != key]:
             self._online_found.pop(k, None)           # (the episodes found ahead: found again with it)
         self._online_found[slot] = (site, new, time.time())
@@ -2652,8 +2692,10 @@ class App:
             return
         session.send(["show-text", "Looking for it on your other sites…", 60000])
         season, episode = self._key_numbers(key)
+        playing = (got[1].get("stream") or {}).get("kind") or entry.get("track")
         try:
-            site, new = self._online_find(item, season, episode, skip=[here["id"]], fresh=True)
+            site, new = self._online_find(item, season, episode, track="dub" if playing == "dub" else "",
+                                          skip=[here["id"]], fresh=True)
         except OnlineError as e:
             session.send(["show-text", f"None of your other sites had it ({e})"[:200], 6000])
             return
@@ -2719,6 +2761,9 @@ class App:
             session.send(["show-text", f"This site has no {other} of it", 4000])
             return
         self._online_track[session.item_id] = other
+        self._online_choice(session.item_id, site)
+        for k in [k for k in self._online_found if k[0] == session.item_id and k[1] != entry["key"]]:
+            self._online_found.pop(k, None)           # (the episodes found ahead were the other version)
         self._online_found[(session.item_id, entry["key"])] = (site, new, time.time())
         fresh = dict(self._web_entry(item, site, entry["key"], new), online=True)
         sub = self.saved_sub(item, entry["key"])
@@ -2766,11 +2811,21 @@ class App:
 
     FOUND_FOR = 15 * 60       # a video found on a site still plays this long after (its address expires)
 
+    def _online_choice(self, item_id, site):
+        """A server, site or version chosen for a title while it plays: its next episodes come from
+        there, and what was being found ahead under the last choice isn't kept."""
+        with self._lock:
+            self._online_gen[item_id] = self._online_gen.get(item_id, 0) + 1
+            self._online_site_now[item_id] = site["id"]
+
     def _episode_video(self, item, season, episode, track="", prefer="", pin="", skip=()):
         """(site, found) for an episode: the one found a moment ago (ahead of time, while the one
         before played), the one being found right now (waited for), or found now."""
         key = f"{season}:{episode}" if item["format"] == "series" else "movie"
         slot = (item["id"], key)
+        gen = self._online_gen.get(item["id"], 0)
+        # (being found for another site, version or picked title: not waited for - looked for here)
+        wanted = (prefer, track, pin, tuple(skip))
         for _ in range(2):
             got = self._online_found.get(slot)
             # (only from the site that comes first for it now: the one asked for, the one you
@@ -2783,15 +2838,19 @@ class App:
                 busy = self._finding.get(slot)
                 if not busy:
                     busy = self._finding[slot] = threading.Event()
+                    busy.wanted = wanted
                     mine = True
                 else:
                     mine = False
             if not mine:
+                if getattr(busy, "wanted", None) != wanted:
+                    return self._online_find(item, season, episode, track=track, prefer=prefer, pin=pin, skip=skip)
                 busy.wait(120)                 # (being found already: that one, not a second)
                 continue
             try:
                 site, found = self._online_find(item, season, episode, track=track, prefer=prefer, pin=pin, skip=skip)
-                self._online_found[slot] = (site, found, time.time())
+                if self._online_gen.get(item["id"], 0) == gen:
+                    self._online_found[slot] = (site, found, time.time())
                 return site, found
             finally:
                 with self._lock:
@@ -2930,6 +2989,9 @@ class App:
         run = str(body.get("run") or "")
         with self._lock:
             self._scrape_runs[item["id"]] = run
+            self._play_seq += 1
+            seq = self._play_seq
+            self._online_site_now.pop(item["id"], None)       # (played afresh: from the sites' own order)
         track = str(body.get("track") or "")
         if not track and body.get("stream"):
             track = (str(body["stream"]).split(":") + ["", ""])[1]
@@ -2942,7 +3004,8 @@ class App:
                 return {"ok": True, "player": "browser", "page": e.page, "note": str(e)}
             return {"ok": False, "error": str(e), "choices": e.choices, "page": e.page, "key": key}
         with self._lock:
-            if run and self._scrape_runs.get(item["id"]) != run:
+            if (run and self._scrape_runs.get(item["id"]) != run) or self._play_seq != seq:
+                # (another play was asked for meanwhile - this title's or another's: that one opens)
                 return {"ok": False, "superseded": True, "site": site["name"], "error": "skipped"}
         result = {"ok": True, "site": site["name"], "site_id": site["id"], "entry": found["entry"], "page": found["page"],
                   "key": key, "track": (found.get("stream") or {}).get("kind") or "sub", "stream": found.get("stream")}
@@ -3074,6 +3137,7 @@ class App:
         item = self.store.get(item_id)
         key = f"{season}:{episode}"
         track = self._online_track.get(item_id) or track
+        site_id = self._online_site_now.get(item_id) or site_id
         with self._party_lock:
             hosting = self.party if self.party and self.party.active and self.party.role == "host" else None
         if hosting:
@@ -3096,7 +3160,11 @@ class App:
                         return entry["path"]
                     break
                 time.sleep(0.25)
-        site, found = self._episode_video(item, season, episode, track=track, prefer=site_id)
+        # (a site that opens in the browser has no video for the player)
+        browser = tuple(x["id"] for x in self._video_sites(item) if x.get("open") == "browser" and x["id"] != site_id)
+        site, found = self._episode_video(item, season, episode, track=track, prefer=site_id, skip=browser)
+        if not found.get("url"):
+            raise OnlineError(f"{site['name']} opens in the browser - this episode has no video for the player")
         playing = phone_player.current() if launcher.ANDROID else self.player.session
         if playing is not None and not playing.ended:
             details = self._web_entry(item, site, key, found)["party"]
@@ -3162,11 +3230,13 @@ class App:
         order = [k for k in [keys[i + 1] if i + 1 < len(keys) else None, keys[i - 1] if i > 0 else None] if k]
         order += [k for k in keys[i + 2:]] + [k for k in reversed(keys[:max(0, i - 1)])]
         progress = self._link_progress[item_id] = {"done": 0, "total": len(order), "running": True, "site": site["name"]}
-        misses = 0
+        misses, ahead_done = 0, False
         try:
             for n, k in enumerate(order):
                 if self._link_runs.get(item_id) != gen:
                     return
+                if ahead_done and keys.index(k) > i:
+                    continue                 # (past the last episode out: not looked for one by one)
                 season, episode = self._key_numbers(k)
                 track = (session.current() or {}).get("track") if session else ""
                 try:
@@ -3183,6 +3253,7 @@ class App:
                         before = [x for x in order[n + 1:] if keys.index(x) < i]
                         if not before:
                             return
+                        ahead_done, misses = True, 0
                 except KeyError:
                     return
                 progress["done"] = n + 1

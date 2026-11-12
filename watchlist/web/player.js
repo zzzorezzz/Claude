@@ -145,7 +145,7 @@ async function wpLoad(index, at = 0, { paused = false, reload = false, convert =
       burn: s.burn ?? undefined, convert: convert || undefined });
   } catch (err) {
     if (token !== s.token) return;                    // (moved on meanwhile: Next pressed again)
-    if (err.code === 'closed') { wpClose(true); return; }
+    if (err.code === 'closed') { wpClose(true, s); return; }
     wpError(err.message, true);
     return;
   }
@@ -313,9 +313,9 @@ async function wpReport(force) {
     if (WP.s !== s) return;
     if (r.ready != null) s.ready = r.ready;
     wpCommands(r.commands);
-    if (r.ended && !s.closing) wpClose(true);
+    if (r.ended && !s.closing) wpClose(true, s);
   } catch (err) {
-    if (err.code === 'closed') wpClose(true);
+    if (err.code === 'closed') wpClose(true, s);
   } finally { s.busy = false; }
 }
 
@@ -611,9 +611,10 @@ async function wpServers() {
 
 // ---- closing
 
-async function wpClose(already) {
+// `which`: the player it's about (an answer that comes late, for one that's been replaced, closes nothing).
+async function wpClose(already, which) {
   const s = WP.s;
-  if (!s || s.closing) return;
+  if (!s || s.closing || (which && which !== s)) return;
   s.closing = true;
   wpSavedWatched(s);
   const v = wpV();

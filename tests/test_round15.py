@@ -259,6 +259,189 @@ class CommandLineQuitTest(unittest.TestCase):
         app.shutdown.assert_called_once()
 
 
+class SyncTest(unittest.TestCase):
+    """Two computers on one sync folder (the cloud app copying at once)."""
+
+    def setUp(self):
+        from watchlist.store import Store, new_item
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "cloud").mkdir()
+        self.Store, self.new_item = Store, new_item
+        self.a = Store(self.root / "cloud" / "watchlist.json", self.root / "a" / "local.json")
+        self.b = Store(self.root / "cloud" / "watchlist.json", self.root / "b" / "local.json")
+        self.heat = self.a.add(new_item("movie", {"source": "tmdb", "source_id": "1", "title": "Heat"}))
+        self.b.get(self.heat["id"])
+
+    def test_a_change_just_made_on_the_other_computer_isnt_written_over(self):
+        self.a.update(self.heat["id"], {"review": {"stars": 5, "text": "great", "at": time.time()}})
+        self.b._checked_at = time.monotonic()                 # (B looked a moment ago)
+        self.b.update(self.heat["id"], {"positions": {"movie": {"pos": 100, "dur": 6000, "at": time.time()}}})
+        fresh = self.Store(self.root / "cloud" / "watchlist.json", self.root / "c" / "local.json").get(self.heat["id"])
+        self.assertEqual((fresh["review"]["text"], fresh["positions"]["movie"]["pos"]), ("great", 100))
+
+    def test_a_title_deleted_on_the_other_computer_doesnt_come_back(self):
+        self.a.delete(self.heat["id"])
+        self.b._checked_at = time.monotonic()
+        with self.assertRaises(KeyError):
+            self.b.update(self.heat["id"], {"positions": {"movie": {"pos": 100, "dur": 6000, "at": time.time()}}})
+        self.assertEqual(self.b.list(), [])
+
+    def test_a_list_that_cant_be_opened_at_the_start_isnt_written_over(self):
+        from watchlist import store
+        real, calls = store._read_quiet, []
+
+        def busy_once(path):
+            calls.append(path)
+            if len(calls) == 1:
+                raise store.Busy("held by the cloud app")
+            return real(path)
+        with mock.patch.object(store, "_read_quiet", side_effect=busy_once):
+            c = self.Store(self.root / "cloud" / "watchlist.json", self.root / "c" / "local.json")
+        self.assertTrue(c.blocked)
+        c._checked_at = 0                                     # (looked at again: it opens now)
+        self.assertEqual([i["title"] for i in c.list()], ["Heat"])
+        c.add(self.new_item("movie", {"source": "tmdb", "source_id": "2", "title": "Alien"}))
+        self.a._checked_at = 0
+        self.assertEqual(sorted(i["title"] for i in self.a.list()), ["Alien", "Heat"])
+
+    def test_a_list_still_held_isnt_saved_over(self):
+        from watchlist import store
+        with mock.patch.object(store, "_read_quiet", side_effect=store.Busy("held")):
+            c = self.Store(self.root / "cloud" / "watchlist.json", self.root / "c" / "local.json")
+            with self.assertRaises(store.Busy):
+                c.add(self.new_item("movie", {"source": "tmdb", "source_id": "2", "title": "Alien"}))
+        self.assertEqual([i["title"] for i in self.a.list()], ["Heat"])
+
+    def test_the_sync_folder_going_away_keeps_changes_here_and_this_computers_copy_is_current(self):
+        mirror = self.root / "a" / "watchlist.json"
+        self.assertTrue(mirror.is_file(), "this computer's own copy kept up to date")
+        gone = self.root / "drive-file"
+        gone.write_text("x")
+        self.a.path = gone / "watchlist.json"                  # (can't be written: the drive went away)
+        self.a.update(self.heat["id"], {"progress": {"season": 1, "episode": 4}})
+        self.assertEqual(self.a.away, gone / "watchlist.json")
+        later = self.Store(mirror, self.root / "a" / "local.json")
+        self.assertEqual(later.get(self.heat["id"])["progress"]["episode"], 4)
+
+    def test_a_damaged_copy_beside_the_list_doesnt_stop_it_opening(self):
+        bad = self.root / "cloud" / "watchlist (conflicted copy).json"
+        bad.write_text('{"items": [{"id": "x", "title": "T", "modified": "yesterday", "collections": []}, 5],'
+                       ' "collections": [{"id": "c"}], "deleted": ["x"]}', encoding="utf-8")
+        c = self.Store(self.root / "cloud" / "watchlist.json", self.root / "c" / "local.json")
+        self.assertIn("Heat", [i["title"] for i in c.list()])
+
+
+class ListAndSortingTest(unittest.TestCase):
+    def setUp(self):
+        from watchlist.server import App
+        from watchlist.store import new_item
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.app = App(self.root / "pc")
+        self.addCleanup(self.app.torrents.shutdown)
+        self.new_item = new_item
+
+    def test_undo_keeps_a_title_youve_used_since_sort_now_added_it(self):
+        dl = self.root / "Downloads"
+        dl.mkdir()
+        for n in (1, 2):
+            (dl / f"Some Show - 0{n}.mkv").write_bytes(b"x" * 100)
+        app = self.app
+        app.settings.update({"downloads_folder": str(dl)})
+        app.library.scan(force=True)
+        item = app.store.add(self.new_item("anime", {"source": "mal", "source_id": "77", "title": "Some Show",
+                                                     "seasons": [{"number": 1, "episodes": 12}]}))
+        q = [q for q in app.library.pending() if q["kind"] == "title"][0]
+        app.library.assign_many([app.sorter._decision(q, item["id"], "search", "found", added=True)])
+        app.store.update(item["id"], {"progress": {"season": 1, "episode": 9}, "last_played": time.time()})
+        app.undo_sorted(q["key"])
+        self.assertTrue(any(i["id"] == item["id"] for i in app.store.list()))
+        # (one untouched since it was added still goes)
+        other = app.store.add(self.new_item("anime", {"source": "mal", "source_id": "78", "title": "Some Show"}))
+        app.library.assign_many([app.sorter._decision(q, other["id"], "search", "found", added=True)])
+        app.undo_sorted(q["key"])
+        self.assertFalse(any(i["id"] == other["id"] for i in app.store.list()))
+
+    def test_a_pack_undone_stays_undone(self):
+        dl = self.root / "Downloads"
+        top = dl / "Frieren S1+S2" / "Season 1"
+        top.mkdir(parents=True)
+        for n in (1, 2):
+            (top / f"Frieren - 0{n}.mkv").write_bytes(b"x")
+        app = self.app
+        app.settings.update({"downloads_folder": str(dl)})
+        item = app.store.add(self.new_item("anime", {"source": "mal", "source_id": "5", "title": "Frieren", "format": "series",
+                                                     "seasons": [{"number": 1, "episodes": 12}]}))
+        app.library.scan(force=True)
+        rels = [v["rel"] for v in app.library.videos]
+        app.library.assign_many([{"key": "pack:Frieren S1+S2:5", "files": rels, "item": item["id"], "by": "rules",
+                                  "why": "part of the pack", "replace": True,
+                                  "episodes": {r: [1, i + 1] for i, r in enumerate(rels)}}])
+        app.undo_sorted("pack:Frieren S1+S2:5")
+        self.assertEqual(app.sorter.run_now()["sorted"], 0)
+        self.assertFalse(any(r in app.library.answers["files"] for r in rels))
+
+    def test_titles_only_in_a_deleted_collection_stay_in_your_list(self):
+        from watchlist import share
+        app = self.app
+        app.fill_later = lambda item_id: None
+        code = share.to_code(share.pack("Picks", [{"title": "Heat", "type": "movie", "source": "tmdb", "source_id": "movie/949"}]))
+        r = app.import_shared({"code": code, "add_to_list": False})
+        app.store.delete_collection(r["collection"]["id"])
+        self.assertEqual([(i["title"], i["listed"]) for i in app.store.list()], [("Heat", True)])
+
+    def test_a_show_added_from_search_is_a_show_until_its_info_comes(self):
+        self.assertEqual(self.new_item("tv", {"source": "tmdb", "source_id": "tv/1", "title": "Dark"})["format"], "series")
+        self.assertEqual(self.new_item("anime", {"source": "mal", "source_id": "1", "title": "Frieren"})["format"], "series")
+        self.assertEqual(self.new_item("anime", {"source": "mal", "source_id": "2", "title": "Akira",
+                                                 "media_type": "movie"})["format"], "movie")
+        self.assertEqual(self.new_item("movie", {"source": "tmdb", "source_id": "movie/1", "title": "Heat"})["format"], "movie")
+
+    def test_use_myanimelist_into_a_title_you_have_keeps_whats_yours(self):
+        from watchlist import metadata
+        app = self.app
+        app.settings.update({"mal_client_id": "fake"})
+        show = self.root / "My Anime"
+        show.mkdir()
+        tm = app.store.add(self.new_item("tv", {"source": "tmdb", "source_id": "tv/1", "title": "Frieren", "format": "series",
+                                                "seasons": [{"number": 1, "episodes": 28}]}))
+        app.store.add(self.new_item("anime", {"source": "mal", "source_id": "52991", "title": "Sousou no Frieren",
+                                              "format": "series", "seasons": [{"number": 1, "episodes": 28}]}))
+        app.store.update(tm["id"], {"local_folder": str(show), "review": {"stars": 5, "text": "mine", "at": 1},
+                                    "last_played": time.time()})
+        app.torrents.records["abc"] = {"item_id": tm["id"], "hash": "abc", "files": [], "save_path": str(self.root),
+                                       "overrides": {}}
+        info = {"source": "mal", "source_id": "52991", "title": "Sousou no Frieren", "format": "series",
+                "episodes_total": 28, "seasons": [{"number": 1, "episodes": 28}]}
+        with mock.patch.object(metadata, "details", return_value=info):
+            out = app.use_mal(app.store.get(tm["id"]), "52991")
+        self.assertEqual((out["local_folder"], out["review"]["text"]), (str(show), "mine"))
+        self.assertTrue(out["last_played"])
+        self.assertEqual(app.torrents.records["abc"]["item_id"], out["id"])
+
+    def test_two_threads_saving_the_same_file(self):
+        import threading
+        from watchlist.config import read_json, write_json
+        path, failed = self.root / "library.json", []
+
+        def save(n):
+            for i in range(60):
+                try:
+                    write_json(path, {"n": n, "i": i}, compact=True)
+                except OSError as e:
+                    failed.append(e)
+        threads = [threading.Thread(target=save, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(failed, [])
+        self.assertIn("n", read_json(path, {}))
+
+
 class SaveToDeviceStuckTest(unittest.TestCase):
     def test_a_conversion_that_gets_nowhere_stops(self):
         """A damaged file: ffmpeg says a lot (more than a pipe holds) and gets no further."""

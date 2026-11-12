@@ -450,8 +450,20 @@ class _Page:
         self.loaded = threading.Event()
         self.target = target or browser.call("Target.createTarget", {"url": "about:blank"})["targetId"]
         browser.handlers.append(self._event)
-        self.session = browser.call("Target.attachToTarget", {"targetId": self.target, "flatten": True})["sessionId"]
-        self._prepare(self.session, top=True)
+        try:
+            self.session = browser.call("Target.attachToTarget", {"targetId": self.target, "flatten": True})["sessionId"]
+            self._prepare(self.session, top=True)
+        except Exception:
+            # (a page that couldn't be set up isn't left open behind - nor listened to)
+            try:
+                browser.handlers.remove(self._event)
+            except ValueError:
+                pass
+            try:
+                browser.call("Target.closeTarget", {"targetId": self.target})
+            except Exception:  # noqa: BLE001 - the browser itself is gone
+                pass
+            raise
 
     def _prepare(self, session, top=False, worker=False):
         from . import webtools

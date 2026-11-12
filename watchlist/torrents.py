@@ -654,6 +654,20 @@ class Torrents:
         for parts in root.glob(f".{rec['hash']}*.parts"):
             parts.unlink(missing_ok=True)
 
+    def reassign(self, old_id, new_id):
+        """A title merged into another (Use MyAnimeList instead): its torrents are the other's now."""
+        with self.lock:
+            for rec in self.records.values():
+                if rec["item_id"] == old_id:
+                    rec["item_id"] = new_id
+                for k, v in list((rec.get("overrides") or {}).items()):
+                    if isinstance(v, dict) and v.get("item") == old_id:
+                        rec["overrides"][k] = dict(v, item=new_id)
+            if old_id in self.keep:
+                self.keep[new_id] = self.keep.get(new_id) or self.keep.pop(old_id)
+                self.keep.pop(old_id, None)
+            self._save_soon()
+
     def forget_item(self, item_id):
         for h in [h for h, r in self.records.items() if r["item_id"] == item_id]:
             rec = self.records[h]

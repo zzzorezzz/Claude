@@ -109,8 +109,10 @@ def new_item(item_type: str, metadata: dict) -> dict:
     for key in METADATA_FIELDS:
         if key in metadata and metadata[key] is not None:
             item[key] = metadata[key]
-    if item["format"] not in FORMATS:
-        item["format"] = "movie" if item_type == "movie" else "series"
+    if metadata.get("format") not in FORMATS:
+        # (what a search result says before its full info comes: a show unless it's a film)
+        film = item_type == "movie" or str(metadata.get("media_type") or "").lower() == "movie"
+        item["format"] = "movie" if film else "series"
     if not str(item["title"]).strip():
         raise ValueError("title can't be empty")
     return item
@@ -128,10 +130,17 @@ def next_episode(item: dict):
     return season, episode + 1
 
 
+class Busy(OSError):
+    """The list file is there but can't be opened right now (a cloud app or another program
+    holding it, a file still downloading)."""
+
+
 def _read_quiet(path: Path):
     """Read a JSON file that another program (a cloud app) may be writing right
-    now. Returns None if it can't be read yet; never moves or changes it."""
+    now. Returns None if it isn't there or isn't a list file (damaged); raises Busy when
+    it can't be opened yet. Never moves or changes it."""
     import json
+    busy = False
     for _ in range(5):
         try:
             with open(path, encoding="utf-8") as fh:
@@ -139,8 +148,14 @@ def _read_quiet(path: Path):
             return data if isinstance(data, dict) else None
         except FileNotFoundError:
             return None
-        except (OSError, ValueError):
+        except OSError:
+            busy = True
             time.sleep(0.2)
+        except ValueError:
+            busy = False
+            time.sleep(0.2)
+    if busy:
+        raise Busy(f"{path} can't be opened right now")
     return None
 
 
@@ -153,6 +168,11 @@ class Store:
         self._items, self._collections, self._deleted = {}, {}, {}
         self.version = 0
         self.path = Path(shared_path)
+        # This computer's own copy (kept up to date while the list is in a sync folder: it's
+        # what's used when that folder isn't there).
+        self.mirror = self.local_path.with_name("watchlist.json")
+        self.away = None                 # the sync folder's list, while it can't be reached
+        self.blocked = False             # the list file couldn't be opened: nothing's written over it
         self._seen = None
         self._checked_at = 0.0
         with self._lock:
@@ -180,8 +200,14 @@ class Store:
         return tuple(sig)
 
     def _load(self):
+        self.blocked = False
         for p in self._files():
-            data = _read_quiet(p)
+            try:
+                data = _read_quiet(p)
+            except Busy:
+                if p == self.path:
+                    self.blocked = True          # (read again at the next look, never written over)
+                continue
             if data is None:
                 if p == self.path and p.exists():
                     # Unreadable even after retrying: keep a copy before we write over it.
@@ -192,18 +218,26 @@ class Store:
                         pass
                 continue
             self._merge(data)
-        self._seen = self._signature()
+        self._seen = None if self.blocked else self._signature()
 
     def _merge(self, data):
         for kind, store in (("items", self._items), ("collections", self._collections)):
-            for row in data.get(kind, []):
-                if not isinstance(row, dict) or not row.get("id"):
+            rows = data.get(kind)
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict) or not row.get("id") or not isinstance(row["id"], str):
+                    continue                     # (a damaged copy's row: passed over)
+                if kind == "collections" and not isinstance(row.get("name"), str):
                     continue
-                row.setdefault("modified", row.get("added") or row.get("created") or 0)
+                if kind == "items" and not (isinstance(row.get("title"), str) and isinstance(row.get("collections", []), list)):
+                    continue
+                if not isinstance(row.get("modified"), (int, float)):
+                    when = row.get("added") or row.get("created") or 0
+                    row["modified"] = when if isinstance(when, (int, float)) else 0
                 mine = store.get(row["id"])
                 if mine is None or row["modified"] > mine["modified"]:
                     store[row["id"]] = row
-        for obj_id, when in (data.get("deleted") or {}).items():
+        deleted = data.get("deleted")
+        for obj_id, when in (deleted if isinstance(deleted, dict) else {}).items():
             if isinstance(when, (int, float)) and when > self._deleted.get(obj_id, 0):
                 self._deleted[obj_id] = when
         for obj_id, when in self._deleted.items():
@@ -252,12 +286,25 @@ class Store:
 
     def _save(self):
         self._check(force=True)  # never overwrite what the other computer just wrote
-        write_json(self.path, {
-            "version": 2,
-            "items": list(self._items.values()),
-            "collections": list(self._collections.values()),
-            "deleted": self._deleted,
-        }, compact=True, durable=True)
+        if self.blocked:
+            raise Busy("your list's file can't be opened right now (a cloud app or another program is "
+                       "using it) - nothing was changed; try again in a moment")
+        data = {"version": 2, "items": list(self._items.values()), "collections": list(self._collections.values()),
+                "deleted": self._deleted}
+        try:
+            write_json(self.path, data, compact=True, durable=True)
+        except OSError:
+            if self.path == self.mirror:
+                raise
+            # The sync folder went away (a drive unplugged, the cloud app stopped): this computer's
+            # own copy is used until it's back (App.retry_sync), nothing lost meanwhile.
+            self.away, self.path = self.path, self.mirror
+            write_json(self.path, data, compact=True, durable=True)
+        if self.path != self.mirror:
+            try:
+                write_json(self.mirror, data, compact=True)
+            except OSError:
+                pass
         self._seen = self._signature()
         self.version += 1
 
@@ -267,7 +314,7 @@ class Store:
     def use_file(self, shared_path: Path):
         """Switch to another list file (turning sync on/off), merging both."""
         with self._lock:
-            self.path = Path(shared_path)
+            self.path, self.away = Path(shared_path), None
             self._load()
             self._save()
 
@@ -298,6 +345,13 @@ class Store:
     def _touch(self, obj):
         obj["modified"] = self._after(obj)
 
+    @staticmethod
+    def _still_shown(item):
+        """A title that was only in a collection (not in your everyday list) and is in none now:
+        in your list, rather than on no page at all."""
+        if item.get("listed") is False and not item["collections"]:
+            item["listed"] = True
+
     def list(self):
         with self._lock:
             self._check()
@@ -318,7 +372,7 @@ class Store:
 
     def add(self, item: dict):
         with self._lock:
-            self._check()
+            self._check(force=True)   # (the other computer's latest first: its changes aren't written over)
             item = copy.deepcopy(item)
             local = {k: item.pop(k) for k in LOCAL_DEFAULTS if k in item}
             item["collections"] = [c for c in item.get("collections", []) if c in self._collections]
@@ -333,7 +387,7 @@ class Store:
     def update(self, item_id, patch: dict):
         """Apply an already-validated patch."""
         with self._lock:
-            self._check()
+            self._check(force=True)
             item = self._find(item_id)
             if "last_played" in patch and "watching" not in patch:
                 patch = dict(patch, watching=True)       # (played: it's one you're watching)
@@ -350,7 +404,7 @@ class Store:
 
     def delete(self, item_id):
         with self._lock:
-            self._check()
+            self._check(force=True)
             self._deleted[item_id] = self._after(self._find(item_id))
             del self._items[item_id]
             if self._local.pop(item_id, None) is not None:
@@ -371,7 +425,7 @@ class Store:
         if not name:
             raise ValueError("give it a name")
         with self._lock:
-            self._check()
+            self._check(force=True)
             if any(c["name"].lower() == name.lower() and c.get("type") == kind
                    for c in self._collections.values()):
                 raise ValueError(f'you already have one called "{name}"')
@@ -384,7 +438,7 @@ class Store:
     def update_collection(self, col_id, patch: dict):
         """Change a collection's other fields (how it's shared, or followed)."""
         with self._lock:
-            self._check()
+            self._check(force=True)
             col = self._collections.get(col_id)
             if col is None:
                 raise KeyError(col_id)
@@ -398,7 +452,7 @@ class Store:
         if not name:
             raise ValueError("give it a name")
         with self._lock:
-            self._check()
+            self._check(force=True)
             col = self._collections.get(col_id)
             if col is None:
                 raise KeyError(col_id)
@@ -409,20 +463,21 @@ class Store:
 
     def delete_collection(self, col_id):
         with self._lock:
-            self._check()
+            self._check(force=True)
             if col_id not in self._collections:
                 raise KeyError(col_id)
             self._deleted[col_id] = self._after(self._collections.pop(col_id))
             for item in self._items.values():
                 if col_id in item["collections"]:
                     item["collections"] = [c for c in item["collections"] if c != col_id]
+                    self._still_shown(item)
                     self._touch(item)
             self._save()
 
     def move_to_folder(self, item_id, folder_id):
         """Put a title in one of its section's folders ("" = no folder)."""
         with self._lock:
-            self._check()
+            self._check(force=True)
             item = self._find(item_id)
             folders = {c["id"] for c in self._collections.values() if c.get("type") == item["type"]}
             if folder_id and folder_id not in folders:
@@ -436,9 +491,10 @@ class Store:
 
     def set_item_collections(self, item_id, col_ids):
         with self._lock:
-            self._check()
+            self._check(force=True)
             item = self._find(item_id)
             item["collections"] = [c for c in dict.fromkeys(col_ids) if c in self._collections]
+            self._still_shown(item)
             self._touch(item)
             self._save()
             return self._view(item)

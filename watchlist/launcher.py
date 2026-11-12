@@ -137,8 +137,10 @@ def trash(path):
             _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
                         ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
                         ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
-        # FO_DELETE with FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT
-        op = SHFILEOPSTRUCTW(None, 3, str(p.resolve()) + "\0", None, 0x40 | 0x10 | 0x400 | 0x4, False, None, None)
+        # FO_DELETE with FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT, and
+        # FOF_WANTNUKEWARNING: a file the Recycle Bin can't take (too big for it, a drive without
+        # one) is asked about by Windows first, not deleted for good without a word.
+        op = SHFILEOPSTRUCTW(None, 3, str(p.resolve()) + "\0", None, 0x40 | 0x10 | 0x400 | 0x4 | 0x4000, False, None, None)
         if ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) or op.fAnyOperationsAborted:
             raise LaunchError("couldn't move it to the Recycle Bin")
         return

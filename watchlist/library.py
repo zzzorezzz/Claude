@@ -338,7 +338,8 @@ class Library:
         self.gemini_error = ""
 
     def save_answers(self):
-        write_json(self.answers_path, self.answers, compact=True)
+        with self._lock:                 # (Sort now's thread and your answers save it too)
+            write_json(self.answers_path, self.answers, compact=True)
 
     # ---- scanning
 
@@ -931,8 +932,13 @@ class Library:
             self.answers["titles"].pop(key, None)
             self.answers["files"].pop(key, None)
             self.answers["auto"] = [a for a in self.answers["auto"] if a["key"] != key]
-            if key not in self.answers["rejected"]:
-                self.answers["rejected"].append(key)
+            # (a pack's decision has a key of its own: its files' own names are left to you too,
+            # or the next Sort now would sort them by their names)
+            undone_files = {rel for a in undone for rel in a.get("files") or []}
+            keys = [key] + [self.title_key(v) for v in self.videos if v["rel"] in undone_files]
+            for k in dict.fromkeys(keys):
+                if k not in self.answers["rejected"]:
+                    self.answers["rejected"].append(k)
             self.save_answers()
             self._matched_for = None
             self._match_if_needed()

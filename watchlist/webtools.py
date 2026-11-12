@@ -528,6 +528,18 @@ def background():
     _here.background = True
 
 
+def carried(fn):
+    """`fn` for another thread (a pool's) that looks things up as this one does: in the background,
+    when this one is."""
+    behind = getattr(_here, "background", False)
+
+    def run(*args, **kwargs):
+        if behind:
+            _here.background = True
+        return fn(*args, **kwargs)
+    return run
+
+
 @contextlib.contextmanager
 def slot(lock=None):
     """One of the hidden windows (or pages) - a background look-up only when one is left over."""

@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 
 DEFAULT_SETTINGS = {
@@ -181,7 +182,8 @@ def write_json(path: Path, data, compact=False, durable=False) -> None:
     disk itself before it replaces the old one (a power cut can't leave an empty file) - for
     what losing would lose your things (your list, the list of torrents), as it's slower."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    # (a name of its own for each write: two threads saving the same file at once don't collide)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}-{threading.get_ident()}.tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
         if compact:
             # json.dumps (not json.dump) is what uses the fast C encoder.
@@ -191,7 +193,15 @@ def write_json(path: Path, data, compact=False, durable=False) -> None:
         if durable:
             fh.flush()
             os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    for attempt in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 9:                 # (Windows: another program - or save - has it open for a moment)
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.05)
 
 
 class Settings:
