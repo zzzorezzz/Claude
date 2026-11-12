@@ -2536,6 +2536,7 @@ function openSurprise() {
     }, 70);
   };
   const roll = async () => {
+    const mine = (wrap.rolls = (wrap.rolls || 0) + 1);       // (a slower roll before this one doesn't show over it)
     const want = read();
     const stage = $('#sp-stage', wrap);
     if (want.from === 'list') {
@@ -2549,8 +2550,11 @@ function openSurprise() {
     const year = new Date().getFullYear() - Math.floor(Math.random() ** 1.6 * 6);
     stage.innerHTML = '<div class="center"><div class="spinner"></div></div>';
     let rows = [];
-    try { rows = (await api('GET', `/api/find/top?type=${kind}&year=${year}&order=popular`)).results || []; } catch (e) { stage.innerHTML = `<p class="muted center">${esc(e.message)}</p>`; return; }
-    if (!wrap.isConnected) return;
+    try { rows = (await api('GET', `/api/find/top?type=${kind}&year=${year}&order=popular`)).results || []; } catch (e) {
+      if (wrap.rolls === mine) stage.innerHTML = `<p class="muted center">${esc(e.message)}</p>`;
+      return;
+    }
+    if (!wrap.isConnected || wrap.rolls !== mine) return;
     rows = rows.slice(0, 40).map((r, i) => ({ ...r, type: resultType(r), _i: i }));
     if (!rows.length) { stage.innerHTML = '<p class="muted center">Nothing found - try again.</p>'; return; }
     wrap.found = rows;

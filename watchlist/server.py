@@ -2368,16 +2368,25 @@ class App:
         elif args[0] == "watchlist-load-subtitle":
             threading.Thread(target=self._load_own_sub, args=(session,), daemon=True).start()
         elif args[0] == "watchlist-switch-version":
-            threading.Thread(target=self._switch_version, args=(session,), daemon=True).start()
+            threading.Thread(target=self._in_player, args=(session, self._switch_version), daemon=True).start()
         elif args[0] == "watchlist-other-source":
-            threading.Thread(target=self._other_source, args=(session,), daemon=True).start()
+            threading.Thread(target=self._in_player, args=(session, self._other_source), daemon=True).start()
         elif args[0] == "watchlist-servers":
             if self._servers_menu(session):
                 threading.Thread(target=self._follow_servers_menu, args=(session,), daemon=True).start()
         elif args[0] == "watchlist-server" and len(args) > 1:
-            threading.Thread(target=self.use_server, args=(session, args[1]), daemon=True).start()
+            threading.Thread(target=self._in_player, args=(session, self.use_server, args[1]), daemon=True).start()
         elif args[0] == "watchlist-other-site":
-            threading.Thread(target=self._other_site, args=(session,), daemon=True).start()
+            threading.Thread(target=self._in_player, args=(session, self._other_site), daemon=True).start()
+
+    @staticmethod
+    def _in_player(session, step, *args):
+        """Something asked for in the player (another server, site or version): if it goes wrong
+        unexpectedly, the player says so (not "Switching..." left showing for a minute)."""
+        try:
+            step(session, *args)
+        except Exception as e:  # noqa: BLE001
+            session.send(["show-text", f"That didn't work ({e})"[:160], 5000])
 
     def _load_own_sub(self, session):
         path = dialogs.choose("file", "Choose a subtitle file", "", "subtitle")
@@ -4325,7 +4334,7 @@ class Handler(BaseHTTPRequestHandler):
     def api_web_source(self, body, sid):
         """Not working? Try another server (or your next site) - as in the computer's player."""
         session = self._web_session(sid)
-        threading.Thread(target=self.app._other_source, args=(session,), daemon=True).start()
+        threading.Thread(target=self.app._in_player, args=(session, self.app._other_source), daemon=True).start()
         return {"ok": True}
 
     def _save_device(self):
@@ -4388,17 +4397,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_web_server(self, body, sid):
         session = self._web_session(sid)
-        threading.Thread(target=self.app.use_server, args=(session, str(body.get("id") or "")), daemon=True).start()
+        threading.Thread(target=self.app._in_player, args=(session, self.app.use_server, str(body.get("id") or "")), daemon=True).start()
         return {"ok": True}
 
     def api_web_other_site(self, body, sid):
         session = self._web_session(sid)
-        threading.Thread(target=self.app._other_site, args=(session,), daemon=True).start()
+        threading.Thread(target=self.app._in_player, args=(session, self.app._other_site), daemon=True).start()
         return {"ok": True}
 
     def api_web_version(self, body, sid):
         session = self._web_session(sid)
-        threading.Thread(target=self.app._switch_version, args=(session,), daemon=True).start()
+        threading.Thread(target=self.app._in_player, args=(session, self.app._switch_version), daemon=True).start()
         return {"ok": True}
 
     # ---- the phone's videos (/stream/web/<ticket>/...)
