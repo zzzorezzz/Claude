@@ -1740,6 +1740,10 @@ body.pick-window #nav, body.pick-window #view, body.pick-window #party-dock { di
 .rs-main { min-height: 48px; font-size: 1.05rem; }
 .rs-tip { background: rgba(127,127,127,.14); border-radius: 10px; padding: 10px 12px; font-size: .9rem; text-align: left; }
 .rs-list { text-align: left; margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+#away-saved { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+#away-saved h3 { margin: 6px 0 0; font-size: 1.05rem; }
+#away-saved p { margin: 0; }
+.away-play { text-align: left; white-space: normal; }
 .pair-code { font-size: 2.6rem; font-weight: 800; letter-spacing: .12em; font-variant-numeric: tabular-nums; margin: 4px 0 8px; }
 .pair-ask { text-align: center; }
 .pair-ask .btns { justify-content: center; }

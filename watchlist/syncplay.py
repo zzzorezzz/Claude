@@ -54,12 +54,17 @@ def answers(server, timeout=6, stay=5.0):
         def read():
             nonlocal buf
             while b"\n" not in buf:
+                if len(buf) > 1 << 20:
+                    raise ValueError("not a watch-party server")
                 chunk = sock.recv(4096)
                 if not chunk:
                     raise OSError("closed")
                 buf += chunk
             line, buf = buf.split(b"\n", 1)
-            return json.loads(line.decode("utf-8") or "{}")
+            msg = json.loads(line.decode("utf-8") or "{}")
+            if not isinstance(msg, dict):
+                raise ValueError("not a watch-party server")
+            return msg
 
         def send(msg):
             sock.sendall(json.dumps(msg).encode() + b"\r\n")
@@ -98,8 +103,8 @@ def answers(server, timeout=6, stay=5.0):
                 send({"State": {"ping": {"clientLatencyCalculation": time.time(), "clientRtt": 0,
                                          "latencyCalculation": (msg["State"].get("ping") or {}).get("latencyCalculation")}}})
         return heard > 0
-    except (OSError, ValueError, ssl.SSLError):
-        return False
+    except (OSError, ValueError, ssl.SSLError, AttributeError, TypeError, RecursionError):
+        return False                     # (no answer, or not a watch-party server's)
     finally:
         try:
             sock.close()
@@ -237,7 +242,10 @@ def read_invite(code):
            "source": str(data.get("src") or ""), "source_id": str(data.get("id") or ""),
            "host": str(data.get("h") or "") or None}
     if data.get("ep"):
-        out["season"], out["episode"] = int(data.get("se") or 1), int(data["ep"])
+        try:
+            out["season"], out["episode"] = int(data.get("se") or 1), int(data["ep"])
+        except (TypeError, ValueError):
+            raise ValueError("that watch-party code has a strange episode in it") from None
     now = data.get("now")
     if isinstance(now, dict) and (str(now.get("magnet") or "").startswith("magnet:?") or online_source(now)):
         out["now"] = now

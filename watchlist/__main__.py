@@ -276,6 +276,15 @@ def main(argv=None):
     print(f"Watch Anything is running at {url}")
     print("Keep this window open while you use the app. Close it (or press Ctrl+C) to quit.")
 
+    try:
+        return _serve(app, server, url, args)
+    finally:
+        # (however it ends - the window closed, Ctrl+C - the players, torrents and party it
+        # started end with it)
+        app.shutdown()
+
+
+def _serve(app, server, url, args):
     browser = launcher.find_browser(app.settings.get()["browser_path"])
     browser = "" if browser == launcher.BUILTIN_BROWSER else browser     # (that's for your sites)
     if not args.no_open:

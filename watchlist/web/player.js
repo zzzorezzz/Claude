@@ -98,7 +98,7 @@ function openWebPlayer(launch) {
 function wpListen() {
   try { WP.events?.close(); } catch { /* gone */ }
   const s = WP.s;
-  if (!s || typeof EventSource === 'undefined') return;
+  if (!s || s.launch.offline || typeof EventSource === 'undefined') return;
   const es = new EventSource(`/api/web/${s.sid}/events?after=${s.seq}`);
   es.onmessage = (e) => { if (WP.s === s) { try { wpCommands(JSON.parse(e.data).commands); } catch { /* fine */ } } };
   es.addEventListener('closed', () => es.close());
@@ -139,6 +139,7 @@ async function wpLoad(index, at = 0, { paused = false, reload = false, convert =
     if (token !== s.token || WP.s !== s) return;
     if (media) { wpAttach(media, at, paused); return; }
   }
+  if (s.launch.offline) { wpError(`It isn't saved on this ${typeof deviceWord === 'function' ? deviceWord() : 'device'}, and the PC can't be reached.`, false); return; }
   try {
     media = await api('POST', `/api/web/${s.sid}/open`, { index, at, caps: wpCaps(), quality: s.quality || undefined,
       burn: s.burn ?? undefined, convert: convert || undefined });
@@ -217,7 +218,11 @@ async function wpAttach(media, at, paused) {
   }
   v.playbackRate = s.speed;
   const target = Math.max(0, (at || 0) - s.offset);
+  // (a video that never opened leaves its "start at" behind: it mustn't move the next one)
+  if (WP.begin) v.removeEventListener('loadedmetadata', WP.begin);
   const begin = async () => {
+    WP.begin = null;
+    if (WP.s !== s || s.media !== media) return;
     if (target > 1) await wpSeekRel(target);
     s.pendingSeek = null;
     wpLoading(false);
@@ -226,6 +231,7 @@ async function wpAttach(media, at, paused) {
     wpMediaSession();
     if (!paused) wpPlay();                // (no tap yet on this page: muted, with "Tap for sound")
   };
+  WP.begin = begin;
   v.addEventListener('loadedmetadata', begin, { once: true });
 }
 
@@ -296,7 +302,7 @@ async function wpSeek(t) {
 
 async function wpReport(force) {
   const s = WP.s;
-  if (!s || (s.busy && !force)) return;
+  if (!s || s.launch.offline || (s.busy && !force)) return;
   const v = wpV();
   s.busy = true;
   try {
@@ -611,9 +617,11 @@ async function wpClose(already) {
   s.closing = true;
   wpSavedWatched(s);
   const v = wpV();
-  if (!already) {
+  if (!already && !s.launch.offline) {
     try { await api('POST', `/api/web/${s.sid}/state`, { index: s.index, pos: s.media ? wpNow() : null, dur: wpTotal() || null, paused: true, closed: true }); } catch { /* it's closing anyway */ }
   }
+  clearTimeout(s.subTimer);
+  if (WP.s !== s) return;                  // (opened again while this one closed: that one stays)
   clearInterval(WP.tick);
   clearTimeout(s.subTimer);
   try { WP.events?.close(); } catch { /* gone */ }
@@ -624,6 +632,7 @@ async function wpClose(already) {
   document.body.classList.remove('wp-open');
   WP.s = null;
   v.removeAttribute('poster');
+  if (s.launch.offline) { if (typeof showUnreachable === 'function') showUnreachable(); return; }
   if (typeof reload === 'function') reload().catch(() => {});
 }
 
@@ -819,7 +828,14 @@ function wpWire(el) {
     else if (e.key === 'p' || e.key === 'P') { if (WP.s.index > 0) wpLoad(WP.s.index - 1, 0); }
     else if (e.key === 'c' || e.key === 'C') wpQ('[data-wp="cc"]')?.click();
     else if (e.key === '?') { e.preventDefault(); const sh = wpQ('.wp-sheet'); if (sh.classList.contains('hidden')) wpKeys(); else sh.classList.add('hidden'); }
-    else if (e.key === 'Escape') wpClose();
+    else if (e.key === 'Escape') {
+      // One thing at a time: a menu or window on top (the app closes those), the player's
+      // settings, then the player.
+      if (document.getElementById('menu-root')?.children.length || document.getElementById('modal-root')?.children.length) return;
+      const sh = wpQ('.wp-sheet');
+      if (!sh.classList.contains('hidden')) sh.classList.add('hidden');
+      else wpClose();
+    }
   });
   // Right-click on the picture: the player's menu (where the keyboard shortcuts are too).
   el.addEventListener('contextmenu', (e) => {

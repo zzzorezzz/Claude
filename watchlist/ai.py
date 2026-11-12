@@ -815,6 +815,22 @@ def story_guide(settings, item, entries):
             "story_order": list(dict.fromkeys(order)), "entries": out, "by": NAMES[provider]}
 
 
+def _words_of(value, limit=300):
+    """A field of an answer as words: a title said as a number ("1917") is still a title;
+    a list, an object or nothing is no words."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return ""
+    return str(value).strip()[:limit]
+
+
+def _year_of(value):
+    try:
+        year = int(str(value).strip()[:4])
+    except (TypeError, ValueError):
+        return None
+    return year if 1880 <= year <= 2100 else None
+
+
 def mood_picks(settings, text, kinds, seed, my_list, trending):
     """Picks for I'm in the mood for: {"understood", "intro", "by", "from_list": [{"id", "why"}],
     "new": [{"title", "year", "type", "why"}]}. Never a question: the kind was chosen first."""
@@ -837,13 +853,18 @@ def mood_picks(settings, text, kinds, seed, my_list, trending):
         '"from_list": [{"id": ..., "why": ...}], "new": [{"title": ..., "year": ..., "type": '
         + " or ".join(f'"{types[k]}"' for k in kinds) + ', "why": ...}]}')
     reply, provider = ask(settings, prompt, timeout=40, budget=60, fresh=True)
+    if isinstance(reply, list):
+        reply = {"new": reply}                  # (just the new titles, without the rest)
     if not isinstance(reply, dict):
         raise AIError("the answer wasn't readable")
-    pick = lambda rows, keys: [{k: r.get(k) for k in keys} for r in rows or [] if isinstance(r, dict)]
-    return {"understood": str(reply.get("understood") or "")[:120], "intro": str(reply.get("intro") or "")[:300],
-            "by": NAMES[provider], "from_list": pick(reply.get("from_list"), ("id", "why"))[:8],
-            "new": [r for r in pick(reply.get("new"), ("title", "year", "type", "why"))
-                    if r.get("title") and r.get("type") in ("anime", "tv", "movie")][:18]}
+    rows = lambda key: [r for r in reply.get(key) or [] if isinstance(r, dict)] if isinstance(reply.get(key), list) else []
+    return {"understood": _words_of(reply.get("understood"), 120), "intro": _words_of(reply.get("intro")),
+            "by": NAMES[provider],
+            "from_list": [{"id": _words_of(r.get("id"), 40), "why": _words_of(r.get("why"))} for r in rows("from_list")
+                          if _words_of(r.get("id"), 40)][:8],
+            "new": [{"title": _words_of(r.get("title"), 200), "year": _year_of(r.get("year")),
+                     "type": _words_of(r.get("type"), 10).lower(), "why": _words_of(r.get("why"))} for r in rows("new")
+                    if _words_of(r.get("title")) and _words_of(r.get("type"), 10).lower() in ("anime", "tv", "movie")][:18]}
 
 
 def recap(settings, item, season, episode):
@@ -855,7 +876,18 @@ def recap(settings, item, season, episode):
         "If you don't know the show well, say so instead of guessing. "
         'Reply as JSON: {"known": true or false, "points": ["..."]}')
     reply, provider = ask(settings, prompt, timeout=45, budget=90)
+    if isinstance(reply, list):
+        reply = {"known": True, "points": reply}       # (just the points)
     if not isinstance(reply, dict):
         raise AIError("the answer wasn't readable")
-    return {"known": bool(reply.get("known")), "points": [str(p) for p in reply.get("points") or []][:8],
-            "by": NAMES[provider]}
+    points = reply.get("points") or reply.get("recap") or []
+    if isinstance(points, str):
+        points = [p.strip(" -*•\t") for p in points.splitlines()]
+    points = [_words_of(p.get("text") or p.get("point") if isinstance(p, dict) else p, 600) for p in points
+              if isinstance(p, (str, int, float, dict))] if isinstance(points, list) else []
+    known = reply.get("known")
+    known = known.strip().lower() in ("true", "yes") if isinstance(known, str) else bool(known)
+    points = [p for p in points if p][:8]
+    if not points and known:
+        raise AIError("the answer had no recap in it")
+    return {"known": known and bool(points), "points": points, "by": NAMES[provider]}

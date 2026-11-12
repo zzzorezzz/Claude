@@ -1,9 +1,10 @@
 /* Watch Anything's service worker (only where the browser allows one: https, e.g. a Tailscale
    https name). It keeps the app's own files - its pages, script, style and icons - so the app
    opens quickly and can say when the PC isn't reachable. Nothing of yours is kept: never the
-   app's answers (/api), posters or videos. */
-const SHELL = 'watch-anything-shell-v1';
-const FILES = ['/', '/index.html', '/app.js', '/phone.js', '/style.css', '/logo.png', '/favicon.png',
+   app's answers (/api), posters or videos (what you download to the device is kept by the page
+   itself, and plays from the kept player when the PC isn't there). */
+const SHELL = 'watch-anything-shell-v2';
+const FILES = ['/', '/index.html', '/app.js', '/phone.js', '/player.js', '/style.css', '/logo.png', '/favicon.png',
   '/manifest.webmanifest', '/icons/icon-180.png', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {

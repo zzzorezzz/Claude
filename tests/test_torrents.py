@@ -395,6 +395,95 @@ class TorrentTest(test_server.ServerBase):
         self.assertIn(h, again.handles)
         self.assertEqual(len(again.records[h]["files"]), 5)
 
+    def download(self, h, key):
+        tor = self.app.torrents
+        index = tor.episodes(self.app.store.get(self.item["id"]))[key]["index"]
+        tor.prepare(h, index)
+        self.connect(h)
+        rec = tor.records[h]
+        f = tor._file(rec, index)
+        self.assertTrue(wait_for(lambda: tor.complete(rec, f, tor._progress(h)), 60), f"{key} downloaded")
+        return index, f
+
+    def test_what_a_torrent_has_is_written_down_so_a_start_doesnt_check_it_again(self):
+        h = self.add()
+        tor = self.app.torrents
+        index, f = self.download(h, "1:1")
+        tor._save_resume(wait=5)
+        self.assertTrue(tor._resume_path(h).exists(), "written down")
+        self.assertIn(str(index), tor.records[h]["on_disk"])
+        tor._save()
+        params = tor._resumed(h, tor.records[h])
+        self.assertIsNotNone(params)
+        # A file that's shorter (or gone) than when it was written down: checked from scratch.
+        path = tor.path_of(tor.records[h], f)
+        tor.ses.remove_torrent(tor.handles.pop(h))
+        time.sleep(0.4)
+        with open(path, "r+b") as fh:
+            fh.truncate(100)
+        self.assertIsNone(tor._resumed(h, tor.records[h]))
+        self.assertFalse(tor._resume_path(h).exists())
+        # Deleting a file forgets what was written down (it had that file).
+        tor._add_handle(h, tor.records[h])
+        tor._save_resume(wait=5)
+        tor.delete_file(h, index)
+        self.assertFalse(tor._resume_path(h).exists())
+
+    def test_keep_downloaded_episodes_keeps_them_while_theyre_checked_after_a_start(self):
+        h = self.add()
+        tor = self.app.torrents
+        self.download(h, "1:1")
+        tor._note_have()
+        tor.set_keep(self.item["id"], True)
+        # Just after a start libtorrent checks the files again: for a while nothing looks finished.
+        with mock.patch.object(tor, "_progress", return_value=[0] * 5), \
+                mock.patch.object(tor, "_checking", return_value=True):
+            self.call("POST", f"/api/items/{self.item['id']}/connections/clear")
+        self.assertNotIn(h, tor.records)
+        kept = list((tor.dir / "kept").rglob("*01*.mkv"))
+        self.assertTrue(kept, "episode 1 was kept")
+        self.assertEqual(kept[0].stat().st_size, len(self.data[1]))
+
+    def test_playing_an_episode_doesnt_stop_another_downloading_whole(self):
+        h = self.add()
+        tor = self.app.torrents
+        eps = tor.episodes(self.app.store.get(self.item["id"]))
+        self.call("POST", f"/api/items/{self.item['id']}/download-full", {"season": 1, "episode": 3})
+        tor.prepare(h, eps["1:2"]["index"])
+        prio = tor.records[h]["priorities"]
+        self.assertEqual((prio[str(eps["1:2"]["index"])], prio[str(eps["1:3"]["index"])]), (7, 7))
+
+    def test_another_magnet_for_a_title_leaves_a_pack_other_titles_use(self):
+        """A franchise pack added to season 1, with season 2's episodes in it: picking another
+        torrent for season 1 takes only season 1's files away; season 2 keeps its own."""
+        from watchlist.store import new_item
+        two = self.app.store.add(new_item("anime", {
+            "source": "mal", "source_id": "2", "title": "Mystery Show Season 2", "format": "series",
+            "seasons": [{"number": 1, "episodes": 12}]}))
+        h = self.add()
+        tor = self.app.torrents
+        three = self._index(h, "03 [1080p].mkv")
+        tor.set_episode(h, three, "1:1", item_id=two["id"])
+        tor.set_keep(two["id"], True)
+        index, f = self.download(h, "1:1")
+        path = tor.path_of(tor.records[h], f)
+        tor.replace_for(self.item["id"], "")
+        self.assertIn(h, tor.records, "season 2 still uses it")
+        self.assertEqual(tor.records[h]["item_id"], two["id"])
+        self.assertEqual(sorted(tor.episodes(self.app.store.get(two["id"]))), ["1:1"])
+        self.assertEqual(tor.episodes(self.app.store.get(self.item["id"])), {})
+        self.assertFalse(os.path.exists(path), "season 1's own file went")
+        self.assertEqual(tor.records[h]["priorities"][str(index)], 0)
+
+    def test_another_magnet_for_a_kept_title_keeps_its_finished_episodes(self):
+        h = self.add()
+        tor = self.app.torrents
+        self.download(h, "1:1")
+        tor.set_keep(self.item["id"], True)
+        tor.replace_for(self.item["id"], "")
+        self.assertNotIn(h, tor.records)
+        self.assertTrue(list((tor.dir / "kept").rglob("*01*.mkv")), "episode 1 was kept")
+
 
 class NoTorrentsTest(unittest.TestCase):
     def test_magnet_links_are_checked(self):

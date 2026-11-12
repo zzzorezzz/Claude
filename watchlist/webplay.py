@@ -273,6 +273,10 @@ def rewrite(text, base_url, ticket, remember):
 
 
 def open_remote(url, headers, range_header=None, timeout=30):
+    if urllib.parse.urlsplit(str(url)).scheme.lower() not in ("http", "https"):
+        # (only the web: a site or a watch party's host mustn't make this computer read its own
+        # files - file:// - and pass them on to a phone)
+        raise ValueError("not a web address")
     h = dict(headers or {})
     if range_header:
         h["Range"] = range_header

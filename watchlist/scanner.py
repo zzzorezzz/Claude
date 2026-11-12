@@ -13,6 +13,12 @@ MAX_FILES = 20000
 
 _SXE = re.compile(r"\bs(\d{1,2})[ ._-]*((?:e\d{1,4}(?:[ ._-]*)?)+)\b", re.I)
 _EPS = re.compile(r"e(\d{1,4})", re.I)
+# "S01E01-03", "S01E01-E03": every episode from the first to the last.
+_RANGE = re.compile(r"e(\d{1,4})[ ]*[-~][ ]*e?(\d{1,4})\b", re.I)
+# "Show S02 EP05", "Show S2 Episode 5": a season, then the episode said in words.
+_S_EP = re.compile(r"\bs(\d{1,2})[ ._-]*(?:ep|episode)[ ._-]*(\d{1,4})(?:v\d)?\b", re.I)
+# "Show - 05.5", "Show E12.5": a recap between two episodes, not either of them.
+_HALF = re.compile(r"(?:^|[ _\-])(?:ep?|episode)?[ _]*\d{1,4}\.5(?:v\d)?(?=$|[ _\-\[(])", re.I)
 _NXN = re.compile(r"\b(\d{1,2})x(\d{1,3})\b", re.I)
 _SEASON_EP_WORDS = re.compile(r"\bseason[ ._-]*(\d{1,2})[ ._-]*(?:episode|ep)[ ._-]*(\d{1,4})\b", re.I)
 _ABS = [
@@ -81,8 +87,14 @@ def parse_episode(rel_parts):
     m = _SXE.search(stem)
     if m:
         eps = tuple(int(e) for e in _EPS.findall(m.group(2)))
+        r = _RANGE.match(stem, m.start(2))
+        if r and 0 < int(r.group(2)) - int(r.group(1)) <= 50:
+            eps = tuple(range(int(r.group(1)), int(r.group(2)) + 1))
         return int(m.group(1)), eps
-    for pattern in (_SEASON_EP_WORDS, _NXN, _SEASON_DASH):
+    raw = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", Path(rel_parts[-1]).stem).strip()
+    if _HALF.search(raw):
+        return 0, ()                    # (a special: never in an episode's place)
+    for pattern in (_SEASON_EP_WORDS, _S_EP, _NXN, _SEASON_DASH):
         m = pattern.search(stem)
         if m:
             return int(m.group(1)), (int(m.group(2)),)
@@ -169,6 +181,13 @@ def episode_map(item, videos):
     regular = [v for v in numbered if v["season"] != 0]
     numbers = [ep for v in regular for ep in v["episodes"]]
     single = len(counts) <= 1 and (len({v["season"] for v in regular}) == 1 or len(numbers) == len(set(numbers)))
+    # A season's files counted from the very start of the show: all past that season's size
+    # (a season numbered within it that runs past the size known for it - "S02E13" of a
+    # 12-episode season still on the air - stays in that season).
+    lowest = {}
+    for v in regular:
+        if v["season"] is not None:
+            lowest[v["season"]] = min(lowest.get(v["season"], 10 ** 6), *v["episodes"])
     found = {}
     for v in numbered:
         if v["season"] is not None:
@@ -177,7 +196,8 @@ def episode_map(item, videos):
                     key = (0, ep)
                 elif single:
                     key = (1, ep)
-                elif counts.get(v["season"]) and ep > counts[v["season"]]:
+                elif v["season"] > 1 and counts.get(v["season"]) and lowest[v["season"]] > max(
+                        counts[v["season"]], sum(n for s, n in counts.items() if s < v["season"])):
                     key = _from_absolute(counts, ep)      # "Season 12/250": counted from the very start
                 else:
                     key = (v["season"], ep)

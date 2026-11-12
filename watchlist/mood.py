@@ -143,6 +143,8 @@ class Job:
             self._set(error=f"Your AI helper didn't answer: {e}")
         except metadata.MetadataError as e:
             self._set(error=str(e))
+        except Exception as e:  # noqa: BLE001 - said, not lost: the page would wait for nothing
+            self._set(error=f"Something went wrong picking for you ({e})")
         finally:
             self._set(done=True, pct=100, stage="Done")
 
@@ -238,7 +240,7 @@ class Job:
                 done += 1
                 try:
                     self._add("picks", f.result())
-                except metadata.MetadataError:
+                except Exception:  # noqa: BLE001 - one pick that couldn't be checked: the others still count
                     pass
                 self._set(pct=70 + int(28 * done / len(futs)))
 

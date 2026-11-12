@@ -15,10 +15,21 @@ import zlib
 PREFIX = "WLC1."
 EXTENSION = ".wlcollection"
 MAX_TITLES = 500
+MAX_TEXT = 2 * 1024 * 1024     # what a share code may unpack to (500 titles take far less)
 
 
 class ShareError(ValueError):
     pass
+
+
+def inflate(raw, limit=MAX_TEXT):
+    """Compressed bytes unpacked - no more than `limit` of them (a code built to unpack to
+    gigabytes is turned down, not unpacked)."""
+    unpack = zlib.decompressobj()
+    out = unpack.decompress(raw, limit)
+    if unpack.unconsumed_tail or not unpack.eof:
+        raise ValueError("too big, or incomplete")
+    return out
 
 
 def pack(name, items, by=""):
@@ -58,7 +69,7 @@ def to_code(data):
 
 
 def _from_short(body):
-    packed = json.loads(zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)), bufsize=1 << 20))
+    packed = json.loads(inflate(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))))
     kinds = {v: k for k, v in TYPES.items()}
     name, by, rows = packed
     return {"name": name, "by": by,
@@ -92,7 +103,7 @@ def read(text):
             data = _from_short(short.group(1))
         else:
             body = m.group(1)
-            data = json.loads(zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)), bufsize=1 << 20))
+            data = json.loads(inflate(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))))
     except (ValueError, zlib.error, TypeError, IndexError) as e:
         raise ShareError("that share code is incomplete - copy the whole thing") from e
     return from_data(data)

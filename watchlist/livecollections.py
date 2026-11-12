@@ -20,7 +20,7 @@ import threading
 import time
 import zlib
 
-from . import relay
+from . import relay, share
 
 PREFIX = "WLC3."
 WAIT = 8                       # seconds a relay has to answer
@@ -115,7 +115,10 @@ def fetch(key, brokers=None):
         raw = box.open(blob)
         if raw is None:
             return None
-        version = json.loads(zlib.decompress(raw, bufsize=1 << 20))
+        try:
+            version = json.loads(share.inflate(raw))
+        except ValueError:
+            return None                  # (damaged, or built to unpack to gigabytes)
         return version if isinstance(version, dict) and isinstance(version.get("data"), dict) else None
     found = [r for r in _each_relay(one, brokers) if r]
     if not found:

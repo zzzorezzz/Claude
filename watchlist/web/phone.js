@@ -242,10 +242,19 @@ async function savedMedia(file) {
 async function savedRemove(id) {
   const file = await saveGet('files', id).catch(() => null);
   if (saveJobs[id]) saveJobs[id].stop = true;
-  await saveDo('pieces', 'readwrite', (os) => { for (let n = 0; n < Math.max(file?.pieces || 0, file?.expected || 0) + 1; n += 1) os.delete(`${id}:${n}`); });
+  // (its record first: a save still going finds it gone and keeps nothing more)
   await saveDo('files', 'readwrite', (os) => { os.delete(id); });
+  await savePiecesGone(id, Math.max(file?.pieces || 0, file?.expected || 0) + 1);
   api('POST', `/api/web/save/${id}/done`, {}).catch(() => {});
   savedRefresh();
+}
+
+// Every piece of a save, whatever's left of it (up to `count`, and any past it).
+async function savePiecesGone(id, count) {
+  await saveDo('pieces', 'readwrite', (os) => {
+    for (let n = 0; n < count; n += 1) os.delete(`${id}:${n}`);
+    os.delete(IDBKeyRange.bound(`${id}:`, `${id}:￿`));
+  });
 }
 
 // Start saving one of a title's files: {itemId, key, label, path} (an episode's ⋯), or {sid, index}
@@ -315,9 +324,10 @@ async function savePump(id) {
           await new Promise((res) => setTimeout(res, 2000 * (tries + 1)));
         }
       }
+      if (job.stop) return;
       await savePut('pieces', piece, `${id}:${n}`);
       f = await update({ pieces: n + 1, got: end + 1 });
-      if (!f) return;
+      if (!f) { await savePiecesGone(id, n + 1).catch(() => {}); return; }   // (deleted while it saved)
     }
     await update({ state: 'done', got: state.size, savedAt: Date.now() });
     api('POST', `/api/web/save/${id}/done`, {}).catch(() => {});
@@ -517,7 +527,9 @@ function showUnreachable() {
       <li>Is this ${esc(deviceGuess())} on the same Wi-Fi as the PC (or is Tailscale on, on both)?</li>
       <li>Is <b>Let my phone use this app</b> still on, in the PC's Settings?</li></ul>
     <button class="btn btn-red rs-main" id="away-retry" type="button">Retry</button>
-    <p class="muted small" id="away-note">Trying again by itself every 10 seconds.</p>`);
+    <p class="muted small" id="away-note">Trying again by itself every 10 seconds.</p>
+    <div id="away-saved"></div>`);
+  awaySaved(el);
   const retry = async () => {
     try {
       const res = await fetch('/api/ping', { cache: 'no-store' });
@@ -528,6 +540,25 @@ function showUnreachable() {
   el.querySelector('#away-retry').addEventListener('click', retry);
   clearInterval(awayTimer);
   awayTimer = setInterval(retry, 10000);
+}
+
+// Away from the PC: what's downloaded to this device plays from here, in the phone's own player.
+async function awaySaved(el) {
+  const box = el.querySelector('#away-saved');
+  if (!box || typeof indexedDB === 'undefined' || typeof openWebPlayer !== 'function') return;
+  const files = (await savedList()).filter((f) => f.state === 'done');
+  if (!files.length) return;
+  box.innerHTML = `<h3>Downloaded to this ${esc(deviceWord())}</h3><p class="muted small">These play without the PC.</p>
+    ${files.map((f) => `<button type="button" class="btn btn-white away-play" data-away-play="${esc(f.id)}">▶ ${esc(f.title || '')}${
+    f.label && f.label !== f.title ? ` · ${esc(f.label)}` : ''}</button>`).join('')}`;
+  box.addEventListener('click', (e) => {
+    const f = files.find((x) => x.id === e.target.closest('[data-away-play]')?.dataset.awayPlay);
+    if (!f) return;
+    clearInterval(awayTimer);
+    el.remove();
+    openWebPlayer({ offline: true, session: `offline-${f.id}`, item_id: f.item_id, title: f.title || '', index: 0, start: 0,
+      entries: [{ key: f.key || '', label: f.label || f.title || '' }] });
+  });
 }
 
 // ---- on the PC: a phone asking to connect

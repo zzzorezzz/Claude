@@ -246,6 +246,9 @@ class Session:
         self.listeners = []          # called with every message from mpv (watch parties)
         self._pending_sub = None
         self._swapping = None        # the path of the episode's other file coming in (swap)
+        # Between files (one ended, the next not known yet): where it is and how long it is are
+        # the next file's, kept until mpv says which entry that is (it can be slow to).
+        self._between, self._held, self._opened_at = False, {}, 0.0
         self.loaded = False          # the current entry's file is open (its extra tracks can be added)
         self.connected, self.error, self.ended = False, "", False
         self.done = set()
@@ -330,7 +333,11 @@ class Session:
                 event = msg.get("event")
                 if event == "property-change":
                     name, data = msg.get("name"), msg.get("data")
-                    if name == "time-pos" and data is not None:
+                    if self._between and self._opened_at and time.monotonic() - self._opened_at > 2:
+                        self._arrived()        # (opened a while ago and mpv never said it's another entry: the same one)
+                    if name in ("time-pos", "duration") and data is not None and self._between:
+                        self._held[name] = float(data)      # (the next file's: not this entry's)
+                    elif name == "time-pos" and data is not None:
                         self.pos, self.pos_at = float(data), time.monotonic()
                         self._save()
                     elif name == "duration" and data is not None:
@@ -359,14 +366,22 @@ class Session:
                         if self._swapping is not None and data == self._swapping:
                             self._swapping = None        # (the same episode's other file: still it)
                             self.pos, self.dur = None, None
+                            self._arrived()
                         elif not (cur and cur.get("path") == data):
                             at = next((i for i, e in enumerate(self.entries) if e.get("path") == data), None)
                             if at is not None:
                                 self._swapping = None
                                 self._moved_to(at)
-                elif event == "end-file" and msg.get("reason") == "eof":
-                    self._wrap_up_current(reached_end=True)
+                        else:
+                            self._arrived()              # (the same entry again)
+                elif event == "end-file":
+                    if msg.get("reason") == "eof":
+                        self._wrap_up_current(reached_end=True)
+                    self._between, self._opened_at = True, 0.0
+                elif event == "start-file":
+                    self._between, self._opened_at = True, 0.0
                 elif event == "file-loaded":
+                    self._opened_at = time.monotonic()
                     self._loaded()
                 for listener in list(self.listeners):
                     try:
@@ -424,6 +439,7 @@ class Session:
         shows straight away (not the last one's while this one loads)."""
         self._wrap_up_current()
         self.index, self.pos, self.dur, self.loaded = index, None, None, False
+        self._arrived()
         entry = self.current()
         if entry and entry.get("label") and (self.playlist or entry.get("appended")):
             threading.Thread(target=self.send, args=(["set_property", "force-media-title", entry["label"]],),
@@ -433,6 +449,17 @@ class Session:
                 listener(self, {"event": "property-change", "name": "playlist-pos", "data": index, "moved": True})
             except Exception:  # noqa: BLE001
                 pass
+
+    def _arrived(self):
+        """mpv said which entry the file opening is: what it reported of it meanwhile is that entry's."""
+        if not self._between:
+            return
+        self._between = False
+        held, self._held = self._held, {}
+        if "duration" in held:
+            self.dur = held["duration"]
+        if "time-pos" in held:
+            self.pos, self.pos_at = held["time-pos"], time.monotonic()
 
     def _loaded(self):
         """A file opened: its subtitles and other versions (added later) go in."""

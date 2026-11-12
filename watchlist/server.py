@@ -252,7 +252,8 @@ class App:
             self.web_jobs.stop(d)
 
     def _web_ended(self, session):
-        self.web_jobs.stop(session.device)
+        if self.web_sessions.get(session.device) in (session, None):
+            self.web_jobs.stop(session.device)   # (not a player opened again since: its video is its own)
         if not any(s is not session and not s.ended for s in self.web_sessions.values()):
             self._player_exited(session)
 
@@ -1810,7 +1811,8 @@ class App:
             raise ApiError("that file isn't in this title's folder or your downloads folder")
         subtitle = body.get("subtitle")
         if subtitle:
-            if not os.path.isfile(subtitle) or Path(subtitle).suffix.lower() not in scanner.SUB_EXTS:
+            if not os.path.isfile(subtitle) or Path(subtitle).suffix.lower() not in scanner.SUB_EXTS \
+                    or not self._sub_allowed(item, subtitle, path):
                 raise ApiError("that subtitle file can't be used")
         if body.get("extra"):
             return self._play_extra(item, path, subtitle, body.get("player") or s["player"])
@@ -2101,16 +2103,37 @@ class App:
         return {"saved": {k: Path(v).name for k, v in (item.get("subs") or {}).items() if os.path.isfile(v)},
                 "keep": item.get("keep_subs", True), "job": {k: v for k, v in job.items() if not k.startswith("_")}}
 
+    def _sub_places(self, item):
+        """Where a phone may take subtitle files from: the title's folder, your downloads folder,
+        the torrents' folders and the app's own subtitles (not anywhere else on this computer)."""
+        places = [item.get("local_folder") or "", self.settings.get()["downloads_folder"] or "", str(self._subs_dir())]
+        places += [r["save_path"] for r in self.torrents.records.values() if r.get("save_path")]
+        return [p for p in places if p]
+
+    def _sub_allowed(self, item, path, video=""):
+        """A subtitle file a request may use. This computer may use any; a phone only one in the
+        title's places (or beside the video it plays)."""
+        if not getattr(_request, "device", None):
+            return True
+        places = self._sub_places(item) + ([os.path.dirname(video)] if video and os.path.isfile(video) else [])
+        return any(_inside(path, p) for p in places)
+
     def subs_from_folder(self, item, body):
         """Every subtitle file in a folder, matched to the episodes by their names."""
         folder = str(body.get("path") or "")
         if not os.path.isdir(folder):
             raise ApiError("choose a folder with the subtitle files")
+        if not self._sub_allowed(item, folder):
+            raise ApiError("from a phone, choose a folder in your downloads folder or the title's own folder")
         files = []
-        for root, _dirs, names in os.walk(folder):
-            if root.count(os.sep) - folder.count(os.sep) > 2:
-                continue
+        for root, dirs, names in os.walk(folder):
+            rel = os.path.relpath(root, folder)
+            if rel != "." and len(Path(rel).parts) >= 2:
+                dirs[:] = []                    # (two folders down at most: not a whole drive)
+            dirs[:] = [d for d in dirs if not d.startswith((".", "$")) and d.lower() not in scanner.SKIP_DIRS]
             files += [os.path.join(root, n) for n in names if Path(n).suffix.lower() in scanner.SUB_EXTS]
+            if len(files) > 5000:
+                break
         subs, series = dict(item.get("subs") or {}), item["format"] == "series"
         matched = 0
         for f in sorted(files):

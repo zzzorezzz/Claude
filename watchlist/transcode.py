@@ -29,6 +29,9 @@ import time
 from pathlib import Path
 
 SEGMENT = 4                    # seconds per HLS piece
+# ffmpeg seeks 3/23 s before where it's asked in a picture with B-frames: asked this far past a key
+# frame, it lands on that key frame (not the one before).
+SEEK_PAST = 0.15
 TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
 PHONE_AUDIO = {"aac"}          # copied as it is; anything else becomes AAC
 MAX_AUDIO = 8
@@ -112,6 +115,28 @@ def probe(source, headers=None, timeout=40):
     return info
 
 
+def keyframe_before(source, t, headers=None, timeout=20):
+    """Where the key frame at or before `t` is (seconds from the video's start), or None. A copied
+    picture can only start at one: a video repackaged from part way really starts there."""
+    _, ffprobe = find()
+    if not ffprobe or t <= 0:
+        return None
+    cmd = [ffprobe, "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey", "-show_entries",
+           "frame=best_effort_timestamp_time:format=start_time", "-read_intervals", f"{t:.3f}%+0.05", "-of", "json",
+           *_header_args(headers), source]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             timeout=timeout, **_no_window())
+        data = json.loads(out.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    first = float((data.get("format") or {}).get("start_time") or 0)
+    times = [float(f["best_effort_timestamp_time"]) - first for f in data.get("frames") or []
+             if f.get("best_effort_timestamp_time") not in (None, "N/A")]
+    before = [x for x in times if x <= t + 0.01]
+    return max(0.0, max(before)) if before else None
+
+
 def video_fits(v, caps):
     """Whether the phone plays this picture as it is."""
     if v["codec"] == "h264":
@@ -158,7 +183,7 @@ class Mp4:
         self.source, self.info, self.out = source, info, Path(out)
         self.how = plan(info, caps, quality, local=True)
         self.progress, self.error, self.done = 0.0, "", False
-        self.proc = None
+        self.proc, self.stuck = None, False
 
     def command(self):
         ffmpeg, _ = find()
@@ -180,21 +205,48 @@ class Mp4:
         return cmd + ["-sn", "-dn", "-map_chapters", "-1", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
                       "-f", "mp4", str(self.out)]
 
+    STUCK = 120          # seconds without getting any further: a damaged file it can't get past
+
     def run(self):
         """Makes it (blocks); progress 0-1 as it goes. Raises RuntimeError when it can't."""
         self.out.parent.mkdir(parents=True, exist_ok=True)
         total = float(self.info.get("duration") or 0)
-        self.proc = subprocess.Popen(self.command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                     encoding="utf-8", errors="replace", **_no_window())
-        for line in self.proc.stdout:
-            if line.startswith("out_time_us=") and total:
-                try:
-                    self.progress = min(0.99, int(line.split("=", 1)[1]) / 1e6 / total)
-                except ValueError:
-                    pass
-        err = self.proc.stderr.read()
-        if self.proc.wait() != 0:
+        log = self.out.with_suffix(".log")
+        # (what ffmpeg says goes to a file: a damaged video can make it say more than a pipe holds,
+        # and it would wait forever for that to be read)
+        with open(log, "wb") as err_out:
+            self.proc = subprocess.Popen(self.command(), stdout=subprocess.PIPE, stderr=err_out, text=True,
+                                         encoding="utf-8", errors="replace", **_no_window())
+            moved = [time.monotonic()]
+
+            def watch():
+                while self.proc.poll() is None:
+                    if time.monotonic() - moved[0] > self.STUCK:
+                        self.stuck = True
+                        self.proc.kill()
+                        return
+                    time.sleep(1)
+            self.stuck = False
+            threading.Thread(target=watch, daemon=True).start()
+            for line in self.proc.stdout:
+                if line.startswith("out_time_us=") and total:
+                    try:
+                        got = min(0.99, int(line.split("=", 1)[1]) / 1e6 / total)
+                    except ValueError:
+                        continue
+                    if got > self.progress:
+                        self.progress, moved[0] = got, time.monotonic()
+            code = self.proc.wait()
+            self.proc.stdout.close()
+        try:
+            err = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            err = ""
+        log.unlink(missing_ok=True)
+        if code != 0 or self.stuck:
             self.out.unlink(missing_ok=True)
+            if self.stuck:
+                raise RuntimeError("the video stopped getting any further (it may be damaged)")
             raise RuntimeError((err or "the video couldn't be made").strip().splitlines()[-1][:200])
         self.progress, self.done = 1.0, True
 
@@ -287,6 +339,7 @@ class Job:
         self.subs = [s for s in (subs or []) if any(x["n"] == s and x["text"] for x in info["subs"])]
         self.proc, self.error, self.used = None, "", time.time()
         self.audio = []                    # [{"name", "label", "lang", "default"}]
+        self.past = 0.0                    # how far past `start` (a key frame) ffmpeg is asked to seek
         self._log = None
 
     def command(self):
@@ -294,7 +347,7 @@ class Job:
         info, how = self.info, self.how
         cmd = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
         if self.start:
-            cmd += ["-ss", f"{self.start:.3f}"]
+            cmd += ["-ss", f"{self.start + self.past:.3f}"]
         cmd += _header_args(self.headers) + ["-i", self.source, "-map", "0:v:0"]
         audio = info["audio"][:MAX_AUDIO]
         for a in audio:
@@ -340,11 +393,20 @@ class Job:
                 "-hls_segment_filename", "%v/s%05d.m4s", "-master_pl_name", "master.m3u8",
                 "-var_stream_map", " ".join(streams), "%v/index.m3u8"]
         for n in self.subs:
-            cmd += ["-map", f"0:s:{n}", "-c:s", "webvtt", "-flush_packets", "1", "-f", "webvtt", f"sub{n}.vtt"]
+            cmd += ["-map", f"0:s:{n}", "-c:s", "webvtt", "-flush_packets", "1"]
+            if self.past:
+                cmd += ["-output_ts_offset", f"{self.past:.3f}"]      # (from the key frame, as the picture)
+            cmd += ["-f", "webvtt", f"sub{n}.vtt"]
         return cmd
 
     def run(self):
         self.folder.mkdir(parents=True, exist_ok=True)
+        if self.start and self.how["video"] == "copy":
+            # (from the key frame it really starts at: the phone's place and the subtitles' times
+            # are counted from there)
+            key = keyframe_before(self.source, self.start, self.headers)
+            if key is not None and self.start - key < 30:
+                self.start, self.past = key, (SEEK_PAST if key else 0.0)
         self._log = open(self.folder / "ffmpeg.log", "wb")
         self.proc = subprocess.Popen(self.command(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=self._log, cwd=str(self.folder), **_no_window())

@@ -54,6 +54,8 @@ CLEAN_EVERY = 30 * 60         # how often the torrents folder is looked through 
 READ_AHEAD = 32 * 1024 * 1024  # bytes asked for urgently ahead of what's being played
 WAIT_FOR_DATA = 90            # seconds a stream waits for a piece before giving up
 METADATA_WAIT = 60            # seconds to wait for a magnet's list of files
+RESUME_EVERY = 5 * 60         # how often what each torrent has is written down (so a start doesn't check it all again)
+RETRY_AFTER = 60              # a torrent stopped by a disk error (full) is tried again this often
 PRIORITIES = {0: "Skip", 1: "Normal", 4: "High", 7: "Now"}
 # What has to be there before the player opens: the start (where the file says
 # what it is), from where you're watching on, and the end (an MKV's index).
@@ -225,6 +227,7 @@ class Torrents:
         self.seen = state.get("seen", {}) if isinstance(state, dict) else {}
         self.port_in = int(state.get("port") or 0) if isinstance(state, dict) else 0     # (the port others reach it on)
         self._last_clean = time.time() - CLEAN_EVERY + 120      # the first look, two minutes after starting
+        self._last_have = 0.0
         self.lock = threading.RLock()
         self.handles = _Handles(self._heal)
         self._peekers = []           # looks inside torrents that aren't added (_Peeker), open now
@@ -274,8 +277,9 @@ class Torrents:
         self._release_peek(h)
         meta = self.dir / f"{h}.torrent"
         if meta.exists():
-            p = lt.add_torrent_params()
-            p.ti = lt.torrent_info(str(meta))
+            p = self._resumed(h, rec) or lt.add_torrent_params()
+            if p.ti is None:
+                p.ti = lt.torrent_info(str(meta))
             prio = self._priorities(rec, p.ti.num_files())
             p.file_priorities = prio
         else:
@@ -292,6 +296,81 @@ class Torrents:
         if meta.exists():
             handle.set_flags(lt.torrent_flags.sequential_download)
         return handle
+
+    def _resume_path(self, h):
+        return self.dir / f"{h}.resume"
+
+    def _resumed(self, h, rec):
+        """What libtorrent wrote down about a torrent last time (so its files aren't checked
+        from scratch), or None: when there's none, or a file it had is gone or shorter now."""
+        path = self._resume_path(h)
+        if not hasattr(lt, "read_resume_data") or not path.exists():
+            return None
+        for index, size in (rec.get("on_disk") or {}).items():
+            f = next((f for f in rec.get("files") or [] if str(f["index"]) == index), None)
+            try:
+                if f and os.path.getsize(self.path_of(rec, f)) < size:
+                    raise OSError
+            except OSError:
+                self._forget_resume(h)             # (checked again, from what's really there)
+                return None
+        try:
+            return lt.read_resume_data(path.read_bytes())
+        except Exception:  # noqa: BLE001 - unreadable: checked from scratch
+            self._forget_resume(h)
+            return None
+
+    def _forget_resume(self, h):
+        self._resume_path(h).unlink(missing_ok=True)
+        rec = self.records.get(h)
+        if rec:
+            rec.pop("on_disk", None)
+
+    def _save_resume(self, wait=0.0):
+        """Ask libtorrent what each torrent has (written down as its answers come, in _alert).
+        `wait`: seconds to wait for the answers (when the app closes)."""
+        if not self.ses or not hasattr(lt, "save_resume_data_alert"):
+            return
+        asked = 0
+        for h, handle in list(dict.items(self.handles)):
+            rec = self.records.get(h)
+            try:
+                if rec and rec.get("files") and handle.is_valid() and handle.need_save_resume_data():
+                    handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+                    asked += 1
+            except Exception:  # noqa: BLE001
+                continue
+        deadline = time.time() + wait
+        while wait and asked and time.time() < deadline:
+            for a in self.ses.pop_alerts():
+                if isinstance(a, (lt.save_resume_data_alert, lt.save_resume_data_failed_alert)):
+                    asked -= 1
+                self._alert(a)
+            self.ses.wait_for_alert(100)
+
+    def _wrote_resume(self, a):
+        h = _hash_of(a.handle)
+        rec = self.records.get(h)
+        if not rec:
+            return
+        try:
+            data = lt.write_resume_data_buf(a.params)
+            tmp = self._resume_path(h).with_suffix(".tmp")
+            tmp.write_bytes(data)
+            tmp.replace(self._resume_path(h))
+        except Exception:  # noqa: BLE001 - checked from scratch next time
+            return
+        # (each file's size now: one that's gone or shorter at the next start means checking again)
+        sizes = {}
+        for f in rec.get("files") or []:
+            try:
+                size = os.path.getsize(self.path_of(rec, f))
+            except OSError:
+                continue
+            if size:
+                sizes[str(f["index"])] = size
+        rec["on_disk"] = sizes
+        self._save_soon()
 
     @staticmethod
     def _priorities(rec, count):
@@ -314,8 +393,12 @@ class Torrents:
 
     def _loop(self):
         last_tick = 0.0
+        last_resume = time.time()
         while not self._stop:
             try:
+                if time.time() - last_resume >= RESUME_EVERY:
+                    last_resume = time.time()
+                    self._save_resume()
                 self.ses.wait_for_alert(250)
                 for a in self.ses.pop_alerts():
                     self._alert(a)
@@ -336,6 +419,9 @@ class Torrents:
                 self._piece_cond.notify_all()
         elif isinstance(a, lt.external_ip_alert):
             self.external_ip = str(a.external_address)
+        elif hasattr(lt, "save_resume_data_alert") and isinstance(a, lt.save_resume_data_alert):
+            with self.lock:
+                self._wrote_resume(a)
         elif isinstance(a, (lt.torrent_error_alert, lt.file_error_alert)):
             rec = self.records.get(_hash_of(a.handle))
             if rec:
@@ -353,6 +439,10 @@ class Torrents:
             self._stop_when_done()
             self._delete_watched()
             self._note_used()
+            if time.time() - self._last_have >= 10:
+                self._last_have = time.time()
+                self._note_have()
+            self._retry_errors()
         if time.time() - self._last_clean >= CLEAN_EVERY:
             self._last_clean = time.time()
             threading.Thread(target=self.clean_old, daemon=True).start()
@@ -437,16 +527,72 @@ class Torrents:
             self._save()
         return self.view(h)
 
-    def replace_for(self, item_id, keep, keep_done=False):
+    def replace_for(self, item_id, keep, keep_done=None):
         """A new magnet for a title: its other torrents go (one connection per title).
-        `keep_done`: their fully downloaded files stay (moved out, as your downloads)."""
+        `keep_done`: their fully downloaded files stay (moved out, as your downloads); by
+        default when "Keep downloaded episodes" is ticked for the title. A pack other titles
+        still use stays for them: only this title's files in it go."""
+        if keep_done is None:
+            keep_done = bool(self.keep.get(item_id))
         with self.lock:
             old = [h for h, rec in self.records.items() if rec["item_id"] == item_id and h != keep]
+            shared = {}
+            for h in old:
+                rec, cache = self.records[h], {}
+                owners = {self._owner(rec, f, cache)[0] for f in rec.get("files") or []}
+                others = sorted(o for o in owners if o and o != item_id and self._in_list(o))
+                if others:
+                    shared[h] = others[0]
         for h in old:
-            if keep_done:
+            if h in shared:
+                self._let_go(h, item_id, shared[h], keep_done)
+            elif keep_done:
                 self.remove_keeping(h)
             else:
                 self.remove(h)
+
+    def _in_list(self, item_id):
+        try:
+            self.app.store.get(item_id)
+            return True
+        except KeyError:
+            return False
+
+    def _let_go(self, h, item_id, heir, keep_done):
+        """A pack that's no longer this title's, but other titles still use: it's given to one of
+        them, and this title's own files in it aren't its any more (not downloaded, and deleted -
+        moved out as your downloads when finished and kept)."""
+        with self.lock:
+            rec = self.records.get(h)
+            if rec is None:
+                return
+            cache = {}
+            mine = [f for f in rec.get("files") or [] if self._owner(rec, f, cache)[0] == item_id]
+            self._note_have()
+            done = [f for f in mine if keep_done and self._finished(rec, f)]
+            rec["item_id"] = heir
+            for f in mine:
+                rec["overrides"][str(f["index"])] = "none"
+            if done:
+                handle = self.handles.pop(h, None)
+                if handle is not None:
+                    self.ses.remove_torrent(handle)          # (its files are let go of, to move them)
+                    time.sleep(0.4)
+                folder = self.app.settings.get()["downloads_folder"]
+                target = Path(folder) if folder and os.path.isdir(folder) else self.dir / "kept"
+                for f in done:
+                    dest = target / f["path"]
+                    try:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        if not dest.exists():
+                            shutil.move(self.path_of(rec, f), dest)
+                    except OSError:
+                        pass
+                self._forget_resume(h)
+                self._add_handle(h, rec)
+            self._save()
+        if mine:
+            self.delete_files(h, [f["index"] for f in mine])
 
     def remove_keeping(self, h):
         """A torrent taken away, but what it downloaded whole is kept: moved into your downloads
@@ -456,8 +602,10 @@ class Torrents:
             rec = self.records.get(h)
             if rec is None:
                 return {"ok": False}
-            progress = self._progress(h)
-            done = [(self.path_of(rec, f), f["path"]) for f in rec.get("files") or [] if self.complete(rec, f, progress)]
+            # (while libtorrent checks the files after a start they look unfinished: what it had
+            # finished before counts too)
+            self._note_have()
+            done = [(self.path_of(rec, f), f["path"]) for f in rec.get("files") or [] if self._finished(rec, f)]
             folder = self.app.settings.get()["downloads_folder"]
             target = Path(folder) if folder and os.path.isdir(folder) else self.dir / "kept"
         self.remove(h, delete_files=False)
@@ -489,6 +637,7 @@ class Torrents:
             if handle is not None:
                 self.ses.remove_torrent(handle, lt.options_t.delete_files if delete_files else 0)
             (self.dir / f"{h}.torrent").unlink(missing_ok=True)
+            self._resume_path(h).unlink(missing_ok=True)
             self._save()
         if rec and delete_files:
             # What libtorrent leaves behind (its .parts file, empty folders).
@@ -593,6 +742,64 @@ class Torrents:
         progress = self._progress(rec["hash"]) if progress is None else progress
         done = progress[f["index"]] if f["index"] < len(progress) else 0
         return f["size"] > 0 and done >= f["size"] and os.path.isfile(self.path_of(rec, f))
+
+    def _finished(self, rec, f):
+        """Downloaded whole: now, or before libtorrent started checking it again (and still all there)."""
+        if self.complete(rec, f):
+            return True
+        try:
+            return bool((rec.get("have") or {}).get(str(f["index"]))) and os.path.getsize(self.path_of(rec, f)) == f["size"]
+        except OSError:
+            return False
+
+    @staticmethod
+    def _checking(handle):
+        try:
+            return str(handle.status().state).endswith(("checking_files", "checking_resume_data"))
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _note_have(self):
+        """Which files are downloaded whole, written down (they look unfinished for a while
+        after a start, while libtorrent checks them)."""
+        for h, rec in self.records.items():
+            handle = dict.get(self.handles, h)
+            if handle is None or not rec.get("files") or self._checking(handle):
+                continue
+            progress = self._progress(h)
+            have = rec.setdefault("have", {})
+            for f in rec["files"]:
+                key = str(f["index"])
+                if self.complete(rec, f, progress):
+                    if not have.get(key):
+                        have[key] = True
+                        self._save_soon()
+                elif have.get(key) and not os.path.isfile(self.path_of(rec, f)):
+                    have.pop(key, None)
+                    self._save_soon()
+
+    def _retry_errors(self):
+        """A torrent libtorrent stopped over a disk error (the disk was full, a drive was away):
+        tried again every minute, so it carries on once there's room, without a restart."""
+        now = time.time()
+        for h, rec in self.records.items():
+            handle = dict.get(self.handles, h)
+            if handle is None or rec.get("paused") or now - rec.get("retried", 0) < RETRY_AFTER:
+                continue
+            try:
+                errc = getattr(handle.status(), "errc", None)
+                if not errc or not errc.value():
+                    continue
+                rec["retried"] = now
+                if shutil.disk_usage(rec["save_path"]).free < 64 * 1024 * 1024:
+                    continue                    # (still full)
+                handle.clear_error()
+                if not rec.get("done") and not rec.get("held"):
+                    handle.resume()
+                rec.pop("error", None)
+                self._save_soon()
+            except Exception:  # noqa: BLE001 - tried again next minute
+                continue
 
     def videos(self, item, rec=None):
         """The torrent's video files as videos the rest of the app understands:
@@ -769,9 +976,10 @@ class Torrents:
             # This episode alone, as fast as it can come: other episodes wait (the
             # next one comes once this one is all here).
             progress = self._progress(h)
+            whole = rec.get("whole") or {}
             for other, prio in list(rec["priorities"].items()):
-                if other == str(index) or not prio:
-                    continue
+                if other == str(index) or not prio or whole.get(other):
+                    continue                     # ("Download whole" carries on)
                 try:
                     of = self._file(rec, int(other))
                 except TorrentError:
@@ -1188,7 +1396,7 @@ class Torrents:
                             os.rmdir(root)
                         except OSError:
                             pass
-        for saved in self.dir.glob("*.torrent"):
+        for saved in list(self.dir.glob("*.torrent")) + list(self.dir.glob("*.resume")):
             if saved.stem not in hashes:
                 saved.unlink(missing_ok=True)
                 gone += 1
@@ -1256,24 +1464,31 @@ class Torrents:
             self._save_soon()
 
     def delete_file(self, h, index):
-        """Delete one downloaded file and stop downloading it. (libtorrent keeps
+        return self.delete_files(h, [index])
+
+    def delete_files(self, h, indexes):
+        """Delete downloaded files and stop downloading them. (libtorrent keeps
         its files open, so the torrent is taken out and put back around it.)"""
         with self.lock:
             rec = self._rec(h)
-            f = self._file(rec, index)
-            rec["priorities"][str(index)] = 0
-            rec["finished"].pop(str(index), None)
+            files = [self._file(rec, i) for i in indexes]
+            for f in files:
+                for kept in ("finished", "have", "whole"):
+                    (rec.get(kept) or {}).pop(str(f["index"]), None)
+                rec["priorities"][str(f["index"])] = 0
             handle = self.handles.pop(h, None)
             if handle is not None:
                 self.ses.remove_torrent(handle)
                 time.sleep(0.4)
-            path = Path(self.path_of(rec, f))
-            for _ in range(10):
-                try:
-                    path.unlink(missing_ok=True)
-                    break
-                except PermissionError:      # Windows: still closing
-                    time.sleep(0.3)
+            for f in files:
+                path = Path(self.path_of(rec, f))
+                for _ in range(10):
+                    try:
+                        path.unlink(missing_ok=True)
+                        break
+                    except PermissionError:      # Windows: still closing
+                        time.sleep(0.3)
+            self._forget_resume(h)           # (what it wrote down had these files)
             self._add_handle(h, rec)
             self._save()
         return {"ok": True}
@@ -1521,4 +1736,10 @@ class Torrents:
     def shutdown(self):
         self._stop = True
         if self.ses:
+            try:
+                # (stopped first: what's written down is then what's on disk, nothing half-written)
+                self.ses.pause()
+                self._save_resume(wait=3)
+            except Exception:  # noqa: BLE001 - checked from scratch next time
+                pass
             self._save()

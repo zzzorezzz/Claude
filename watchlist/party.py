@@ -24,6 +24,7 @@ the host opens in the browser (Watch online) opens for the guests too.
 """
 
 import json
+import math
 import os
 import socket
 import ssl
@@ -63,10 +64,54 @@ OPEN_LINK = "[Watch Anything] open: "
 SERVER = "[Watch Anything] server: "
 # ...and one making someone else the host (everyone follows them from then on).
 NEW_HOST = "[Watch Anything] host: "
+# The longest line taken from a server (a room's list, everyone's pictures in it); a longer
+# one is passed over. What the others in the room send comes through as it is, so it's checked.
+MAX_LINE = 4 * 1024 * 1024
+MAX_POSITION = 1e7               # seconds: further into a video than this is a made-up place
 
 
 class PartyError(Exception):
     pass
+
+
+def _number(x):
+    """`x` as a real, finite number, or None (what someone sent isn't trusted to be one)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    x = float(x)
+    return x if math.isfinite(x) else None
+
+
+def _count(x):
+    """`x` as a small whole number (Syncplay's counts of changes in flight), or None."""
+    return x if isinstance(x, int) and not isinstance(x, bool) and 0 <= x < 1 << 31 else None
+
+
+def _dict(x):
+    return x if isinstance(x, dict) else {}
+
+
+def clean_file(file_):
+    """What someone said they're playing, as the rest of the app can count on it (a dict with
+    a name, numbers for duration and size and a dict "watchlist"), or None."""
+    if not isinstance(file_, dict) or not file_:
+        return None
+    out = dict(file_)
+    out["name"] = str(file_.get("name") or "")[:500] if isinstance(file_.get("name"), (str, type(None))) else ""
+    for key in ("duration", "size"):
+        n = _number(file_.get(key))
+        out[key] = n if n is not None and n >= 0 else 0
+    meta = file_.get("watchlist")
+    if meta is not None:
+        meta = dict(_dict(meta))
+        for key in ("label", "status", "key", "avatar"):
+            if key in meta and not isinstance(meta[key], str):
+                meta.pop(key)
+        for key in ("progress", "eta"):
+            if key in meta and meta[key] is not None and _number(meta[key]) is None:
+                meta.pop(key)
+        out["watchlist"] = meta
+    return out
 
 
 class _Ping:
@@ -94,6 +139,7 @@ class Connection:
         self.host, self.port, self.tls = host, port, False
         self._lock = threading.Lock()
         self._buf = b""
+        self._skipping = False           # (in the middle of a line too long to keep)
         try:
             self.sock = self._connect(timeout, context)
         except (OSError, ssl.SSLError):
@@ -120,19 +166,28 @@ class Connection:
             self.sock.sendall(data)
 
     def read(self):
-        """The next message, or None when the server has closed the connection."""
+        """The next message, or None when the server has closed the connection. A line too
+        long to be one is passed over, as is one that isn't a message."""
         while True:
             for sep in (b"\r\n", b"\n"):
                 if sep in self._buf:
                     line, self._buf = self._buf.split(sep, 1)
                     line = line.strip()
+                    if self._skipping:
+                        self._skipping = False   # (the rest of the long one: passed over)
+                        break
                     if not line:
                         break
                     try:
-                        return json.loads(line.decode("utf-8"))
-                    except ValueError:
+                        msg = json.loads(line.decode("utf-8"))
+                    except (ValueError, RecursionError):
                         break
+                    if isinstance(msg, dict):
+                        return msg
+                    break
             else:
+                if len(self._buf) > MAX_LINE:
+                    self._buf, self._skipping = b"", True
                 chunk = self.sock.recv(65536)
                 if not chunk:
                     return None
@@ -353,7 +408,8 @@ class Party:
     @staticmethod
     def person_state(file_):
         """("watching" | "finding" | "preparing" | "needs-file" | "idle", meta) from a file a person set."""
-        meta = (file_ or {}).get("watchlist") or {}
+        file_ = _dict(file_)
+        meta = _dict(file_.get("watchlist"))
         status = meta.get("status")
         if status in WAITING_STATUSES:
             return status, meta
@@ -412,8 +468,13 @@ class Party:
                 msg = self.conn.read()
                 if msg is None:
                     break
+                if not isinstance(msg, dict):
+                    continue
                 for command, value in msg.items():
-                    self._handle(command, value)
+                    try:
+                        self._handle(command, value)
+                    except Exception:  # noqa: BLE001 - one strange message is dropped, not the party
+                        pass
         except (OSError, ValueError):
             pass
         if self.active:
@@ -422,26 +483,31 @@ class Party:
     def _handle(self, command, value):
         with self.lock:
             if command == "Hello":
-                self.me = value.get("username") or self.me
+                name = _dict(value).get("username")
+                self.me = name if isinstance(name, str) and name else self.me
                 self.people.setdefault(self.me, None)
                 self._joined.set()
             elif command == "Error":
-                self.ended = (value or {}).get("message") or "the watch-party server refused"
+                message = _dict(value).get("message")
+                self.ended = message if isinstance(message, str) and message else "the watch-party server refused"
                 self._joined.set()
                 self.active = False
             elif command == "List":
                 # Servers that don't keep rooms apart list everyone: only this room counts.
-                self.people = {name: (info or {}).get("file") or None
-                               for name, info in ((value or {}).get(self.room) or {}).items()}
+                self.people = {name: clean_file(_dict(info).get("file"))
+                               for name, info in _dict(_dict(value).get(self.room)).items()}
                 self.people.setdefault(self.me, None)
                 self._listed.set()
                 self._follow_leader()
             elif command == "Set":
-                self._handle_set(value or {})
+                self._handle_set(_dict(value))
             elif command == "State":
-                self._handle_state(value or {})
+                self._handle_state(_dict(value))
             elif command == "Chat":
-                msg, who = str((value or {}).get("message") or ""), (value or {}).get("username")
+                value = _dict(value)
+                msg, who = value.get("message"), value.get("username")
+                if not isinstance(msg, str) or not isinstance(who, str):
+                    return
                 if msg.startswith(NEW_HOST):
                     name = msg[len(NEW_HOST):].strip()
                     if who == self.leader_name() and who != self.me and name:
@@ -452,7 +518,9 @@ class Party:
                     if who != self.me and self.on_server:
                         try:
                             choice = json.loads(msg[len(SERVER):])
-                        except ValueError:
+                        except (ValueError, RecursionError):
+                            return
+                        if not isinstance(choice, dict):
                             return
                         self.osd(f"{who} switched to {choice.get('l') or 'another server'} - switching you too", 4)
                         threading.Thread(target=self.on_server, args=(self, choice), daemon=True).start()
@@ -467,15 +535,15 @@ class Party:
                     self.osd(f'{who}: {msg}', 6)
 
     def _handle_set(self, settings):
-        users = settings.get("user") or {}
+        users = _dict(settings.get("user"))
         for name, info in users.items():
-            info = info or {}
-            if (info.get("room") or {}).get("name", self.room) != self.room:
+            info = _dict(info)
+            if _dict(info.get("room")).get("name", self.room) != self.room:
                 if name in self.people and name != self.me:
                     info = {"event": {"left": True}}   # moved to another room
                 else:
                     continue
-            event = info.get("event") or {}
+            event = _dict(info.get("event"))
             if event.get("left"):
                 was_leader = self.role == "guest" and name != self.me and name == self.leader_name()
                 self.people.pop(name, None)
@@ -492,7 +560,7 @@ class Party:
                              + (" - press Space when you're both ready" if self.role == "host" else ""), 6)
             if "file" in info:
                 before, _ = self.person_state(self.people.get(name))
-                self.people[name] = info["file"] or None
+                self.people[name] = clean_file(info["file"])
                 if name != self.me:
                     after, meta = self.person_state(self.people[name])
                     if self.role == "host" and after != before:
@@ -629,7 +697,7 @@ class Party:
                     self._announce_file(session)
                     self._release_hold(session)
                     self._update_player(session)
-            except OSError:
+            except Exception:  # noqa: BLE001 - one bad turn isn't the end of keeping in step
                 pass
 
     def _release_hold(self, session):
@@ -756,27 +824,30 @@ class Party:
     def _handle_state(self, state):
         latency = None
         age = 0.0
-        ignore = state.get("ignoringOnTheFly") or {}
-        if "server" in ignore:
+        ignore = _dict(state.get("ignoringOnTheFly"))
+        if _count(ignore.get("server")) is not None:
             self._server_ignoring = ignore["server"]
             self._client_ignoring = 0
         elif "client" in ignore and ignore["client"] == self._client_ignoring:
             self._client_ignoring = 0
         playstate = state.get("playstate")
-        ping = state.get("ping") or {}
-        latency = ping.get("latencyCalculation")
-        if "clientLatencyCalculation" in ping:
-            self._ping.receive(ping["clientLatencyCalculation"], ping.get("serverRtt") or 0)
+        playstate = playstate if isinstance(playstate, dict) else None
+        ping = _dict(state.get("ping"))
+        latency = _number(ping.get("latencyCalculation"))
+        if _number(ping.get("clientLatencyCalculation")) is not None:
+            self._ping.receive(_number(ping["clientLatencyCalculation"]), _number(ping.get("serverRtt")) or 0)
             age = self._ping.fd
         session = self.session
         ready = session is not None and not session.ended and self._ready(session)
         if playstate is not None and not self._client_ignoring and ready:
-            position = playstate.get("position") or 0.0
+            position = _number(playstate.get("position") or 0.0)
             paused = playstate.get("paused")
-            if paused is not None:
+            set_by = playstate.get("setBy")
+            if isinstance(paused, bool) and position is not None and 0 <= position < MAX_POSITION:
                 if not paused:
                     position += age
-                self._apply_room_state(session, position, paused, playstate.get("doSeek"), playstate.get("setBy"))
+                self._apply_room_state(session, position, paused, bool(playstate.get("doSeek")),
+                                       set_by if isinstance(set_by, str) else None)
         if ready and not self._init_pending and self._player_at is not None and time.time() >= self._quiet_until:
             position = session.position()
             paused = session.paused

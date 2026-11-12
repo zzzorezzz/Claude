@@ -726,9 +726,14 @@ class Finder:
     def _name_score(r, wanted):
         rel = r["release"]
         score = r["about"] * 0.6 - (35 if r.get("elsewhere") else 0)
-        if rel["range"] and wanted:
+        if rel["range"]:
             a, b = rel["range"]
-            score += 25 if a <= 1 and b >= wanted else 8
+            if a > 1:
+                score -= 15                   # (a part of the series - "25-37" - not all of it)
+            elif wanted:
+                score += 25 if b >= wanted else 0
+            else:
+                score += 15
         if rel["pack"]:
             score += 15
         score += {2160: 18, 1080: 20, 720: 8, 480: -10}.get(rel["resolution"], 0) + (8 if rel["bd"] else 0)

@@ -462,7 +462,9 @@ window.addEventListener('hashchange', () => {
   const go = () => { render(); window.scrollTo(0, 0); };
   // A smooth cross-fade between pages where the window supports it.
   if (document.startViewTransition && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    document.startViewTransition(go);
+    const t = document.startViewTransition(go);
+    // (a quicker page change skips this one's fade: nothing's wrong)
+    [t.ready, t.finished, t.updateCallbackDone].forEach((p) => p?.catch(() => {}));
   } else {
     go();
     const view = $('#view');
@@ -777,7 +779,8 @@ $('#view').addEventListener('click', (e) => {
 });
 $('#view').addEventListener('keydown', (e) => {
   const card = e.target.closest('.card');
-  if (card && e.key === 'Enter') openTitle(card.dataset.id);
+  // (Enter on one of its buttons is that button's click: not the title page as well)
+  if (card && e.key === 'Enter' && !e.target.closest('button, [data-act], a, input, select')) openTitle(card.dataset.id);
 });
 $('#view').addEventListener('contextmenu', (e) => {
   const card = e.target.closest('.card');
@@ -3155,6 +3158,15 @@ function drawTitle(wrap) {
   const item = findItem(wrap.dataset.itemId);
   wrap.dataset.sig = titleSig(item);
   const modal = $('.modal', wrap);
+  // A review being written stays as it is when the page is drawn again (an episode playing
+  // changes the title every few seconds).
+  const ed = $('.rv-edit', modal);
+  const input = ed && $('.rv-input', ed);
+  const draft = ed ? { text: input.value, stars: ed.dataset.stars, focused: document.activeElement === input,
+    at: [input.selectionStart, input.selectionEnd] } : null;
+  if (draft && (draft.text !== (item.review?.text || '') || draft.stars !== String(item.review?.stars || 0) || draft.focused)) {
+    wrap.st.reviewEdit = true;
+  }
   const series = isSeries(item);
   const meta = [];
   if (item.rating) meta.push(`<span class="score">★ ${fmtRating(item.rating)}</span><span>${esc(item.rating_source)}</span>`);
@@ -3229,7 +3241,7 @@ function drawTitle(wrap) {
       <aside class="tm-side">${side.join('')}</aside>
     </div>
     <section class="tm-section review-section"><h3>Personal Review<span class="muted small review-note">just for you - it stays in this app</span></h3>
-      <div id="review">${reviewHTML(item, wrap.st.reviewEdit)}</div></section>
+      <div id="review">${reviewHTML(item, wrap.st.reviewEdit, wrap.st.reviewEdit ? draft : null)}</div></section>
     <section class="tm-section full-only"><h3>On your ${pcName()}<span class="spacer"></span>
       <button class="btn btn-ghost btn-sm" data-t="ep-links" title="Every ${series ? 'episode' : 'file'} and the file or torrent it plays from - change any of them">${series ? 'See how the episodes are connected' : 'See which file plays'}</button></h3>
       <div class="folder-line" id="folder-line"></div></section>
@@ -3243,6 +3255,11 @@ function drawTitle(wrap) {
     <section class="tm-section" id="subs-section"><h3>Subtitles</h3><div id="subs-bar"></div></section>
     ${series ? '<section class="tm-section"><h3>Episodes<span class="spacer"></span><span id="ep-picker"></span></h3><div id="ep-summary"></div><div class="episodes" id="ep-list"></div></section>' : ''}
     </div><aside class="tm-related" id="related"></aside></div>`;
+  if (draft?.focused) {
+    const again = $('.rv-input', modal);
+    again?.focus({ preventScroll: true });
+    again?.setSelectionRange(...draft.at);
+  }
 
   drawFolderLine(wrap);
   drawRelated(wrap);
@@ -3451,8 +3468,8 @@ async function openConnections(item, titleWrap, opts = {}) {
 }
 
 // Personal Review: 1 to 5 stars and, if you like, a few words.
-function reviewHTML(item, editing) {
-  const r = item.review;
+function reviewHTML(item, editing, draft = null) {
+  const r = draft ? { ...(item.review || {}), stars: Number(draft.stars) || 0, text: draft.text } : item.review;
   const stars = (n, live) => [1, 2, 3, 4, 5].map((k) => `<button type="button" class="rv-star ${k <= (n || 0) ? 'on' : ''}" ${live ? `data-rv-star="${k}"` : 'tabindex="-1"'} aria-label="${k} star${k === 1 ? '' : 's'}">★</button>`).join('');
   if (r && !editing) {
     return `<div class="rv-show"><div class="rv-stars">${stars(r.stars, false)}</div>
@@ -3463,7 +3480,7 @@ function reviewHTML(item, editing) {
   return `<div class="rv-edit" data-stars="${r?.stars || 0}"><div class="rv-stars live">${stars(r?.stars, true)}</div>
     <textarea class="input rv-input" rows="3" maxlength="5000" placeholder="What did you think? (optional)">${esc(r?.text || '')}</textarea>
     <div class="btns"><button class="btn btn-red btn-sm" data-rv="save">Save review</button>
-      ${r ? '<button class="btn btn-ghost btn-sm" data-rv="cancel">Cancel</button><button class="btn btn-ghost btn-sm danger" data-rv="clear">Delete review</button>' : ''}</div></div>`;
+      ${item.review ? '<button class="btn btn-ghost btn-sm" data-rv="cancel">Cancel</button><button class="btn btn-ghost btn-sm danger" data-rv="clear">Delete review</button>' : ''}</div></div>`;
 }
 
 async function reviewClick(wrap, item, e) {

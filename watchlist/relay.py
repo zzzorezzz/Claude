@@ -9,6 +9,12 @@ names), and nobody can send into the party without the invite.
 Encryption is HMAC-SHA256 used as a stream cipher (a keystream from the key, a random
 nonce and a counter) with an HMAC-SHA256 tag over all of it - nothing outside Python's own
 library is needed, on a phone either.
+
+Anyone watching the relay sees the sealed messages go by and could send them again, so
+inside the seal each one says who sent it, who it's for, when, and its number from that
+sender: one numbered at or below the last heard from that sender (or from long ago, or for
+someone else) is turned away. A message without these (from an older app) is turned away
+too - it could be anyone's, sent again.
 """
 
 import hashlib
@@ -25,6 +31,41 @@ import time
 
 BROKERS = [("broker.hivemq.com", 8883), ("broker.emqx.io", 8883), ("test.mosquitto.org", 8886)]
 ROOM = "relay"                 # the room on the host's own server
+MAX_PACKET = 2 * 1024 * 1024   # the biggest packet taken from the relay (bigger ones are passed over)
+MAX_MESSAGE = 96 * 1024        # the biggest message taken from a guest
+MAX_GUESTS = 32                # guests at once through the relay
+REPLAY_WINDOW = 3600.0         # seconds: a message sent longer ago than this (or this far ahead) is old
+IDLE = 60.0                    # a guest hearing nothing from the party this long has lost it
+
+
+def _envelope(data):
+    """A message as sealed (a dict, with its number and time), or None if it isn't one."""
+    try:
+        env = json.loads(data.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(env, dict):
+        return None
+    n, t = env.get("n"), env.get("t")
+    if isinstance(n, bool) or not isinstance(n, int) or isinstance(t, bool) or not isinstance(t, (int, float)):
+        return None                    # (an older app's: it could be anyone's, sent again)
+    if abs(time.time() - t) > REPLAY_WINDOW:
+        return None
+    return env
+
+
+class _Numbered:
+    """Each sender's messages numbered: one at or below the last heard from it is a replay."""
+
+    def __init__(self):
+        self.last, self.lock = {}, threading.Lock()
+
+    def fresh(self, sender, n):
+        with self.lock:
+            if n <= self.last.get(sender, 0):
+                return False
+            self.last[sender] = n
+            return True
 
 
 # ---- encryption
@@ -121,12 +162,19 @@ class Mqtt:
         sock = sock or self.sock
         first = self._recv(sock, 1)[0]
         length, mult = 0, 1
-        while True:
+        for _ in range(4):
             byte = self._recv(sock, 1)[0]
             length += (byte & 0x7F) * mult
             if not byte & 0x80:
                 break
             mult *= 128
+        else:
+            raise OSError("the relay sent something that isn't MQTT")
+        if length > MAX_PACKET:
+            # (too big for anything the party sends: read past, not kept)
+            while length:
+                length -= len(self._recv(sock, min(length, 65536)))
+            return None, b""
         return first & 0xF0, (first, self._recv(sock, length)) if first & 0xF0 == 0x30 else self._recv(sock, length)
 
     def _send(self, data):
@@ -163,6 +211,8 @@ class Mqtt:
                 self.acked.set()
             if kind == 0x30:
                 first, data = payload
+                if len(data) < 2:
+                    continue
                 tlen = struct.unpack(">H", data[:2])[0]
                 topic = data[2:2 + tlen].decode("utf-8", "replace")
                 rest = data[2 + tlen:]
@@ -223,6 +273,8 @@ class _Through:
 
     def close(self):
         self.inbox.put(None)
+        if self.hub.guests.get(self.sid) is self:
+            self.hub.guests.pop(self.sid, None)      # (gone from the server: forgotten here too)
 
 
 class Hub:
@@ -230,15 +282,21 @@ class Hub:
 
     def __init__(self, secret, server, broker_index):
         self.box, self.server, self.guests = Box(secret), server, {}
+        self.heard = _Numbered()         # each guest's last message (kept after it leaves: no replays)
+        self._sent, self._send_lock = {}, threading.Lock()
         self.mqtt = Mqtt(BROKERS[broker_index], [self.box.topic + "/h"], self._arrived)
 
     def _arrived(self, topic, blob):
+        if len(blob) > MAX_MESSAGE:
+            return
         data = self.box.open(blob)
         if data is None:
             return
-        env = json.loads(data.decode("utf-8"))
-        sid = str(env.get("s") or "")[:20]
-        if not sid:
+        env = _envelope(data)
+        if env is None or "g" in env:
+            return                       # (not a guest's: one of ours, sent back in)
+        sid = env.get("s")
+        if not isinstance(sid, str) or not sid or len(sid) > 20 or not self.heard.fresh(sid, env["n"]):
             return
         conn = self.guests.get(sid)
         if env.get("bye"):
@@ -246,15 +304,20 @@ class Hub:
                 conn.close()
                 self.guests.pop(sid, None)
             return
+        if not isinstance(env.get("m"), dict):
+            return
         if conn is None:
+            if len(self.guests) >= MAX_GUESTS:
+                return
             conn = self.guests[sid] = _Through(self, sid)
             self.server.serve(conn)
-        if isinstance(env.get("m"), dict):
-            conn.inbox.put(env["m"])
+        conn.inbox.put(env["m"])
 
     def to_guest(self, sid, message):
-        blob = self.box.seal(json.dumps({"m": message}).encode("utf-8"))
-        self.mqtt.publish(f"{self.box.topic}/g/{sid}", blob)
+        with self._send_lock:            # (numbered in the order they go)
+            n = self._sent[sid] = self._sent.get(sid, 0) + 1
+            blob = self.box.seal(json.dumps({"g": sid, "n": n, "t": round(time.time(), 3), "m": message}).encode("utf-8"))
+            self.mqtt.publish(f"{self.box.topic}/g/{sid}", blob)
 
     def close(self):
         for conn in list(self.guests.values()):
@@ -288,27 +351,44 @@ class Connection:
     def __init__(self, secret, broker_index, timeout=10):
         self.box, self.sid = Box(secret), secrets.token_hex(6)
         self.inbox, self.tls, self.sock = queue.Queue(), True, _NoSocket()
+        self.heard = _Numbered()
+        self._n, self._send_lock = 0, threading.Lock()
         self.mqtt = Mqtt(BROKERS[broker_index], [f"{self.box.topic}/g/{self.sid}"], self._arrived,
                          on_lost=lambda: self.inbox.put(None), timeout=timeout)
 
     def _arrived(self, topic, blob):
+        if len(blob) > MAX_PACKET:
+            return
         data = self.box.open(blob)
         if data is None:
             return
-        env = json.loads(data.decode("utf-8"))
+        env = _envelope(data)
+        # (the host's, for this guest - not another guest's, nor an old one sent again)
+        if env is None or env.get("g") != self.sid or not self.heard.fresh("host", env["n"]):
+            return
         if isinstance(env.get("m"), dict):
             self.inbox.put(env["m"])
 
+    def _seal(self, **what):
+        self._n += 1
+        return self.box.seal(json.dumps(dict(what, s=self.sid, n=self._n, t=round(time.time(), 3))).encode("utf-8"))
+
     def send(self, message):
-        blob = self.box.seal(json.dumps({"s": self.sid, "m": message}).encode("utf-8"))
-        self.mqtt.publish(self.box.topic + "/h", blob)
+        with self._send_lock:            # (numbered in the order they go)
+            self.mqtt.publish(self.box.topic + "/h", self._seal(m=message))
 
     def read(self):
-        return self.inbox.get()
+        """The next message; None when the relay's lost; OSError when the party's said nothing
+        for a minute (the host's server talks every second: it's gone)."""
+        try:
+            return self.inbox.get(timeout=IDLE)
+        except queue.Empty:
+            raise socket.timeout("nothing heard from the watch party") from None
 
     def close(self):
         try:
-            self.mqtt.publish(self.box.topic + "/h", self.box.seal(json.dumps({"s": self.sid, "bye": True}).encode()))
+            with self._send_lock:
+                self.mqtt.publish(self.box.topic + "/h", self._seal(bye=True))
         except OSError:
             pass
         self.mqtt.close()
