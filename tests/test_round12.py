@@ -448,6 +448,10 @@ class MagnetWhileLookingInsideTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         app = App(tmp.name)
+        # (libtorrent's session stopped and let go now, while all's running - not as Python exits,
+        # where Linux's libtorrent aborts)
+        self.addCleanup(lambda: (setattr(app.torrents, "ses", None), __import__("gc").collect()))
+        self.addCleanup(app.torrents.shutdown)
         item = app.store.add(new_item("movie", {"source": "tmdb", "source_id": "movie/10378", "title": "Big Buck Bunny"}))
         magnet = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny"
         peeker = app.torrents.peeker()
