@@ -130,6 +130,45 @@ class InThePlayerTest(AISubsTest):
     test_without_a_key_it_says_what_to_add = test_the_app_keeps_them_for_the_episode = None
 
 
+from tests.test_remote import RemoteBase  # noqa: E402
+
+
+@unittest.skipUnless(transcode.find()[0], "needs ffmpeg")
+class OnThePhoneTest(RemoteBase):
+    def test_the_phones_player_gets_a_track_that_grows(self):
+        token, _ = self.pair()
+        item = self.add("tv", "tmdb", "tv/1396")
+        show = self.media / "Breaking Bad" / "Season 1"
+        show.mkdir(parents=True)
+        video = show / "Breaking.Bad.S01E01.mkv"
+        subprocess.run([transcode.find()[0], "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                        "testsrc=duration=20:size=160x120:rate=10", "-f", "lavfi", "-i", "sine=duration=20",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(video)], check=True, capture_output=True)
+        self.call("PUT", f"/api/items/{item['id']}", {"local_folder": str(show.parent)})
+        status, r, _ = self.phone("POST", f"/api/items/{item['id']}/play", {"path": str(video), "season": 1, "episode": 1},
+                                  cookie=token)
+        self.assertEqual((status, r.get("player")), (200, "web"), r)
+        made = []
+
+        def fake_job(item_, key, source, headers, start=0.0, duration=None, position=None, on_lines=None):
+            path = Path(self.app._subs_dir(item_["id"])) / "1_1.ai.vtt"
+            path.write_text("WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\nHello\n", encoding="utf-8")
+            made.append((key, source))
+            return mock.Mock(path=path)
+        with mock.patch.object(aisubs, "providers", return_value=[{"name": "Groq"}]), \
+                mock.patch.object(self.app, "ai_subs", side_effect=fake_job):
+            status, sub, _ = self.phone("POST", f"/api/web/{r['session']}/ai-subs", {"at": 0}, cookie=token)
+        self.assertEqual(status, 200, sub)
+        self.assertEqual(made, [("1:1", str(video))])
+        self.assertTrue(sub["live"] and sub["url"].startswith("/stream/web/"))
+        status, text, _ = self.phone("GET", sub["url"], cookie=token)
+        self.assertIn(b"Hello", text if isinstance(text, bytes) else json.dumps(text).encode())
+        # (it grows: read afresh each time)
+        Path(self.app._subs_dir(item["id"]), "1_1.ai.vtt").write_text("WEBVTT\n\n1\n00:00:03.000 --> 00:00:04.000\nAgain\n")
+        status, text, _ = self.phone("GET", sub["url"], cookie=token)
+        self.assertIn(b"Again", text if isinstance(text, bytes) else json.dumps(text).encode())
+
+
 class ProvidersTest(unittest.TestCase):
     def test_groq_first_then_your_openai(self):
         got = aisubs.providers({"groq_api_key": "g", "ai_custom": [
