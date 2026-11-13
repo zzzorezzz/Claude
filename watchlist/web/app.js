@@ -6120,6 +6120,7 @@ function drawVideoSites(wrap) {
       <div class="svc-tools">
         <button type="button" class="svc-btn" data-s="vsite-test" title="Search it and show what's read">Test</button>
         <button type="button" class="svc-btn" data-s="vsite-diag" title="Play an episode from it step by step, and see each step">Test an episode</button>
+        ${REMOTE || onPhone() ? '' : '<button type="button" class="svc-btn" data-s="vsite-teach" title="Its search can\'t be found? Search it once yourself, and the app learns how">Teach it</button>'}
         <button type="button" class="svc-btn danger" data-s="vsite-del" title="Remove">✕</button></div></div>`).join('')
     : '<p class="muted small">No video site yet.</p>';
 }
@@ -6148,6 +6149,7 @@ async function videoSiteAction(wrap, a, row) {
   const i = Number(row?.dataset.i);
   if (a === 'vsite-del') { wrap.vsites.splice(i, 1); drawVideoSites(wrap); return; }
   if (a === 'vsite-diag') { openSiteTest(wrap.vsites[i]); return; }
+  if (a === 'vsite-teach') { teachSite(wrap, i, row); return; }
   if (a === 'vsite-test') {
     const out = $('.site-test-out', row);
     const site = wrap.vsites[i];
@@ -6170,6 +6172,51 @@ async function videoSiteAction(wrap, a, row) {
         : `<span class="bad">No results read for "${esc(r.query)}"</span> from ${esc(r.url)}. Check the link has {title} where the name goes.`;
     } catch (err) { out.innerHTML = `<span class="bad">${esc(err.message)}</span>`; }
   }
+}
+
+// Teach a site its search: the site in a window the app watches; you search it for a well-known
+// title the way you would anyway, and the address its search goes to becomes its search link.
+async function teachSite(wrap, i, row) {
+  const site = wrap.vsites[i];
+  if (!site.url) { toast('Paste its address first', 'error'); return; }
+  let job;
+  try { job = await api('POST', '/api/video-sites/teach', { url: site.url, types: site.types }); } catch (err) { fail(err); return; }
+  const m = openModal(`<button class="modal-close" aria-label="Close">×</button><div class="modal-pad">
+    <h2>Teach ${esc(site.name || 'this site')} its search</h2>
+    <p class="sub">The site is open in a window beside this. Search it for <b>${esc(job.title)}</b> the way you always do (its search box,
+      then Enter or its search button). That's all - this window shows when it's learned.</p>
+    <p class="teach-out"><span class="spin-dot"></span> Watching for its search…</p>
+    <div class="btns"><button class="btn btn-red hidden" data-teach="use">Use it</button><button class="btn btn-ghost" data-teach="close">Close</button></div></div>`);
+  let learned = '', timer = 0;
+  const look = async () => {
+    if (!m.isConnected) return;
+    let v;
+    try { v = await api('GET', `/api/video-sites/teach/${job.id}`); } catch { return; }
+    if (v.url) {
+      learned = v.url;
+      $('.teach-out', m).innerHTML = `<span class="ok">✓ Learned:</span> <code>${esc(v.url)}</code>`;
+      $('[data-teach="use"]', m).classList.remove('hidden');
+    } else if (!v.open) {
+      $('.teach-out', m).innerHTML = `<span class="bad">The window was closed before a search was seen.</span>
+        If its results show as you type, without the address changing, press Enter (or its search button) in its box.`;
+      return;
+    }
+    timer = setTimeout(look, 1500);
+  };
+  m.onClose = () => { clearTimeout(timer); api('DELETE', `/api/video-sites/teach/${job.id}`).catch(() => {}); };
+  m.addEventListener('click', async (e) => {
+    const t = e.target.closest('[data-teach]')?.dataset.teach;
+    if (t === 'close') closeModal(m);
+    else if (t === 'use' && learned) {
+      site.url = learned;
+      const input = $('.vsite-url', row);
+      if (input) input.value = learned;
+      closeModal(m);
+      toast('Learned its search - press Save to keep it');
+      $('[data-s="vsite-test"]', row)?.click();
+    }
+  });
+  look();
 }
 
 // A video site's "Test an episode": the whole way from the search to the video, each step shown.

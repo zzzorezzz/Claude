@@ -53,11 +53,22 @@ class Job:
         self.id = uuid.uuid4().hex[:10]
         self.item_id, self.season, self.episode, self.site_id, self.url = item_id, season, episode, site_id, url
         self.videos, self.subs, self.clicks = [], [], []
+        self.pages = []                 # every page it went to, in order (teaching a site its search)
         self.page = url                 # the page shown now (as far as the app saw it)
         self.open, self.error, self.started = True, "", time.time()
         self.closer = None
 
     # what the window tells the job
+
+    @property
+    def page(self):
+        return self._page
+
+    @page.setter
+    def page(self, url):
+        self._page = url
+        if url and (not self.pages or self.pages[-1] != url):
+            self.pages.append(url)
 
     def video(self, url, headers, page=""):
         low = url.lower()

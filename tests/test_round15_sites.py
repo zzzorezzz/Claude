@@ -184,6 +184,30 @@ class LookAheadTest(OnlineBase):
         self.assertEqual(asked, [6, 4, 7, 8, 9, 10, 3, 2, 1])
 
 
+class TeachTest(OnlineBase):
+    def test_a_search_done_by_hand_becomes_the_sites_search_link(self):
+        from watchlist import picker
+        opened = []
+
+        def start(item_id, season, episode, site_id, url, list_url=""):
+            job = picker.Job(item_id, season, episode, site_id, url)
+            picker._jobs[job.id] = job
+            opened.append(url)
+            return job
+        with mock.patch.object(picker, "start", side_effect=start):
+            got = self.app.teach_start({"url": "https://anime.example/home", "types": ["anime"]})
+        self.assertEqual((opened, got["title"]), (["https://anime.example/home"], "Naruto"))
+        job = picker.get(got["id"])
+        self.assertEqual(self.app.teach_view(got["id"])["url"], "")
+        job.page = "https://anime.example/filter?keyword=Naruto&sort=default"      # (you searched)
+        job.page = "https://anime.example/anime/naruto-1234"                       # (and opened its page)
+        self.assertEqual(self.app.teach_view(got["id"])["url"], "https://anime.example/filter?keyword={title}&sort=default")
+        # (a search link given before: its site's home page opens)
+        with mock.patch.object(picker, "start", side_effect=start):
+            self.app.teach_start({"url": "https://tv.example/search/{title}", "types": ["tv"]})
+        self.assertEqual(opened[-1], "https://tv.example/")
+
+
 class SubtitlesForTheRestTest(OnlineBase):
     def test_another_episodes_file_isnt_saved_for_this_one(self):
         from watchlist import subfinder

@@ -3502,6 +3502,54 @@ class App:
         job.track = track
         return dict(job.view(), site=site["name"], track=track, key=key)
 
+    # ---- teaching a site its search: you search it once, in a window the app watches
+
+    TEACH_TITLES = {"anime": "Naruto", "tv": "Breaking Bad", "movie": "Inception"}
+
+    def teach_start(self, body):
+        """A site's home page in a browser window the app watches: you search it for a well-known
+        title the way you would anyway, and the address its search went to becomes its search link."""
+        url = str(body.get("url") or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            raise ApiError("paste the site's address first (it starts with https://)")
+        kinds = [k for k in body.get("types") or [] if k in self.TEACH_TITLES] or ["anime"]
+        title = self.TEACH_TITLES[kinds[0]]
+        home = re.sub(r"\{(?:title|query|slug)\}.*$", "", url)
+        home = "{0.scheme}://{0.netloc}/".format(urllib.parse.urlsplit(home)) if "{" in url else home
+        webtools.ADBLOCK = self.settings.get()["adblock"]
+        try:
+            job = picker.start("", None, None, "", home)
+        except RuntimeError as e:
+            raise ApiError(str(e)) from e
+        job.teach = title
+        return {"id": job.id, "title": title, "home": home}
+
+    def teach_view(self, job_id):
+        """What was learned so far: {"url" (the search link, once seen), "title", "open", "pages"}."""
+        job = picker.get(job_id)
+        if not job or getattr(job, "teach", None) is None:
+            raise ApiError("that browser window has gone", HTTPStatus.NOT_FOUND)
+        # (an address that looks like a search - the name in its query, or after "search" - over a
+        # title's page opened after it, whose address has the name too)
+        found, best = "", 0
+        for page in job.pages:
+            t = scrape._search_template(page, job.teach)
+            if not t or not t.startswith(("http://", "https://")):
+                continue
+            parts = urllib.parse.urlsplit(t)
+            rank = 2 if "{" in parts.query or re.search(r"/(?:search|find|browse|filter|results?)", parts.path, re.I) else 1
+            if rank >= best:
+                found, best = t, rank
+            if rank == 2 and best == 2:
+                break
+        return {"id": job.id, "title": job.teach, "open": job.open, "url": found, "pages": len(job.pages)}
+
+    def teach_stop(self, job_id):
+        job = picker.get(job_id)
+        if job:
+            job.close()
+        return {"ok": True}
+
     def pick_view(self, job_id):
         job = picker.get(job_id)
         if not job:
@@ -3959,6 +4007,9 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/sites/test", "test_site"),
         ("POST", r"/api/video-sites/test", "test_video_site"),
         ("POST", r"/api/video-sites/find-search", "find_video_site_search"),
+        ("POST", r"/api/video-sites/teach", "teach_start"),
+        ("GET", r"/api/video-sites/teach/(\w+)", "teach_view"),
+        ("DELETE", r"/api/video-sites/teach/(\w+)", "teach_stop"),
         ("POST", r"/api/video-sites/diagnose", "diagnose_video_site"),
         ("POST", r"/api/items/(\w+)/scraped", "play_scraped"),
         ("POST", r"/api/items/(\w+)/scraped/unlink", "scraped_unlink"),
@@ -4016,7 +4067,7 @@ class Handler(BaseHTTPRequestHandler):
     _out_headers = None  # headers this answer carries too (the pairing cookie)
 
     # What a phone over the network may not do: answer for this computer, or take devices out.
-    LOCAL_ONLY = {"pair_answer", "phone_remove_all", "phone_device_remove"}
+    LOCAL_ONLY = {"pair_answer", "phone_remove_all", "phone_device_remove", "teach_start"}
 
     def _allowed_host(self):
         if self.remote:
@@ -5359,6 +5410,15 @@ class Handler(BaseHTTPRequestHandler):
             return dict(sites.test_site(site, query), query=query)
         except sites.SiteError as e:
             raise ApiError(str(e)) from e
+
+    def api_teach_start(self, body):
+        return self.app.teach_start(body)
+
+    def api_teach_view(self, body, job_id):
+        return self.app.teach_view(job_id)
+
+    def api_teach_stop(self, body, job_id):
+        return self.app.teach_stop(job_id)
 
     def api_find_video_site_search(self, body):
         """A site given by its home page: its search link, found by searching it."""

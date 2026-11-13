@@ -972,6 +972,16 @@ def watch_window(url, job, at=None):
         win.events.loaded += lambda: setattr(job, "page", win.get_current_url() or job.page)
     except Exception:  # noqa: BLE001
         pass
+
+    def follow():
+        # (a page that changes its address with its scripts - a search, many sites' - isn't loaded again)
+        while job.open:
+            time.sleep(1)
+            try:
+                job.page = win.get_current_url() or job.page
+            except Exception:  # noqa: BLE001 - closed, or between pages
+                pass
+    threading.Thread(target=follow, daemon=True).start()
     return win.destroy
 
 
