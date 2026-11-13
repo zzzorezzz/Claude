@@ -326,6 +326,28 @@ class SyncTest(unittest.TestCase):
         later = self.Store(mirror, self.root / "a" / "local.json")
         self.assertEqual(later.get(self.heat["id"])["progress"]["episode"], 4)
 
+    def test_two_computers_changing_the_same_title_at_once_keep_both_changes(self):
+        """Neither saw the other's change (the cloud app made a conflicted copy): field by field,
+        and places in episodes episode by episode."""
+        import json as _json
+        cloud = self.root / "cloud" / "watchlist.json"
+        base = _json.loads(cloud.read_text(encoding="utf-8"))
+        b_side = self.root / "b-side"
+        b_side.mkdir()
+        other = self.Store(b_side / "watchlist.json", self.root / "b2" / "local.json")
+        other._items = {k: dict(v) for k, v in self.b._items.items()}
+        other.update(self.heat["id"], {"progress": {"season": 1, "episode": 5},
+                                       "positions": {"1:4": {"pos": 600, "dur": 1400, "at": time.time()}}})
+        self.a.update(self.heat["id"], {"review": {"stars": 4, "text": "tense", "at": time.time()},
+                                        "positions": {"1:2": {"pos": 300, "dur": 1400, "at": time.time()}}})
+        conflicted = self.root / "cloud" / "watchlist (conflicted copy).json"
+        conflicted.write_text((b_side / "watchlist.json").read_text(encoding="utf-8"), encoding="utf-8")
+        self.assertTrue(base["items"])
+        fresh = self.Store(cloud, self.root / "c" / "local.json").get(self.heat["id"])
+        self.assertEqual(fresh["review"]["text"], "tense")
+        self.assertEqual(fresh["progress"], {"season": 1, "episode": 5})
+        self.assertEqual(sorted(fresh["positions"]), ["1:2", "1:4"])
+
     def test_a_damaged_copy_beside_the_list_doesnt_stop_it_opening(self):
         bad = self.root / "cloud" / "watchlist (conflicted copy).json"
         bad.write_text('{"items": [{"id": "x", "title": "T", "modified": "yesterday", "collections": []}, 5],'

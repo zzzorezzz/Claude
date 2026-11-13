@@ -234,8 +234,10 @@ class Store:
                     when = row.get("added") or row.get("created") or 0
                     row["modified"] = when if isinstance(when, (int, float)) else 0
                 mine = store.get(row["id"])
-                if mine is None or row["modified"] > mine["modified"]:
+                if mine is None:
                     store[row["id"]] = row
+                elif mine is not row and (row["modified"] != mine["modified"] or row.get("fm") != mine.get("fm")):
+                    store[row["id"]] = self._combine(mine, row)
         deleted = data.get("deleted")
         for obj_id, when in (deleted if isinstance(deleted, dict) else {}).items():
             if isinstance(when, (int, float)) and when > self._deleted.get(obj_id, 0):
@@ -342,8 +344,39 @@ class Store:
         clock is ahead of ours, so this change always counts as the newest."""
         return max(time.time(), obj.get("modified", 0) + 0.001)
 
-    def _touch(self, obj):
+    def _touch(self, obj, fields=()):
+        """Changed now; `fields`: which of its fields (each remembers when it was changed last, so
+        two computers' versions of a title are put together field by field - see _combine)."""
         obj["modified"] = self._after(obj)
+        if fields:
+            changed = obj.setdefault("fm", {})
+            for f in fields:
+                changed[f] = obj["modified"]
+
+    @staticmethod
+    def _combine(a, b):
+        """Two versions of a title (or collection), from this computer and the other: each field as the
+        one that changed it last has it - a review written there and a place saved here both stay.
+        Places in episodes go episode by episode (the latest of each)."""
+        newer, older = (b, a) if b["modified"] > a["modified"] else (a, b)
+        out = dict(newer)
+        nfm, ofm = newer.get("fm") or {}, older.get("fm") or {}
+        nfm, ofm = (nfm if isinstance(nfm, dict) else {}), (ofm if isinstance(ofm, dict) else {})
+        for f, when in ofm.items():
+            if f in older and isinstance(when, (int, float)) and when > nfm.get(f, 0):
+                out[f] = older[f]
+        if isinstance(a.get("positions"), dict) and isinstance(b.get("positions"), dict):
+            at = lambda p: p.get("at", 0) if isinstance(p, dict) and isinstance(p.get("at", 0), (int, float)) else 0
+            places = dict(older["positions"])
+            for k, p in newer["positions"].items():
+                if k not in places or at(p) >= at(places[k]):
+                    places[k] = p
+            out["positions"] = places
+        changed = dict(ofm)
+        changed.update({f: t for f, t in nfm.items() if t >= changed.get(f, 0)})
+        if changed:
+            out["fm"] = changed
+        return out
 
     @staticmethod
     def _still_shown(item):
@@ -398,7 +431,7 @@ class Store:
                 self._save_local()
             if shared:
                 item.update(copy.deepcopy(shared))
-                self._touch(item)
+                self._touch(item, shared)
                 self._save()
             return self._view(item)
 
@@ -442,8 +475,9 @@ class Store:
             col = self._collections.get(col_id)
             if col is None:
                 raise KeyError(col_id)
-            col.update(copy.deepcopy({k: v for k, v in patch.items() if k not in ("id", "name", "type")}))
-            self._touch(col)
+            fields = {k: v for k, v in patch.items() if k not in ("id", "name", "type")}
+            col.update(copy.deepcopy(fields))
+            self._touch(col, fields)
             self._save()
             return copy.deepcopy(col)
 
@@ -457,7 +491,7 @@ class Store:
             if col is None:
                 raise KeyError(col_id)
             col["name"] = name
-            self._touch(col)
+            self._touch(col, ("name",))
             self._save()
             return copy.deepcopy(col)
 
@@ -471,7 +505,7 @@ class Store:
                 if col_id in item["collections"]:
                     item["collections"] = [c for c in item["collections"] if c != col_id]
                     self._still_shown(item)
-                    self._touch(item)
+                    self._touch(item, ("collections", "listed"))
             self._save()
 
     def move_to_folder(self, item_id, folder_id):
@@ -485,7 +519,7 @@ class Store:
             item["collections"] = [c for c in item["collections"] if c not in folders]
             if folder_id:
                 item["collections"].append(folder_id)
-            self._touch(item)
+            self._touch(item, ("collections",))
             self._save()
             return self._view(item)
 
@@ -495,6 +529,6 @@ class Store:
             item = self._find(item_id)
             item["collections"] = [c for c in dict.fromkeys(col_ids) if c in self._collections]
             self._still_shown(item)
-            self._touch(item)
+            self._touch(item, ("collections", "listed"))
             self._save()
             return self._view(item)
