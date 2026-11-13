@@ -90,6 +90,23 @@ def kind_of(path):
     return "video" if ext in scanner.VIDEO_EXTS else "subtitle" if ext in scanner.SUB_EXTS else "other"
 
 
+def _keep_file(path, dest, tries=40):
+    """A finished file moved out to be kept (as your download). Windows lets go of a file libtorrent
+    just closed a moment later: tried again for a few seconds, never deleted instead."""
+    if not os.path.exists(path) or os.path.exists(dest):
+        return os.path.exists(dest)
+    for _ in range(tries):
+        try:
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(path, dest)
+            return True
+        except PermissionError:
+            time.sleep(0.25)
+        except OSError:
+            return False
+    return False
+
+
 class _Handles(dict):
     """The added torrents' handles; one that's no longer valid is added again as it's used."""
 
@@ -581,13 +598,7 @@ class Torrents:
                 folder = self.app.settings.get()["downloads_folder"]
                 target = Path(folder) if folder and os.path.isdir(folder) else self.dir / "kept"
                 for f in done:
-                    dest = target / f["path"]
-                    try:
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        if not dest.exists():
-                            shutil.move(self.path_of(rec, f), dest)
-                    except OSError:
-                        pass
+                    _keep_file(self.path_of(rec, f), target / f["path"])
                 self._forget_resume(h)
                 self._add_handle(h, rec)
             self._save()
@@ -609,16 +620,9 @@ class Torrents:
             folder = self.app.settings.get()["downloads_folder"]
             target = Path(folder) if folder and os.path.isdir(folder) else self.dir / "kept"
         self.remove(h, delete_files=False)
-        for path, rel in done:
-            dest = target / rel
-            try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                if os.path.exists(path) and not dest.exists():
-                    shutil.move(path, dest)
-            except OSError:
-                pass
+        kept = [rel for path, rel in done if _keep_file(path, target / rel)]
         self._later(self._tidy_all, rec)
-        return {"ok": True, "kept": len(done)}
+        return {"ok": True, "kept": len(kept)}
 
     def _later(self, step, rec):
         """A tidy-up two seconds on (libtorrent lets go of the files first); called off if the app closes meanwhile."""

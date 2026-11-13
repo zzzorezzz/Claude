@@ -78,6 +78,19 @@ class TorrentTest(test_server.ServerBase):
         self.assertTrue(self.connected(t["hash"]), "no file list")
         return t["hash"]
 
+    def keep_connected(self, seconds=90):
+        """The test's sharer connected to whatever torrent the app adds, again and again while the test
+        goes on (there are no trackers here to find it again if it lets go after the list of files)."""
+        end = time.time() + seconds
+        self.addCleanup(lambda: setattr(self, "_stop_connecting", True))
+        while time.time() < end and not getattr(self, "_stop_connecting", False):
+            for h in list(self.app.torrents.handles):
+                try:
+                    self.connect(h)
+                except Exception:  # noqa: BLE001 - a handle being put back
+                    pass
+            time.sleep(1 if self.app.torrents.handles else 0.05)
+
     def connected(self, h, timeout=40):
         """Until the torrent has its list of files from the test's sharer. (Asked
         again every second or so: on a busy computer a first try can be lost.)"""
@@ -283,11 +296,7 @@ class TorrentTest(test_server.ServerBase):
         import threading
         # The guest has the show but no copy of the episode: the invite's magnet is used.
         def connect_when_added():
-            for _ in range(400):
-                for h in list(self.app.torrents.handles):
-                    self.connected(h)
-                    return
-                time.sleep(0.05)
+            self.keep_connected()
         threading.Thread(target=connect_when_added, daemon=True).start()
         entry = self.app._party_entry(self.app.store.get(self.item["id"]), 1, 3, self.magnet)
         self.assertIsNotNone(entry)
@@ -330,11 +339,7 @@ class TorrentTest(test_server.ServerBase):
                                "season": 1, "episode": 2, "magnet": self.magnet, "label": "Mystery Show - S1 E2"}}
 
         def connect_when_added():
-            for _ in range(400):
-                for h in list(self.app.torrents.handles):
-                    self.connected(h)
-                    return
-                time.sleep(0.05)
+            self.keep_connected()
         import threading
         threading.Thread(target=connect_when_added, daemon=True).start()
         entry = self.app.party_resolve(file_, report=lambda *a: reports.append(a), at=0.5)
@@ -410,8 +415,8 @@ class TorrentTest(test_server.ServerBase):
         tor = self.app.torrents
         index, f = self.download(h, "1:1")
         tor._save_resume(wait=5)
-        self.assertTrue(tor._resume_path(h).exists(), "written down")
-        self.assertIn(str(index), tor.records[h]["on_disk"])
+        self.assertTrue(wait_for(lambda: str(index) in (tor.records[h].get("on_disk") or {}), 15), "written down")
+        self.assertTrue(tor._resume_path(h).exists())
         tor._save()
         params = tor._resumed(h, tor.records[h])
         self.assertIsNotNone(params)
@@ -459,11 +464,14 @@ class TorrentTest(test_server.ServerBase):
         tor = self.app.torrents
         self.download(h, "1:1")
         tor._note_have()
+        self.assertTrue(tor.records[h].get("have"), "noted as finished")
         tor.set_keep(self.item["id"], True)
         # Just after a start libtorrent checks the files again: for a while nothing looks finished.
         with mock.patch.object(tor, "_progress", return_value=[0] * 5), \
                 mock.patch.object(tor, "_checking", return_value=True):
-            self.call("POST", f"/api/items/{self.item['id']}/connections/clear")
+            # (as Delete connections does; straight, not through the app's server: a busy computer can
+            # take longer to let go of the file than a request is given)
+            tor.replace_for(self.item["id"], "", keep_done=True)
         self.assertNotIn(h, tor.records)
         kept = list((tor.dir / "kept").rglob("*01*.mkv"))
         self.assertTrue(kept, "episode 1 was kept")
