@@ -20,7 +20,7 @@ Docs: `dist/1.3.9/` (update log, guide, `Watch Anything - Report.md`). Tests for
 - **Field-by-field sync**: `Store._touch(obj, fields)` records `fm` (field -> when changed); `_combine` puts two versions together field by field, `positions` entry by entry.
 - **Relay keys per guest** (`relay.py`): RFC 3526 group 14 DH; the host's public half is checked against `fingerprint()` in the invite (`WA-...-R1-xxxx-xxxx-xxxx-xxxx`); guest messages `{"s", "x"}` with `x` sealed with the agreed key; `hi`/`key` messages for the exchange. Invites without a fingerprint are refused (older hosts).
 - Settings `wrap.beforeClose` (generic in `closeModal`); phone saved "Try again"; `torrents._export_missing` at shutdown; `Handler._drain` before an early refusal.
-- Builds: run 43377170232 (all four jobs) and live run 43377170166 for commit c049b39.
+- **Builds**: final run 43398637797 (commit 9c0fbcf, all four jobs green); the exe, dmg and apk (Android 13 job's) are in `dist/1.3.9/` with the update log, guide and `Watch Anything - Report.md`. GitHub's Windows job skips `tests/test_torrents.TorrentTest` (CI=true on win32): its machines kept dropping the local test seeder. Two Android 13 emulator runs crashed decoding video (not the app).
 
 - **Testing here**: scratchpad `uiserve.py` (a test copy with fake TMDB/MAL; `PHONE=1` adds 127.0.0.2), `ui_phone.py` / `phone_run.sh` (pairs a headless phone and plays), `bbb.py` (Big Buck Bunny end to end). Playwright's `wait_for_function` is blocked by the app's CSP: poll with `page.evaluate`.
 
