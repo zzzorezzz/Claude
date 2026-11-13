@@ -10,6 +10,7 @@ Docs: `dist/1.4/` (update log, guide, `Watch Anything - Report.md`). Tests: `tes
 - **Matching**: `_numbers(text, own)` counts "#"-numbers and the title's own decimals ("Burn the Witch #0.8"); `candidates` adds names without "Play"/"Watch now"/"Loading..." in front; `name_variants` adds the name without "#".
 - **Quiet**: `webtools._hidden_window` sets `opts["hidden"]` -> `_hook` sets `IsMuted` for every hidden window (render too, not only catch) and adds `MUTE_JS`; `droidweb.Page(hidden=True)` adds `MUTE_JS` (the visible "Find it myself" page passes `hidden=False`). Chromium already ran with `--mute-audio`.
 - Two regexes had a literal backspace (bash heredoc `\b`) since 1.3.9 (`scrape.streams`, `server` search-link rank): fixed. Never write `\b` etc. through a bash heredoc: use Write-tool files.
+- **Builds**: run 43423981334 (commit b235a53): Windows, Android 30/33 green; Mac failed once (TorrentTest's local seeder, then the 8-minute limit, which covers the retry too) and passed when re-run. GitHub live (43423981190): AnikotoTV, Atlantic, Bingr OK; AniZone / Miruro 403 (they block GitHub); ShuttleTV mostly timed out.
 - Live (this PC): AniZone "Ramparts of Ice" ep 1 -> 64 tracks; mpv: ja audio -> English, en audio -> English - Forced, back -> English. Miruro: its English `.jpeg` sub loads; Burn the Witch #0.8 opens on Miruro (AniZone doesn't have it); Tatsuki Fujimoto 17-26 dub -> Sub plays ep 1's sub. ShuttleTV was unreachable from this PC (timeout with curl too).
 
 ## Round 1.3.9 (2026-11-13): the whole app checked through and fixed
