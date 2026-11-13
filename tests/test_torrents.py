@@ -54,7 +54,7 @@ class TorrentTest(test_server.ServerBase):
             warnings.simplefilter("ignore", DeprecationWarning)
             fs = lt.file_storage()
             lt.add_files(fs, str(show))
-            t = lt.create_torrent(fs, 65536)
+            t = lt.create_torrent(fs, 65536, flags=lt.create_torrent.v1_only)      # (no padding: files share pieces, as most do)
             lt.set_piece_hashes(t, str(self.seed_dir))
             ti = lt.torrent_info(lt.bencode(t.generate()))
         self.magnet = lt.make_magnet_uri(ti)
@@ -428,6 +428,23 @@ class TorrentTest(test_server.ServerBase):
         tor._save_resume(wait=5)
         tor.delete_file(h, index)
         self.assertFalse(tor._resume_path(h).exists())
+
+    def test_a_file_whose_bytes_are_only_in_the_parts_file_is_written_out(self):
+        """A small file (a subtitle) that came whole in pieces shared with an episode while it was
+        skipped: written out before what the torrent has is written down."""
+        h = self.add()
+        tor = self.app.torrents
+        self.download(h, "1:2")
+        rec = tor.records[h]
+        sub = next(f for f in rec["files"] if f["path"].endswith(".ass"))
+        path = Path(tor.path_of(rec, sub))
+        # (episode 2's first piece holds the subtitle too: skipped, its bytes went to the .parts file)
+        self.assertTrue(wait_for(lambda: tor._progress(h)[sub["index"]] >= sub["size"], 30))
+        self.assertFalse(path.exists())
+        self.assertEqual(tor._export_missing(), 0, "a file you don't want isn't written out")
+        rec["priorities"][str(sub["index"])] = 7      # (wanted now - before libtorrent wrote it out itself)
+        self.assertEqual(tor._export_missing(), 1)
+        self.assertEqual(path.read_text(), "[Script Info]\nTitle: two\n")
 
     def test_keep_downloaded_episodes_keeps_them_while_theyre_checked_after_a_start(self):
         h = self.add()

@@ -1666,6 +1666,7 @@ $('#tabbar')?.addEventListener('click', (e) => {
 
 function closeModal(wrap) {
   if (!wrap || !wrap.isConnected) return;
+  if (wrap.beforeClose && !wrap.beforeClose()) return;       // (it asks first: unsaved changes)
   const had = wrap.contains(document.activeElement);
   wrap.remove();
   sfx('close');
@@ -6505,15 +6506,34 @@ async function openSettings(focus = '') {
   form.addEventListener('input', unsaved);
   form.addEventListener('change', unsaved);
   form.addEventListener('click', () => setTimeout(unsaved, 50));
+  // Closed with changes not saved (×, Escape, a click beside it): asked whether to keep them.
+  wrap.beforeClose = () => {
+    if (wrap.leaving || !form.isConnected || JSON.stringify(values()) === saved) return true;
+    const ask = openModal(`<div class="modal-pad"><h2>Save your changes?</h2>
+      <p class="sub">You changed some settings without saving them.</p>
+      <div class="btns"><button class="btn btn-red" data-u="save">Save</button><button class="btn btn-ghost" data-u="drop">Don't save</button>
+      <button class="btn btn-ghost" data-u="stay">Keep editing</button></div></div>`);
+    ask.addEventListener('click', async (e) => {
+      const u = e.target.closest('[data-u]')?.dataset.u;
+      if (!u) return;
+      closeModal(ask);
+      if (u === 'stay') return;
+      if (u === 'save') { try { await save(); toast('Settings saved'); } catch (err) { fail(err); return; } }
+      else applyTheme(S.status.theme);
+      wrap.leaving = true;
+      closeModal(wrap);
+    });
+    return false;
+  };
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    try { await save(); toast('Settings saved'); closeModal(wrap); } catch (err) { fail(err); }
+    try { await save(); toast('Settings saved'); wrap.leaving = true; closeModal(wrap); } catch (err) { fail(err); }
   });
   form.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-s]')?.dataset.s;
     if (!a) return;
     try {
-      if (a === 'cancel') { applyTheme(S.status.theme); closeModal(wrap); }
+      if (a === 'cancel') { applyTheme(S.status.theme); wrap.leaving = true; closeModal(wrap); }
       else if (a === 'avatar') $('#avatar-file', wrap).click();
       else if (a === 'mode') {
         const mode = e.target.closest('[data-mode]').dataset.mode;

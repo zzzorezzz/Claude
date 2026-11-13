@@ -1747,7 +1747,55 @@ class Torrents:
             return {"available": bool(lt), "error": self.error, "keep_after": DELETE_AFTER,
                     "torrents": [self.view(h) for h in hashes]}
 
+    def _export_missing(self, limit=64 * 1024 * 1024):
+        """Files downloaded whole whose bytes are still only in libtorrent's .parts file (they came
+        in pieces shared with a file being played while they themselves were skipped): written out,
+        so what's written down about the torrent is what's on disk (else it's checked again)."""
+        if getattr(lt, "PIECES_FROM_DISK", False):
+            return 0
+        written = 0
+        for h, rec in list(self.records.items()):
+            handle = dict.get(self.handles, h)
+            if handle is None or not rec.get("files"):
+                continue
+            try:
+                ti = handle.torrent_file()
+                progress = self._progress(h)
+            except Exception:  # noqa: BLE001
+                continue
+            if ti is None:
+                continue
+            fs, plen = ti.files(), ti.piece_length()
+            for f in rec["files"]:
+                path = self.path_of(rec, f)
+                done = progress[f["index"]] if f["index"] < len(progress) else 0
+                wanted = int((rec.get("priorities") or {}).get(str(f["index"]), 0)) > 0
+                if not wanted or not f["size"] or f["size"] > limit or done < f["size"] or os.path.isfile(path):
+                    continue
+                offset = fs.file_offset(f["index"])
+                data = b""
+                try:
+                    for piece in range(offset // plen, (offset + f["size"] - 1) // plen + 1):
+                        data += self._piece(h, handle, piece)
+                except TorrentError:
+                    continue
+                start = offset - (offset // plen) * plen
+                if len(data) < start + f["size"]:
+                    continue                     # (libtorrent couldn't read it all: checked again instead)
+                try:
+                    Path(path).parent.mkdir(parents=True, exist_ok=True)
+                    Path(path).write_bytes(data[start:start + f["size"]])
+                    written += 1
+                except OSError:
+                    continue
+        return written
+
     def shutdown(self):
+        try:
+            if self.ses and not self._stop:
+                self._export_missing()           # (while the alerts that bring its pieces are still read)
+        except Exception:  # noqa: BLE001 - checked again next time instead
+            pass
         self._stop = True
         if self.ses:
             try:

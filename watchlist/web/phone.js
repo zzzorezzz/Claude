@@ -372,9 +372,24 @@ async function openSavedSheet() {
       closeModal(wrap);
       // (played as its file: the phone's player finds it saved here and plays it from here)
       openWatch(item, f.key && f.key.includes(':') ? { season: +f.key.split(':')[0], episode: +f.key.split(':')[1] } : undefined, { how: 'file' });
+    } else if (what === 'again') {
+      // (a save the computer let go of, or that failed: started afresh from the title's file)
+      const f = await saveGet('files', id);
+      if (!f) return;
+      await savedRemove(id);
+      const [season, episode] = (f.key || '').split(':');
+      let path = '';
+      try {
+        const info = await api('GET', `/api/items/${f.item_id}/local${episode ? `?season=${season}&episode=${episode}` : ''}`);
+        const own = (info.by_episode || {})[f.key] || info.target || {};
+        path = own.stream ? '' : own.path || '';
+      } catch { /* not there */ }
+      if (!path) { toast("That file isn't on the computer any more", 'error'); return; }
+      saveToDevice({ itemId: f.item_id, key: f.key, label: f.label, title: f.title, path });
     } else if (what === 'all') {
       const all = await savedList();
-      if (all.length && confirm(`Delete all ${all.length} saved video${all.length === 1 ? '' : 's'} from this ${deviceWord()}?`)) {
+      if (all.length && await confirmModal(`Delete all ${all.length} saved video${all.length === 1 ? '' : 's'}?`,
+        `They're deleted from this ${deviceWord()} (the computer keeps its own copies).`, 'Delete all')) {
         for (const f of all) await savedRemove(f.id);
         toast('Everything saved here is deleted');
       }
@@ -399,11 +414,13 @@ async function savedRefresh() {
         ${f.state !== 'done' && f.state !== 'failed' ? `<div class="saved-bar"><i style="width:${Math.round(pct * 100)}%"></i></div>` : ''}</div>
       <div class="saved-btns">${f.state === 'done' ? `<button class="btn btn-white btn-sm" data-saved="play" data-id="${f.id}">▶ Play</button>` : ''}
         ${f.state === 'paused' ? `<button class="btn btn-ghost btn-sm" data-saved="retry" data-id="${f.id}">Carry on</button>` : ''}
+        ${f.state === 'failed' ? `<button class="btn btn-ghost btn-sm" data-saved="again" data-id="${f.id}">Try again</button>` : ''}
         <button class="btn btn-ghost btn-sm" data-saved="delete" data-id="${f.id}" aria-label="Delete">🗑</button></div></div>`;
   }).join('') : `<p class="muted">Nothing is downloaded to this ${deviceWord()}.</p>`;
   const used = files.reduce((n, f) => n + (f.got || 0), 0);
   let free = '';
   try { const est = await navigator.storage.estimate(); if (est.quota) free = ` · about ${fmtSize(Math.max(0, est.quota - est.usage))} more can be kept`; } catch { /* fine */ }
+  document.querySelector('[data-saved="all"]')?.classList.toggle('hidden', !files.length);
   const space = document.getElementById('saved-space');
   if (space) space.textContent = `${fmtSize(used || 0)} used${free}`;
   if (files.some((f) => f.state === 'preparing' || f.state === 'saving')) savedTimer = setTimeout(savedRefresh, 1000);
