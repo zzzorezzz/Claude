@@ -777,7 +777,8 @@ class Torrents:
         if self.complete(rec, f):
             return True
         try:
-            return bool((rec.get("have") or {}).get(str(f["index"]))) and os.path.getsize(self.path_of(rec, f)) == f["size"]
+            # (at least its size: libtorrent can leave a file a little bigger on Windows)
+            return bool((rec.get("have") or {}).get(str(f["index"]))) and os.path.getsize(self.path_of(rec, f)) >= f["size"]
         except OSError:
             return False
 

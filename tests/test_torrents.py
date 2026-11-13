@@ -4,6 +4,7 @@ import http.client
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -32,6 +33,8 @@ def wait_for(check, timeout=20):
 
 
 @unittest.skipUnless(lt, "libtorrent isn't installed")
+@unittest.skipIf(os.environ.get("CI") and sys.platform == "win32",
+                 "GitHub's Windows machines can't keep a local torrent connection up reliably (run on a PC, Mac and Linux)")
 class TorrentTest(test_server.ServerBase):
     def setUp(self):
         patch = mock.patch.object(torrents.Torrents, "SETTINGS", LOCAL)
