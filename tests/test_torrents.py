@@ -54,7 +54,7 @@ class TorrentTest(test_server.ServerBase):
             warnings.simplefilter("ignore", DeprecationWarning)
             fs = lt.file_storage()
             lt.add_files(fs, str(show))
-            t = lt.create_torrent(fs, 65536, flags=lt.create_torrent.v1_only)      # (no padding: files share pieces, as most do)
+            t = lt.create_torrent(fs, 65536)
             lt.set_piece_hashes(t, str(self.seed_dir))
             ti = lt.torrent_info(lt.bencode(t.generate()))
         self.magnet = lt.make_magnet_uri(ti)
@@ -437,6 +437,20 @@ class TorrentTest(test_server.ServerBase):
     def test_a_file_whose_bytes_are_only_in_the_parts_file_is_written_out(self):
         """A small file (a subtitle) that came whole in pieces shared with an episode while it was
         skipped: written out before what the torrent has is written down."""
+        # (a torrent without padding between its files, as most are: files share pieces)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            fs = lt.file_storage()
+            lt.add_files(fs, str(self.seed_dir / "[Group] Mystery Show"))
+            t = lt.create_torrent(fs, 65536, flags=lt.create_torrent.v1_only)
+            lt.set_piece_hashes(t, str(self.seed_dir))
+            ti = lt.torrent_info(lt.bencode(t.generate()))
+        self.magnet = lt.make_magnet_uri(ti)
+        p = lt.add_torrent_params()
+        p.ti, p.save_path = ti, str(self.seed_dir)
+        self.seeder.remove_torrent(self.seed_handle)
+        self.seed_handle = self.seeder.add_torrent(p)
+        wait_for(lambda: self.seed_handle.status().is_seeding)
         h = self.add()
         tor = self.app.torrents
         rec = tor.records[h]

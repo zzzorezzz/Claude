@@ -104,7 +104,11 @@ def _keep_file(path, dest, tries=40):
             time.sleep(0.25)
         except OSError:
             return False
-    return False
+    try:
+        shutil.copy2(path, dest)          # (still held: a copy - the torrent's own goes with it)
+        return True
+    except OSError:
+        return False
 
 
 class _Handles(dict):
