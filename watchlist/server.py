@@ -22,7 +22,7 @@ from pathlib import Path
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ai, cdp, dialogs, discover, hlsfix, livecollections, partyserver, remote, transcode, webplay, picker, relay, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
+from . import ai, aisubs, cdp, dialogs, discover, hlsfix, livecollections, partyserver, remote, transcode, webplay, picker, relay, subfinder, importer, launcher, library, metadata, phone_player, player, scanner, scrape, services, share, sites, sorter, syncplay, webtools
 from . import mood as mood_mod
 from . import party as party_mod
 from . import torrents as torrents_mod
@@ -155,6 +155,7 @@ class App:
         # The site a title's episodes play from now (Find it on another site, a server of another
         # site, another source on the next site): the next episodes are found there too.
         self._online_site_now = {}
+        self._aisubs = {}                   # (item, episode) -> aisubs.Job making its subtitles
         # Each title's choice of server or version, counted: a video found under an older choice
         # (the next episode, found ahead meanwhile) isn't kept.
         self._online_gen = {}
@@ -2367,6 +2368,8 @@ class App:
             self.answer_subs(session.item_id, args[1])
         elif args[0] == "watchlist-load-subtitle":
             threading.Thread(target=self._load_own_sub, args=(session,), daemon=True).start()
+        elif args[0] == "watchlist-ai-subs":
+            threading.Thread(target=self._in_player, args=(session, self._ai_subs_player), daemon=True).start()
         elif args[0] == "watchlist-switch-version":
             threading.Thread(target=self._in_player, args=(session, self._switch_version), daemon=True).start()
         elif args[0] == "watchlist-other-source":
@@ -2387,6 +2390,63 @@ class App:
             step(session, *args)
         except Exception as e:  # noqa: BLE001
             session.send(["show-text", f"That didn't work ({e})"[:160], 5000])
+
+    # ---- subtitles made by AI (aisubs.py)
+
+    def _ai_source(self, item_id, entry):
+        """(what ffmpeg reads the episode's sound from, its headers) for a player's entry."""
+        got = self._online_found.get((item_id, entry.get("key")))
+        if (entry.get("web") or entry.get("online")) and got:
+            found = got[1]
+            return found["url"], hlsfix._headers(found.get("headers"), found.get("referer"))
+        return str(entry.get("path") or ""), hlsfix._headers(entry.get("headers"), entry.get("referer"))
+
+    def ai_subs(self, item, key, source, headers, start=0.0, duration=None, position=None, on_lines=None):
+        """Subtitles made by AI for one episode, from `start`: the job making them (one per episode;
+        one already going is joined)."""
+        slot = (item["id"], key)
+        job = self._aisubs.get(slot)
+        if job and job.running and job.source == source:
+            if on_lines:
+                job.on_lines = on_lines
+            return job
+        name = re.sub(r"[^\w-]+", "_", key or "movie")
+        path = self._subs_dir(item["id"]) / f"{name}.ai.vtt"
+
+        def lines(j):
+            if j.lines and not j.running and not j.error:
+                self._save_sub(item["id"], key, str(j.path))         # (kept for the episode: used again)
+            if on_lines:
+                on_lines(j)
+        job = self._aisubs[slot] = aisubs.Job(self.settings.get(), source, path, start, duration, headers,
+                                              position, lines).run_soon()
+        return job
+
+    def _ai_subs_player(self, session):
+        entry = session.current()
+        if not entry:
+            return
+        if not aisubs.providers(self.settings.get()):
+            session.send(["show-text", "Subtitles made by AI need a free Groq key - add one in Settings → AI", 6000])
+            return
+        source, headers = self._ai_source(session.item_id, entry)
+        state = {"added": False}
+
+        def lines(job):
+            if session.ended or session.current() is not entry:
+                job.stop()
+                return
+            if job.error and not job.lines:
+                session.send(["show-text", f"Subtitles by AI: {job.error}"[:180], 6000])
+            elif job.lines and not state["added"]:
+                state["added"] = True
+                session.send(["sub-add", str(job.path), "select", "AI subtitles", "en"],
+                             ["show-text", f"Subtitles by AI ({job.by}) - more come as it plays", 4000])
+            elif job.lines:
+                session.send(["sub-reload"])
+        session.send(["show-text", "Making subtitles with AI - this sends the episode's sound to Groq (or OpenAI)…", 8000])
+        self.ai_subs(self.store.get(session.item_id), entry["key"], source, headers, session.position() or 0,
+                     session.dur, position=session.position, on_lines=lines)
 
     def _load_own_sub(self, session):
         path = dialogs.choose("file", "Choose a subtitle file", "", "subtitle")
@@ -3820,6 +3880,7 @@ class Handler(BaseHTTPRequestHandler):
         ("POST", r"/api/web/save/(\w+)/done", "web_save_done"),
         ("POST", r"/api/web/(\w+)/server", "web_server"),
         ("POST", r"/api/web/(\w+)/other-site", "web_other_site"),
+        ("POST", r"/api/web/(\w+)/ai-subs", "web_ai_subs"),
         ("GET", r"/api/pair/status", "pair_status"),
         ("POST", r"/api/pair/answer", "pair_answer"),
         ("GET", r"/api/phone", "phone_status"),
@@ -4561,7 +4622,29 @@ class Handler(BaseHTTPRequestHandler):
                     return None
                 self.wfile.write(chunk)
 
+    def api_web_ai_subs(self, body, sid):
+        """The phone's player: subtitles made by AI for the episode playing (a track that grows)."""
+        session = self._web_session(sid)
+        entry = session.current()
+        if not entry:
+            raise ApiError("nothing is playing")
+        if not aisubs.providers(self.app.settings.get()):
+            raise ApiError("subtitles made by AI need a free Groq key - add one in Settings → AI on the computer")
+        item = self.app.item(session.item_id)
+        source, headers = self.app._ai_source(item["id"], entry)
+        job = self.app.ai_subs(item, entry["key"], source, headers, float(body.get("at") or session.position() or 0),
+                               session.dur, position=session.position)
+        t = self.app.tickets.make(session.device, {"kind": "sub", "path": str(job.path), "live": True})
+        return {"label": "AI subtitles", "lang": "en", "url": f"/stream/web/{t}/sub.vtt", "absolute": True, "live": True}
+
     def _web_subtitle(self, target):
+        if target.get("live"):
+            # (subtitles still being made: read as they are each time)
+            try:
+                text = Path(target["path"]).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = "WEBVTT\n"
+            return self._send(HTTPStatus.OK, text.encode("utf-8"), self.MEDIA_TYPES[".vtt"])
         if target.get("vtt") is None:
             try:
                 if target.get("url"):

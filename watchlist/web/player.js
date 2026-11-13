@@ -561,6 +561,7 @@ function wpMenu() {
       <h5>Sub / Dub</h5><div class="wp-opts"><button data-wp="version">Switch Sub ⇄ Dub</button></div>` : ''}
     <h5>Subtitles</h5><div class="wp-opts"><button class="${!s.subOn ? 'on' : ''}" data-sub="off">Off</button>
       ${subs.map((x, i) => `<button class="${s.subOn && s.subPick === i ? 'on' : ''}" data-sub="${i}">${esc(x.label)}</button>`).join('') || '<span class="muted small">None for this one</span>'}</div>
+    ${s.media && !subs.some((x) => x.label === 'AI subtitles') && !(s.launch.offline) ? `<div class="wp-opts"><button data-wp="ai-subs" title="Sends this episode's sound to your AI (Groq or OpenAI)">✨ Make subtitles with AI</button></div>` : ''}
     ${file && styled ? `<label class="check-row"><input type="checkbox" data-wp="burn" ${s.burn != null ? 'checked' : ''}> Burn in styled subtitles <span class="muted small">(their own look, drawn into the picture)</span></label>` : ''}
     ${file ? `<h5>Quality</h5><div class="wp-opts">${[['', `As in Settings`], ['original', 'Original'], ['1080', '1080p'], ['720', '720p'], ['480', '480p']]
     .map(([v, l]) => `<button class="${q === v ? 'on' : ''}" data-q="${v}">${l}</button>`).join('')}</div>` : ''}
@@ -808,6 +809,18 @@ function wpWire(el) {
       } catch { wpOsd("Picture in Picture isn't available here"); }
     } else if (a === 'airplay') v.webkitShowPlaybackTargetPicker?.();
     else if (a === 'keys') wpKeys();
+    else if (a === 'ai-subs') {
+      wpQ('.wp-sheet').classList.add('hidden');
+      wpOsd("Making subtitles with AI - this sends the episode's sound to your AI…", 6000);
+      try {
+        const sub = await api('POST', `/api/web/${s.sid}/ai-subs`, { at: wpNow() });
+        if (WP.s !== s || !s.media) return;
+        s.media.subs = [...(s.media.subs || []), sub];
+        s.subPick = s.media.subs.length - 1;
+        s.subOn = true;
+        wpSubsLoad();
+      } catch (err) { wpOsd(err.message, 6000); }
+    }
   });
   document.addEventListener('keydown', (ev) => {
     if (!WP.s || WP.el.classList.contains('hidden') || ev.target.closest('input, textarea')) return;
