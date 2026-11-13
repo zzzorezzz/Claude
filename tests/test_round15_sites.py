@@ -37,7 +37,7 @@ class ButtonEpisodesTest(unittest.TestCase):
         with mock.patch.multiple(scrape, scrambled_playlist=lambda *a, **k: False, scrambled_video=lambda *a, **k: False,
                                  refused=lambda *a, **k: False, hls_length=lambda *a, **k: None,
                                  master_playlist=lambda url, *a, **k: url, qualities=lambda *a, **k: [],
-                                 pick_subtitle=lambda *a, **k: ""), \
+                                 site_subtitles=lambda *a, **k: []), \
                 mock.patch.object(scrape.Scraper, "_labelled_streams", staticmethod(lambda u: False)):
             one, two = s.resolve(site, item, 1, 1), s.resolve(site, item, 1, 2)
         self.assertEqual((one["url"], two["url"]), ("http://cdn.example/Episode_1.m3u8", "http://cdn.example/Episode_2.m3u8"))

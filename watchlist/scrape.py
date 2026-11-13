@@ -27,6 +27,7 @@ What was found (the title's page and its episodes' pages) is remembered, so
 the next episode starts straight away.
 """
 
+import concurrent.futures
 import difflib
 import html
 import html.parser
@@ -594,6 +595,7 @@ def name_variants(names, limit=8):
     for name in names:
         plain = re.sub(r"\s*[\(\[][^)\]]*[\)\]]", " ", name)          # (2019), [TV]
         add(plain)
+        add(re.sub(r"#\s*(?=\d)", "", plain))                            # "Burn the Witch #0.8" -> "Burn the Witch 0.8"
         add(re.sub(r"\s+-\s+", " ", plain))                              # "X - The Movie: Y" -> "X The Movie: Y"
         for sep in (":", " - ", " – "):
             if sep in plain:
@@ -613,9 +615,14 @@ def _fold(word):
     return re.sub(r"(?<=[a-z])(?:ou|oo|uu|aa|ii|ee)", lambda m: m.group(0)[0], word)
 
 
-def _numbers(text):
+def _numbers(text, own=()):
     """The numbers in a name that are part of it ("Kaiju No. 8", "Jujutsu Kaisen 0", "Mob
-    Psycho 100") - not a season's, a part's or a year."""
+    Psycho 100") - not a season's, a part's or a year. `own`: decimals that are the title's own
+    ("0.8" of "Burn the Witch 0.8"), counted where they're written too."""
+    # (a number written with "#" is the name's own, decimals too: "Burn the Witch #0.8" - and its
+    # address's "burn-the-witch-08" is the same number)
+    hashed = {re.sub(r"\D", "", m) for m in re.findall(r"#\s*(\d+(?:[.,]\d+)?)", str(text or ""))}
+    hashed |= {re.sub(r"\D", "", d) for d in own if re.search(rf"(?<![\d.,]){re.escape(d)}(?![\d.,])", str(text or ""))}
     # (not what a card says beside it either: a rating "8.4", "37 eps", "24 min", "37 37")
     text = re.sub(r"\d+[.,]\d+|\b\d+\s*(?:eps?|episodes?|min|mins|minutes|%|/\s*\d+)(?![a-z])", " ", str(text or ""), flags=re.I)
     n = library.norm(text)
@@ -623,7 +630,7 @@ def _numbers(text):
     words = n.split()
     # (only a number among its words - "Kaiju No 8", "Jujutsu Kaisen 0" - not one a card puts before its name)
     first = next((i for i, w in enumerate(words) if not w.isdigit()), len(words))
-    return {w for w in words[first:] if w.isdigit() and len(w) <= 3}
+    return {w for w in words[first:] if w.isdigit() and len(w) <= 3} | {h for h in hashed if h}
 
 
 def score(text, wanted):
@@ -634,7 +641,9 @@ def score(text, wanted):
     if not mine:
         return 0
     best = 0.0
-    numbers = _numbers(text)
+    # (a decimal in the title's own name - "Burn the Witch 0.8" - is part of it, not a rating)
+    own = {d for name in wanted["names"] for d in re.findall(r"(?<![\d.,])\d+[.,]\d+(?![\d.,])", name)}
+    numbers = _numbers(text, own)
     season = _season_of_text(text)
     for name in wanted["names"]:
         theirs = [_fold(w) for w in _base_words(name)]
@@ -655,7 +664,7 @@ def score(text, wanted):
         s -= min(40, 14 * len(extra))
         # A number one name has and the other hasn't ("Jujutsu Kaisen 0" isn't "Jujutsu Kaisen";
         # "Mob Psycho 100 II" is its season 2, already counted): another title.
-        odd = (numbers ^ _numbers(name)) - {str(season or ""), str(wanted["season"] or "")}
+        odd = (numbers ^ _numbers(name, own)) - {str(season or ""), str(wanted["season"] or "")}
         s -= min(50, 40 * len(odd))
         best = max(best, s)
     if best <= 0:
@@ -718,6 +727,9 @@ def candidates(page, search_page):
         if not texts:
             continue
         texts = [t for t in texts if not _NO_NAME.match(t.strip())]       # (named by its address instead)
+        # (a card's words before its name - "Loading... Play BURN THE WITCH" - its name without them too)
+        texts += [b for b in (re.sub(r"^(?:\s*(?:loading\.*|play|watch(?:\s+now)?)(?:\s+|$))+", "", t, flags=re.I).strip()
+                              for t in texts) if b and b not in texts]
         entry = by.setdefault(href, {"url": href, "names": []})
         entry["names"] += [t[:160] for t in texts]
     out = []
@@ -1328,6 +1340,12 @@ _NOT_SERVER = re.compile(r"^\s*(?:summary|synopsis|overview|details?|info(?:rmat
                          r"report|share|bookmark|favou?rite|watch ?list|log ?in|sign ?up)\s*$", re.I)
 
 
+# A page's frames that are no player: share buttons, comments, chat, sign-in, captchas.
+_WIDGET = re.compile(r"facebook|twitter|disqus|google|recaptcha|hcaptcha|turnstile|challenges\.cloudflare|sharethis|addthis|"
+                     r"addtoany|theanimecommunity|tawk\.to|crisp\.chat|intercom|discord|reddit|/comments?\b|/chat\b|"
+                     r"/widgets?\b|/share\b|/login\b|/sign-?in\b", re.I)
+
+
 def streams(page):
     """The ways an episode's page offers it: [{"label", "kind", "url", "how"}].
     "how": "page" (another page of the site with that stream), "embed" (a player
@@ -1336,7 +1354,7 @@ def streams(page):
     out, seen = [], set()
     for sv in page.servers:
         label = sv["label"] or re.sub(r".*?(server|mirror)[-_ ]?", "", sv["attrs"], flags=re.I)[:20] or "Stream"
-        if not sv["label"] and not sv["url"] and re.search(r"[\s/:]|[wh]-\d|text-", label):
+        if not sv["label"] and not sv["url"] and re.search(r"[\s/:]|\b[wh]-\d|\btext-", label):
             continue           # (no name and nowhere to go: its classes - "w-8 h-8 text-white/7" - are no button to press)
         if _NOT_SERVER.match(sv["label"] or ""):
             continue           # (a page's tabs about the title - Summary, Characters - aren't servers)
@@ -1349,8 +1367,9 @@ def streams(page):
         seen.add(key)
         out.append({"label": label, "kind": kind, "url": url, "how": how})
     named = {x["url"] for x in out}
+    from . import webtools
     for f in dict.fromkeys(page.frames):
-        if f not in named and not _JUNK.search(f) and not re.search(r"facebook|twitter|disqus|google|recaptcha", f):
+        if f not in named and not _JUNK.search(f) and not _WIDGET.search(f) and not webtools.blocked(f):
             out.append({"label": _host(f) or "Player", "kind": "", "url": f, "how": "embed"})
     for i, x in enumerate(out):
         x["id"] = f"{i}:{x['kind']}:{x['label']}"[:80]
@@ -1418,77 +1437,324 @@ def qualities(url, headers=None):
     return unique if len(unique) > 1 else []
 
 
-def _sub_language(url, label=""):
-    """0 for English (by its address or label), 1 otherwise."""
-    return 0 if re.search(r"(?:^|[/_.\-=\s])(?:en|eng|english)(?:[/_.\-&\s]|$)", f"{url} {label}".lower()) else 1
+# Subtitle languages: the codes and names sites label them with.
+SUB_LANGS = {
+    "en": ("english", "eng", "inglés", "anglais", "englisch"),
+    "ja": ("japanese", "jpn", "日本語"),
+    "es": ("spanish", "spa", "español", "espanol", "castellano", "latino", "latin american"),
+    "pt": ("portuguese", "por", "português", "portugues", "brazilian", "brasil"),
+    "fr": ("french", "fre", "fra", "français", "francais"),
+    "de": ("german", "ger", "deu", "deutsch"),
+    "it": ("italian", "ita", "italiano"),
+    "ru": ("russian", "rus", "русский"),
+    "ar": ("arabic", "ara", "العربية"),
+    "zh": ("chinese", "chi", "zho", "中文", "简体", "繁體", "mandarin", "cantonese"),
+    "ko": ("korean", "kor", "한국어"),
+    "hi": ("hindi", "hin"),
+    "id": ("indonesian", "ind", "bahasa indonesia"),
+    "ms": ("malay", "msa", "bahasa melayu"),
+    "th": ("thai", "tha"),
+    "vi": ("vietnamese", "vie", "tiếng việt"),
+    "tr": ("turkish", "tur", "türkçe"),
+    "pl": ("polish", "pol", "polski"),
+    "nl": ("dutch", "dut", "nld", "nederlands"),
+    "sv": ("swedish", "swe", "svenska"),
+    "fi": ("finnish", "fin", "suomi"),
+    "da": ("danish", "dan", "dansk"),
+    "nb": ("norwegian", "nor", "norsk"),
+    "cs": ("czech", "cze", "ces", "čeština"),
+    "hu": ("hungarian", "hun", "magyar"),
+    "ro": ("romanian", "rum", "ron", "română"),
+    "el": ("greek", "gre", "ell", "ελληνικά"),
+    "he": ("hebrew", "heb", "עברית"),
+    "uk": ("ukrainian", "ukr", "українська"),
+    "fa": ("persian", "per", "fas", "farsi"),
+    "ta": ("tamil", "tam"),
+    "te": ("telugu", "tel"),
+    "bn": ("bengali", "ben", "bangla"),
+    "fil": ("filipino", "tagalog", "tgl"),
+    "hr": ("croatian", "hrv", "hrvatski"),
+    "sr": ("serbian", "srp", "srpski"),
+    "bg": ("bulgarian", "bul"),
+    "sk": ("slovak", "slk", "slo"),
+    "ur": ("urdu", "urd"),
+}
+LANG_NAMES = {"en": "English", "ja": "Japanese", "es": "Spanish", "pt": "Portuguese", "fr": "French", "de": "German",
+              "it": "Italian", "ru": "Russian", "ar": "Arabic", "zh": "Chinese", "ko": "Korean", "hi": "Hindi",
+              "id": "Indonesian", "ms": "Malay", "th": "Thai", "vi": "Vietnamese", "tr": "Turkish", "pl": "Polish",
+              "nl": "Dutch", "sv": "Swedish", "fi": "Finnish", "da": "Danish", "nb": "Norwegian", "cs": "Czech",
+              "hu": "Hungarian", "ro": "Romanian", "el": "Greek", "he": "Hebrew", "uk": "Ukrainian", "fa": "Persian",
+              "ta": "Tamil", "te": "Telugu", "bn": "Bengali", "fil": "Filipino", "hr": "Croatian", "sr": "Serbian",
+              "bg": "Bulgarian", "sk": "Slovak", "ur": "Urdu"}
+# (words that come up all the time in each language's lines: what a file that says nothing is in)
+_COMMON = {"en": {"the", "you", "and", "is", "to", "what", "that", "it's", "i'm", "this", "don't", "are", "have"},
+           "es": {"que", "el", "los", "no", "es", "y", "lo", "por", "qué", "está", "pero", "eso", "una"},
+           "pt": {"não", "você", "é", "um", "uma", "está", "isso", "vou", "ele", "mas", "com", "os"},
+           "fr": {"le", "et", "est", "vous", "pas", "je", "c'est", "les", "tu", "une", "qui", "ça"},
+           "de": {"der", "die", "und", "ist", "nicht", "ich", "du", "das", "sie", "es", "ein", "was"},
+           "it": {"che", "non", "è", "il", "di", "per", "sono", "mi", "un", "ma", "cosa", "ho"},
+           "id": {"yang", "aku", "kau", "ini", "itu", "tidak", "apa", "dan", "kamu", "ada", "akan", "dia"}}
+_SCRIPTS = (("ja", r"[\u3040-\u30ff]"), ("ko", r"[\uac00-\ud7af]"), ("zh", r"[\u4e00-\u9fff]"), ("ar", r"[\u0600-\u06ff]"),
+            ("ru", r"[\u0400-\u04ff]"), ("th", r"[\u0e00-\u0e7f]"), ("he", r"[\u0590-\u05ff]"), ("hi", r"[\u0900-\u097f]"),
+            ("el", r"[\u0370-\u03ff]"))
+SUB_FILE = re.compile(r"\.(?:vtt|srt|ass|ssa)(?:[?#]|$)", re.I)
 
 
-def _sub_links(data, base):
-    """The subtitle files a JSON list of them names: [(english first, url)]."""
-    out = []
+def lang_of(text):
+    """The language code a subtitle's label, language field or file name says ("" if none):
+    "English - Forced" / "eng" / "en-US" / "1_en.srt" -> "en"."""
+    text = str(text or "").lower()
+    words = re.findall(r"[^\W\d_]+", text)
+    for code, names in SUB_LANGS.items():
+        if code in words or any(n in words or (len(n) > 4 and n in text) for n in names):
+            return code
+    return ""
 
-    def walk(x, label=""):
-        if isinstance(x, dict):
-            text = " ".join(str(x.get(k) or "") for k in ("lang", "language", "label", "name", "display", "srclang", "code"))
-            for v in x.values():
-                walk(v, text or label)
-        elif isinstance(x, list):
-            for v in x:
-                walk(v, label)
-        elif isinstance(x, str) and re.match(r"(?:https?:)?//|/", x) and (
-                re.search(r"\.(?:vtt|srt|ass)(?:[?#]|$)|format=(?:srt|vtt)|/subs?/|subtitle", x, re.I)):
-            out.append((_sub_language(x, label), safe_url(urllib.parse.urljoin(base, x))))
-    walk(data)
+
+def _url_lang(url):
+    """The language a subtitle file's own name (or a value of its address's query) says - in
+    words of their own ("1_en.srt", "/eng/", "?lang=fr"), not letters inside a hashed name
+    ("3fa91c", "kz81es0q")."""
+    parts = urllib.parse.urlsplit(url)
+    name = urllib.parse.unquote(parts.path.rsplit("/", 1)[-1])
+    name = re.sub(r"\.(?:vtt|srt|ass|ssa|jpe?g|png|txt)$", "", name, flags=re.I)
+    values = [v for _, v in urllib.parse.parse_qsl(parts.query)]
+    for text in [name, *values, urllib.parse.unquote(parts.path)]:
+        words = [w for w in re.split(r"[\s/._\-=&,+()\[\]]+", text.lower()) if w.isalpha()]
+        code = next((c for c, names in SUB_LANGS.items()
+                     if (len(c) == 2 and c in words and c not in ("it", "id", "de", "no")) or any(n in words for n in names)), "")
+        if code:
+            return code
+    return ""
+
+
+def _content_lang(text):
+    """The language a subtitle file's lines are in, by the script they're written in or their
+    most common words ("" when it can't be told)."""
+    sample = text[:30000]
+    for code, letters in _SCRIPTS:
+        if len(re.findall(letters, sample)) > 40:
+            return code
+    words = re.findall(r"[^\W\d_][\w']*", sample.lower())
+    counts = {c: sum(1 for w in words if w in common) for c, common in _COMMON.items()}
+    best = max(counts, key=counts.get)
+    return best if counts[best] >= 12 else ""
+
+
+def _unescape_page(text):
+    """A page's text with the JSON written inside its strings or attributes undone
+    (\\u0022, \\\\\\/, &quot; - once, twice), so the subtitle lists in it read as they are."""
+    if "&quot;" in text or "&#34;" in text:
+        text = html.unescape(text)
+    for _ in range(3):
+        before = text
+        text = re.sub(r"\\+u0022", '"', text)
+        text = re.sub(r"\\+/", "/", text)
+        text = re.sub(r'\\+"', '"', text)
+        if text == before:
+            break
+    return text
+
+
+def _field(chunk, *names):
+    for name in names:
+        m = re.search(rf"""(?<![\w-])["']?{name}["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|(true|false|\d+))""", chunk, re.I)
+        if m:
+            return next(g for g in m.groups() if g is not None)
+    return None
+
+
+def page_subtitles(text, base):
+    """The subtitle tracks a page names - in its player's settings or the data in it (each
+    {"file" / "src" / "url", "label" / "title", "language" / "srclang", "default", "forced"}, as
+    jwplayer, plyr and video.js take them; the JSON may be written inside a string or an attribute),
+    or its <track> tags: [{"url", "label", "lang", "forced", "default"}]."""
+    text = _unescape_page(text or "")
+    out, seen = [], set()
+    chunks = re.findall(r"<track\b[^>]*>", text, re.I) + re.findall(r"\{[^{}]{0,2000}\}", text)
+    for chunk in chunks:
+        url = _field(chunk, "file", "src", "url", "path", "link")
+        kind = (_field(chunk, "kind", "type") or "").lower()
+        if not url or not re.match(r"(?:https?:)?//|/[^/]", url):
+            continue
+        if re.search(r"thumbnail|sprite|chapters?\b|storyboard|preview|metadata", f"{kind} {url}", re.I):
+            continue                          # (the timeline's pictures, its chapters)
+        if not (SUB_FILE.search(url) or kind in ("captions", "subtitles", "subtitle", "text/vtt")):
+            continue
+        url = safe_url(urllib.parse.urljoin(base, url))
+        if url in seen:
+            continue
+        seen.add(url)
+        label = (_field(chunk, "label", "title", "name") or "").strip()[:60]
+        forced = str(_field(chunk, "forced") or "").lower()
+        out.append({"url": url, "label": label, "lang": lang_of(_field(chunk, "srclang", "language", "lang", "code")) or lang_of(label),
+                    "forced": forced in ("true", "yes", "1"),
+                    "default": str(_field(chunk, "default") or "").lower() in ("true", "yes", "1")})
     return out
 
 
-def pick_subtitle(urls, headers=None):
-    """The real subtitles among the caption files a player loaded ("" if none): not its
-    preview thumbnails ("sprite.jpg#xywh=0,0,160,90", which read as numbers and codes),
-    nor its chapters ("Chapter A", "Opening"); a JSON list of subtitles is followed to
-    its files. English first."""
-    good, tried = [], set()
-    todo = [(_sub_language(u), u) for u in urls[:10]]
-    while todo and len(tried) < 16:
-        lang, url = todo.pop(0)
-        if url in tried:
-            continue
-        tried.add(url)
-        url = safe_url(url)
-        req = urllib.request.Request(safe_url(url), headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
-                                                   **{k: v for k, v in (headers or {}).items() if k in ("Referer", "Origin") and v}})
-        try:
-            with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
-                head = r.read(400000).decode("utf-8", "replace")
-        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
-            continue                          # (one subtitle file that can't be read never stops the video)
-        if head.lstrip()[:1] in ("{", "["):
-            try:
-                todo += sorted(_sub_links(json.loads(head), url))          # (a list of subtitles: its files)
+def _sub_links(data, base):
+    """The subtitle files a JSON list of them names: [{"url", "label", "lang", "forced", "default"}]."""
+    out = []
+
+    def walk(x, info):
+        if isinstance(x, dict):
+            label = next((str(x[k]) for k in ("label", "name", "display", "title") if isinstance(x.get(k), str) and x[k]), "")
+            lang = next((str(x[k]) for k in ("lang", "language", "srclang", "code") if isinstance(x.get(k), str) and x[k]), "")
+            here = {"label": label or info["label"], "lang": lang_of(lang) or lang_of(label) or info["lang"],
+                    "forced": bool(x.get("forced") in (True, "yes", "true")) or info["forced"],
+                    "default": bool(x.get("default") in (True, "yes", "true")) or info["default"]}
+            for v in x.values():
+                walk(v, here)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, info)
+        elif isinstance(x, str) and re.match(r"(?:https?:)?//|/", x) and (
+                re.search(r"\.(?:vtt|srt|ass)(?:[?#]|$)|format=(?:srt|vtt)|/subs?/|subtitle", x, re.I)):
+            out.append(dict(info, url=safe_url(urllib.parse.urljoin(base, x))))
+    walk(data, {"label": "", "lang": "", "forced": False, "default": False})
+    return out
+
+
+def _read_sub(url, headers):
+    """A caption file's start ("" when it can't be read)."""
+    req = urllib.request.Request(safe_url(url), headers={"User-Agent": (headers or {}).get("User-Agent") or UA,
+                                               **{k: v for k, v in (headers or {}).items() if k in ("Referer", "Origin") and v}})
+    try:
+        with urllib.request.urlopen(req, timeout=8, context=metadata.ssl_context()) as r:
+            return r.read(400000).decode("utf-8-sig", "replace")
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+        return ""                             # (one subtitle file that can't be read never stops the video)
+
+
+def _sub_lines(full):
+    """(format, the lines said) of real subtitles; None for preview thumbnails ("sprite.jpg#xywh=0,0,160,90",
+    which read as numbers and codes), chapters ("Chapter A", "Opening") or anything else."""
+    head = full[:20000]
+    if re.search(r"#xywh=|\.(?:jpe?g|png|webp)\b", head, re.I):
+        return None                           # (preview thumbnails)
+    if re.search(r"^\[Script Info\]|^Dialogue:", head, re.M):
+        # ASS / SSA (the anime kind): its lines are "Dialogue: ...,the words" (after its styles
+        # and fonts, so the whole file is looked at).
+        lines = [re.sub(r"\{[^}]*\}|\\[Nn]", " ", x.split(",", 9)[-1]).strip()
+                 for x in re.findall(r"^Dialogue:.*$", full, re.M)]
+        cues, kind = lines, "ass"
+    else:
+        cues = re.findall(r"\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3}\s*-->", full)
+        lines = [x.strip() for x in re.sub(r"^.*-->.*$|^WEBVTT.*$|^X-TIMESTAMP.*$|^\d+$|^NOTE.*$", "", full, flags=re.M).splitlines()
+                 if x.strip()]
+        kind = "vtt" if full.lstrip().startswith("WEBVTT") else "srt"
+    lines = [x for x in lines if x]
+    if not cues or not re.search(r"[^\W\d_]{2}", " ".join(lines[:400])):
+        return None
+    if len(cues) <= 15 and all(len(x.split()) <= 3 for x in lines):
+        return None                           # (chapters - "Prologue", "Opening", "Part A" - not subtitles)
+    return kind, lines
+
+
+def subtitle_tracks(urls, headers=None, listed=()):
+    """Every real subtitle track among the caption files a player loaded (`urls`) and those its
+    page names (`listed`, page_subtitles): each read, to tell subtitles from thumbnails and
+    chapters, and to say what language it's in when nothing else does; a JSON list of subtitles
+    is followed to its files. [{"url", "label", "lang", "forced" (signs and songs only), "dub"
+    (an English dub's captions), "format", "lines"}]: the whole English subtitles first, then
+    English captions for a dub, English signs only, then every other language."""
+    good, tried, todo = [], set(), []
+
+    def add(found):
+        # (a file named as subtitles in a language - "English - Forced", a .srt - is taken at its
+        # word: a site may list sixty; those not said enough of are read)
+        for x in found:
+            if x["url"] in tried or any(x["url"] == y["url"] for y in todo):
                 continue
-            except ValueError:
-                pass                          # (not JSON: "[Script Info]" starts an ASS file)
-        full, head = head, head[:20000]
-        if re.search(r"#xywh=|\.(?:jpe?g|png|webp)\b", head, re.I):
-            continue                          # (preview thumbnails)
-        if re.search(r"^\[Script Info\]|^Dialogue:", head, re.M):
-            # ASS / SSA (the anime kind): its lines are "Dialogue: ...,the words" (after its styles
-            # and fonts, so the whole file is looked at).
-            lines = [re.sub(r"\{[^}]*\}|\\[Nn]", " ", x.split(",", 9)[-1]).strip()
-                     for x in re.findall(r"^Dialogue:.*$", full, re.M)][:400]
-            cues = lines
-        else:
-            cues = re.findall(r"\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3}\s*-->", head)
-            lines = [x.strip() for x in re.sub(r"^.*-->.*$|^WEBVTT.*$|^X-TIMESTAMP.*$|^\d+$|^NOTE.*$", "", head, flags=re.M).splitlines()
-                     if x.strip()]
-        lines = [x for x in lines if x]
-        words = re.findall(r"[^\W\d_]{2,}", " ".join(lines))
-        if not cues or not words:
-            continue
-        if len(cues) <= 15 and all(len(x.split()) <= 3 for x in lines):
-            continue                          # (chapters - "Prologue", "Opening", "Part A" - not subtitles)
-        good.append((min(lang, _sub_language(url)), url))
-    return min(good)[1] if good else ""
+            if not (x.get("lang") and x.get("label") and SUB_FILE.search(x["url"])):
+                todo.append(x)
+                continue
+            tried.add(x["url"])
+            said = f"{x['label']} {urllib.parse.unquote(x['url'].rsplit('/', 1)[-1])}".lower()
+            good.append({"url": x["url"], "label": x["label"], "lang": x["lang"], "lines": 0,
+                         "format": SUB_FILE.search(x["url"]).group(0).strip("?#").lstrip(".").lower().replace("ssa", "ass"),
+                         "forced": bool(x.get("forced")) or bool(re.search(r"forced|signs|songs", said)),
+                         "dub": bool(re.search(r"dub|\bcc\b|\bsdh\b|closed caption", said)), "default": bool(x.get("default"))})
+    add([dict(x) for x in listed] + [{"url": u} for u in urls])
+    while todo and len(tried) < 40:
+        batch = []
+        while todo and len(batch) < 12:
+            x = todo.pop(0)
+            if x["url"] not in tried:
+                tried.add(x["url"])
+                batch.append(x)
+        if not batch:
+            break
+        with concurrent.futures.ThreadPoolExecutor(min(6, len(batch))) as pool:
+            texts = list(pool.map(lambda x: _read_sub(x["url"], headers), batch))
+        for x, text in zip(batch, texts):
+            if not text:
+                continue
+            if text.lstrip()[:1] in ("{", "["):
+                try:
+                    add([dict(y, label=y["label"] or x.get("label", ""), lang=y["lang"] or x.get("lang", ""))
+                         for y in _sub_links(json.loads(text), x["url"])])          # (a list of subtitles: its files)
+                    continue
+                except ValueError:
+                    pass                      # (not JSON: "[Script Info]" starts an ASS file)
+            got = _sub_lines(text)
+            if not got:
+                continue
+            label = x.get("label") or ""
+            lang = x.get("lang") or lang_of(label) or _content_lang(" ".join(got[1][:600])) or _url_lang(x["url"])
+            said = f"{label} {urllib.parse.unquote(x['url'].rsplit('/', 1)[-1])}".lower()
+            good.append({"url": x["url"], "label": label, "lang": lang, "format": got[0], "lines": len(got[1]),
+                         "forced": bool(x.get("forced")) or bool(re.search(r"forced|signs|songs", said)),
+                         "dub": bool(re.search(r"dub|\bcc\b|\bsdh\b|closed caption", said)),
+                         "default": bool(x.get("default"))})
+    # An English file far shorter than another English one: the signs and songs only.
+    full = max((x["lines"] for x in good if x["lang"] == "en" and not x["forced"]), default=0)
+    for x in good:
+        if x["lang"] == "en" and not x["forced"] and not x["dub"] and 0 < x["lines"] < 150 and x["lines"] * 3 < full:
+            x["forced"] = True
+    for x in good:
+        name = x["label"] or LANG_NAMES.get(x["lang"]) or "Subtitles"
+        if x["forced"] and not re.search(r"forced|signs|songs", name, re.I):
+            name += " (signs)"
+        if x["dub"] and not re.search(r"dub|\bcc\b|sdh|caption", name, re.I):
+            name += " (dub)"
+        x["label"] = name
+    rank = {True: 0, False: 1}
+    good.sort(key=lambda x: (0 if x["lang"] == "en" and not x["forced"] and not x["dub"] else
+                             1 if x["lang"] == "en" and not x["forced"] else 2 if x["lang"] == "en" else
+                             3 if x["lang"] else 4, rank[x["default"]], x["label"].lower()))
+    return good[:80]
+
+
+def pick_subtitle(urls, headers=None):
+    """The subtitles to show among the caption files a player loaded ("" if none): the whole
+    English ones first (subtitle_tracks)."""
+    tracks = subtitle_tracks(urls[:10], headers)
+    return tracks[0]["url"] if tracks else ""
+
+
+def site_subtitles(urls, headers=None, pages=(), listed=()):
+    """Every subtitle track of an episode (subtitle_tracks): those its player loaded, those it was
+    told of (`listed`: [{"url", "label", "lang", "forced", "default"}]) and those its pages - the
+    episode's, the player's - name (read again here, quickly)."""
+    listed = [dict(x, lang=lang_of(x.get("lang")) or lang_of(x.get("label"))) for x in listed if x.get("url")]
+    seen = {x["url"] for x in listed}
+
+    def read(page):
+        try:
+            return fetch(page, referer=(headers or {}).get("Referer") or "", timeout=6)
+        except Exception:  # noqa: BLE001 - (only a look for more subtitles: never what stops the video)
+            return None
+    pages = list(dict.fromkeys(p for p in pages if p))
+    with concurrent.futures.ThreadPoolExecutor(max(1, len(pages))) as pool:
+        texts = [t for t in pool.map(read, pages) if t]
+    for text, final in texts:
+        for x in page_subtitles(text, final):
+            if x["url"] not in seen:
+                seen.add(x["url"])
+                listed.append(x)
+    return subtitle_tracks(list(urls)[:12], headers, listed)
 
 
 BOM = bytes([0xEF, 0xBB, 0xBF])
@@ -2517,7 +2783,7 @@ class Scraper:
             page_url, _, press = page_url.partition(CLICK_MARK)
             press = urllib.parse.unquote(press)
         out = {"page": page_url, "entry": entry, "others": others, "site": site["name"], "url": "", "referer": "",
-               "headers": {}, "subtitle": "", "streams": [], "stream": None, "qualities": [], "quality": ""}
+               "headers": {}, "subtitle": "", "subtitles": [], "streams": [], "stream": None, "qualities": [], "quality": ""}
         self._note(f"The episode's page: {page_url}")
         if site.get("open") == "browser":
             return out
@@ -2536,7 +2802,7 @@ class Scraper:
         cache_key = f"{page_key}|{prefs.get('kind', '')}|{prefs.get('label', '')}"
         hit = (mem.get("videos") or {}).get(cache_key)
         if hit and not skip and not fresh and time.time() - hit.get("at", 0) < VIDEO_FOR:
-            out.update({k: hit.get(k) for k in ("url", "referer", "headers", "subtitle", "streams", "stream", "qualities")})
+            out.update({k: hit.get(k) for k in ("url", "referer", "headers", "subtitle", "subtitles", "streams", "stream", "qualities")})
             out["cached"] = True
             self._note(f"Used the video found a few minutes ago: {hit['url']}")
             return self._with_quality(out, prefs)
@@ -2579,7 +2845,8 @@ class Scraper:
             auto_missed = not got and switch is None and auto_url == page_url
             listed = [] if got else getattr(self._here, "missed_servers", [])
             if got:
-                out.update(url=got["url"], referer=got["referer"], headers=got.get("headers") or {}, subtitle=got.get("subtitle") or "")
+                out.update(url=got["url"], referer=got["referer"], headers=got.get("headers") or {}, subtitle=got.get("subtitle") or "",
+                           subtitles=got.get("subtitles") or [])
                 if auto_url != page_url:
                     out["stream"] = {"id": f"lang:{want}", "label": want.title(), "kind": want}
                 if got.get("servers"):
@@ -2589,7 +2856,7 @@ class Scraper:
                                     for q in qualities(got["url"], out["headers"] | {"Referer": out["referer"]})]
                 videos = {k: v for k, v in (mem.get("videos") or {}).items()
                           if time.time() - v.get("at", 0) < VIDEO_FOR}
-                videos[cache_key] = {k: out[k] for k in ("url", "referer", "headers", "subtitle", "streams", "stream", "qualities")} | {"at": time.time()}
+                videos[cache_key] = {k: out[k] for k in ("url", "referer", "headers", "subtitle", "subtitles", "streams", "stream", "qualities")} | {"at": time.time()}
                 self._remember(item["id"], site, videos=videos)
                 return self._with_quality(out, prefs)
 
@@ -2643,13 +2910,13 @@ class Scraper:
                 self._note(f"  {errors[-1]}")
                 continue
             out.update(url=got["url"], referer=got["referer"], headers=got.get("headers") or {}, subtitle=got.get("subtitle") or "",
-                       stream=({k: x[k] for k in ("id", "label", "kind")} if x else None))
+                       subtitles=got.get("subtitles") or [], stream=({k: x[k] for k in ("id", "label", "kind")} if x else None))
             if got.get("servers") and not out["streams"]:
                 out["streams"], playing = clicked_streams(got["servers"])
                 out["stream"] = out["stream"] or playing
             out["qualities"] = [{k: q[k] for k in ("label", "height", "url")} for q in qualities(got["url"], out["headers"] | {"Referer": out["referer"]})]
             videos = {k: v for k, v in (mem.get("videos") or {}).items() if time.time() - v.get("at", 0) < VIDEO_FOR}
-            videos[cache_key] = {k: out[k] for k in ("url", "referer", "headers", "subtitle", "streams", "stream", "qualities")} | {"at": time.time()}
+            videos[cache_key] = {k: out[k] for k in ("url", "referer", "headers", "subtitle", "subtitles", "streams", "stream", "qualities")} | {"at": time.time()}
             self._remember(item["id"], site, videos=videos)
             return self._with_quality(out, prefs)
 
@@ -2852,20 +3119,25 @@ class Scraper:
             if video in (getattr(self._here, "taken", None) or ()):
                 self._note("  ...but that's the video another episode played: not this one")
                 return None
+        # Its subtitles: every language its player loaded or was told of, and those its pages name.
+        subs = site_subtitles(caught.get("subs") or [], dict(headers, Referer=headers.get("Referer") or page_url),
+                              pages=(page_url, headers.get("Referer")), listed=caught.get("listed") or ())
+        self._note(f"  ...its subtitles: {', '.join(x['label'] for x in subs) or 'none'}")
         return {"url": video, "referer": headers.get("Referer") or page_url,
                 "headers": {k: v for k, v in headers.items() if k != "Referer"},
-                "subtitle": pick_subtitle(caught.get("subs") or [], headers), "servers": caught.get("servers") or []}
+                "subtitle": subs[0]["url"] if subs else "", "subtitles": subs, "servers": caught.get("servers") or []}
 
     def episode_servers(self, found):
         """Every server of the episode's page found ([{"id", "label", "kind"}]): those found with it,
         else the ones its player lists (the page opened again, hidden)."""
         have = found.get("streams") or []
-        if have and {x["kind"] for x in have} != {"sub"}:
-            return have
+        kinds = {x["kind"] for x in have if x["kind"]}
+        if have and len(kinds) != 1:
+            return have                  # (sub and dub both seen already, or no languages at all - one that says neither doesn't count)
         if not found.get("page") or not self.servers or not self.can_catch():
             return have
-        # (only sub servers seen while it played: its page listed again - a Sub / Dub menu's other
-        # language has its own servers)
+        # (only one language's servers seen while it played - sub, or dub when the dub was chosen:
+        # its page listed again - a Sub / Dub menu's other language has its own servers)
         listed, _ = clicked_streams(self.servers(found["page"]) or [])
         seen = {(x["label"].lower(), x["kind"]) for x in have}
         return have + [x for x in listed if (x["label"].lower(), x["kind"]) not in seen]

@@ -508,3 +508,64 @@ mp.register_script_message("shortcuts", function()
     end
     mp.osd_message(table.concat(lines, "\n"), 20)
 end)
+
+-- A site's subtitles follow its sound's language: English sound gets the English signs only
+-- (or none), any other the whole English subtitles. Only for videos from a site (the app adds
+-- their subtitles - "English", "English - Forced", "English (signs)"... - as each opens), only
+-- when the sound says what language it is, and only as the sound changes or the subtitles come:
+-- subtitles you choose yourself stay.
+local function signs_only(title)
+    local t = (title or ""):lower()
+    return t:find("forced") or t:find("signs") or t:find("songs")
+end
+
+local function is_english(lang)
+    local l = (lang or ""):lower()
+    return l == "en" or l == "eng" or l:sub(1, 3) == "en-"
+end
+
+local function follow_sound()
+    local lang = mp.get_property("current-tracks/audio/lang", "")
+    if lang == "" or mp.get_property("user-data/watchlist/source", "") == "" then return end
+    local whole, signs = nil, nil
+    for _, t in ipairs(mp.get_property_native("track-list") or {}) do
+        if t.type == "sub" and t.external then
+            local title = t.title or ""
+            if title == "Your subtitles" or title == "AI subtitles" or title == "Found subtitles" then
+                return                                   -- (subtitles of your own: left as you have them)
+            end
+            if is_english(t.lang) and signs_only(title) then
+                signs = signs or t.id
+            elseif is_english(t.lang) and not title:lower():find("dub") then
+                whole = whole or t.id
+            end
+        end
+    end
+    local want = is_english(lang) and (signs or "no") or whole
+    if want and tostring(want) ~= mp.get_property("sid", "") then
+        mp.set_property("sid", tostring(want))
+    end
+end
+
+local last_sound, subs_seen = nil, 0
+mp.register_event("start-file", function()
+    -- (the app says again where each episode from a site is from as it opens: one of your own
+    -- files after it isn't from a site)
+    mp.set_property("user-data/watchlist/source", "")
+end)
+mp.register_event("file-loaded", function() last_sound, subs_seen = nil, 0 end)
+mp.observe_property("current-tracks/audio/lang", "string", function(_, lang)
+    if not lang or lang == "" or lang == last_sound then return end
+    last_sound = lang
+    follow_sound()
+end)
+mp.observe_property("track-list/count", "number", function()
+    local n = 0
+    for _, t in ipairs(mp.get_property_native("track-list") or {}) do
+        if t.type == "sub" and t.external then n = n + 1 end
+    end
+    if n > subs_seen then
+        subs_seen = n
+        follow_sound()
+    end
+end)

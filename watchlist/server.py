@@ -6,6 +6,7 @@ other websites can't add to requests they send to your PC.
 """
 
 import hashlib
+import http.client
 import http.cookies
 import json
 import mimetypes
@@ -156,6 +157,7 @@ class App:
         # site, another source on the next site): the next episodes are found there too.
         self._online_site_now = {}
         self._aisubs = {}                   # (item, episode) -> aisubs.Job making its subtitles
+        self._sub_links = {}                # a site's subtitle files, through the app for the player (_sub_link)
         # Each title's choice of server or version, counted: a video found under an older choice
         # (the next episode, found ahead meanwhile) isn't kept.
         self._online_gen = {}
@@ -342,12 +344,17 @@ class App:
             t = self.tickets.make(device, {"kind": "remote", "url": found["url"], "headers": headers, "urls": [], "hls": hls})
             out.update(src=f"/stream/web/{t}/media.{'m3u8' if hls else 'mp4'}", type="hls" if hls else "mp4", how="site",
                        site=site["name"], track=(found.get("stream") or {}).get("kind") or entry.get("track") or "sub")
-            if found.get("subtitle"):
-                out["subs"].append(self._phone_sub(device, {"url": found["subtitle"], "headers": headers},
-                                                 "English", "en"))
+            tracks = found.get("subtitles") or (
+                [{"url": found["subtitle"], "label": "English", "lang": "en"}] if found.get("subtitle") else [])
+            if (found.get("stream") or {}).get("kind") == "dub":
+                # (a dub: its English signs first, the rest after - the player shows the first)
+                tracks = sorted(tracks, key=lambda t: not (t.get("lang") == "en" and t.get("forced")))
+            for t in tracks:
+                out["subs"].append(self._phone_sub(device, {"url": t["url"], "headers": headers},
+                                                 t.get("label") or "Subtitles", t.get("lang") or ""))
             saved = self.saved_sub(item, key)
             if saved and os.path.isfile(saved):
-                out["subs"].append(self._phone_sub(device, {"path": saved}, Path(saved).stem[:40]))
+                out["subs"].insert(0, dict(self._phone_sub(device, {"path": saved}, Path(saved).stem[:40]), mine=True))
             return out
         source = entry["path"]
         local = os.path.isfile(source)
@@ -2502,9 +2509,6 @@ class App:
             self._online_found.pop(k, None)
         self._online_found[(item["id"], key)] = (where, new, time.time())
         fresh = dict(self._web_entry(item, where, key, new), online=True)
-        sub = self.saved_sub(item, key)
-        if sub:
-            fresh["sub"] = sub
         session.swap(fresh, session.position() or 0)
         name = picked.get("label") or where["name"]
         session.send(["show-text", f"Playing from {name}" + ("" if where is site else f" on {where['name']}"), 3000])
@@ -2662,6 +2666,10 @@ class App:
                 session.send(["show-text", f"{x['label']} didn't give a video", 4000])
                 return
             x.update(state="ok", found=new, url=new["url"], at=time.time())
+        if self._another_episodes(item["id"], key, new):
+            x["state"] = "failed"
+            session.send(["show-text", f"{x['label']} gave another episode's video - not played", 5000])
+            return
         if not server_id.startswith("site|"):
             self.scraper.prefer_stream(site, x["label"], x["kind"])      # (it plays: tried first from now on)
             new = dict(new, stream={"id": x["id"], "label": x["label"], "kind": x["kind"]},
@@ -2675,9 +2683,6 @@ class App:
         self._online_found[slot] = (site, new, time.time())
         state["site"], state["page"] = site["id"], new.get("page")
         fresh = dict(self._web_entry(item, site, key, new), online=True)
-        sub = self.saved_sub(item, key)
-        if sub:
-            fresh["sub"] = sub
         session.swap(fresh, session.position() or 0)
         session.send(["show-text", f"Playing from {x['label']}" + ("" if x["site"] in x["label"] else f" on {x['site']}"), 3000])
         if item["format"] == "series":
@@ -2832,15 +2837,15 @@ class App:
         if not new.get("url") or new["url"] == found["url"] or ((new.get("stream") or {}).get("kind") or "sub") != other:
             session.send(["show-text", f"This site has no {other} of it", 4000])
             return
+        if self._another_episodes(session.item_id, entry["key"], new):
+            session.send(["show-text", f"The site gave another episode's video for the {other} - not played", 5000])
+            return
         self._online_track[session.item_id] = other
         self._online_choice(session.item_id, site)
         for k in [k for k in self._online_found if k[0] == session.item_id and k[1] != entry["key"]]:
             self._online_found.pop(k, None)           # (the episodes found ahead were the other version)
         self._online_found[(session.item_id, entry["key"])] = (site, new, time.time())
         fresh = dict(self._web_entry(item, site, entry["key"], new), online=True)
-        sub = self.saved_sub(item, entry["key"])
-        if sub:
-            fresh["sub"] = sub
         session.swap(fresh, session.position() or 0)
         session.send(["show-text", f"Now playing the {other}", 2500])
 
@@ -2882,6 +2887,13 @@ class App:
         return order + [x for x in sites if x not in order]
 
     FOUND_FOR = 15 * 60       # a video found on a site still plays this long after (its address expires)
+
+    def _another_episodes(self, item_id, key, found):
+        """Whether a video found for an episode is one another episode of the title plays (a site whose
+        page moved on to another episode as its server or version was chosen): never played as this one."""
+        url = (found or {}).get("url")
+        return bool(url) and any(k[0] == item_id and k[1] != key and v[1].get("url") == url
+                                 for k, v in list(self._online_found.items()))
 
     def _online_choice(self, item_id, site):
         """A server, site or version chosen for a title while it plays: its next episodes come from
@@ -3275,11 +3287,9 @@ class App:
         if mine and not entry.get("added_mine"):
             entry["added_mine"] = True
             session.add_tracks(entry, [{"kind": "sub", "url": mine, "title": "Your subtitles", "lang": "en", "select": True}])
-        if entry.get("online") and found.get("subtitle") and not entry.get("added_sub"):
+        if entry.get("online") and (found.get("subtitles") or found.get("subtitle")) and not entry.get("added_sub"):
             entry["added_sub"] = True
-            dub = (found.get("stream") or {}).get("kind") == "dub"
-            session.add_tracks(entry, [{"kind": "sub", "url": found["subtitle"], "title": "English (subtitles)",
-                                        "lang": "en", "select": not dub}])
+            session.add_tracks(entry, self._site_subs(found, choose=not mine))
         # (The other version isn't laid over it as a second audio track - a dub's timing differs
         # from the sub's; the player's Sub / Dub button switches to it from where you are.)
 
@@ -3537,7 +3547,7 @@ class App:
             if not t or not t.startswith(("http://", "https://")):
                 continue
             parts = urllib.parse.urlsplit(t)
-            rank = 2 if "{" in parts.query or re.search(r"/(?:search|find|browse|filter|results?)", parts.path, re.I) else 1
+            rank = 2 if "{" in parts.query or re.search(r"/(?:search|find|browse|filter|results?)\b", parts.path, re.I) else 1
             if rank >= best:
                 found, best = t, rank
             if rank == 2 and best == 2:
@@ -3580,9 +3590,10 @@ class App:
         page = entry["page"] or job.page
         found = {"url": entry["url"], "referer": headers.get("Referer") or page,
                  "headers": {k: v for k, v in headers.items() if k in ("Origin", "User-Agent", "Cookie")},
-                 "subtitle": scrape.pick_subtitle(list(job.subs), headers) if track != "dub" else None,
+                 "subtitles": scrape.site_subtitles(list(job.subs), headers, pages=(page,)),
                  "page": page, "entry": {"url": page, "name": item["title"]},
                  "stream": {"kind": track or "sub", "label": entry["frame"] or entry["host"]}}
+        found["subtitle"] = found["subtitles"][0]["url"] if found["subtitles"] else ""
         # The site it's on: one of yours (the page's server), else the one it was opened on.
         sites = self._video_sites(item)
         host = urllib.parse.urlsplit(page).netloc.lower().removeprefix("www.")
@@ -3631,12 +3642,33 @@ class App:
         self.scraper.unlink(item["id"], site)
         return {"ok": True}
 
-    @staticmethod
-    def _web_sub(found):
-        """The subtitles the site's player loaded: shown with the sub track, not over a dub."""
-        if (found.get("stream") or {}).get("kind") == "dub":
-            return None
-        return found.get("subtitle") or None
+    def _site_subs(self, found, choose=True):
+        """A site's subtitle tracks for the player, every language it has, through the app
+        (_sub_link): [{"kind": "sub", "url", "title", "lang", "select"}]. Chosen: the whole
+        English subtitles for the sub; for a dub, its English signs only (or none). (The player
+        changes them when you change the sound's language: watchlist_skip.lua.)"""
+        tracks = found.get("subtitles") or (
+            [{"url": found["subtitle"], "label": "English", "lang": "en"}] if found.get("subtitle") else [])
+        if not choose:
+            pick = None
+        elif (found.get("stream") or {}).get("kind") == "dub":
+            pick = next((t for t in tracks if t.get("lang") == "en" and t.get("forced")), None)
+        else:
+            pick = next((t for t in tracks if t.get("lang") in ("en", "")), None)
+        headers = hlsfix._headers(found.get("headers"), found.get("referer"))
+        return [{"kind": "sub", "url": self._sub_link(t["url"], headers, t.get("format") or ""), "title": t.get("label") or "Subtitles",
+                 "lang": t.get("lang") or "", "select": t is pick} for t in tracks]
+
+    def _sub_link(self, url, headers, kind=""):
+        """The address this computer's player gets for a site's subtitle file: the app's own,
+        which asks the site for it as its player did (its Referer) and ends as what it is (a
+        site may serve its subtitles as "....jpeg")."""
+        sid = hashlib.sha1(f"{url}|{headers.get('Referer', '')}".encode("utf-8")).hexdigest()[:20]
+        with self._lock:
+            for old in [k for k, v in self._sub_links.items() if time.time() - v["at"] > 12 * 3600]:
+                del self._sub_links[old]
+            self._sub_links[sid] = {"url": url, "headers": dict(headers), "at": time.time()}
+        return f"http://127.0.0.1:{self.torrents.port}/subs/{self.torrents.token}/{sid}.{kind if kind in ('srt', 'ass') else 'vtt'}"
 
     @staticmethod
     def _web_started(session, wait=12):
@@ -3654,12 +3686,15 @@ class App:
     def _web_entry(self, item, site, key, found):
         """A player entry for a video found on a site: its subtitles, and what a watch party needs."""
         track = (found.get("stream") or {}).get("kind") or "sub"
-        entry = {"path": self._playable(found), "sub": self._web_sub(found), "key": key, "web": True, "referer": found["referer"],
-                 "headers": found.get("headers") or {}, "track": track,
+        mine = self.saved_sub(item, key)
+        entry = {"path": self._playable(found), "sub": None, "key": key, "web": True, "referer": found["referer"],
+                 "headers": found.get("headers") or {}, "track": track, "added_sub": True, "added_mine": True,
                  "label": self._label(item, key), "name": f"{item['title']} ({site['name']})"}
-        if found.get("subtitle") and not entry["sub"]:
-            # A dub's subtitles: there to switch on, not shown over it.
-            entry["extras"] = [{"kind": "sub", "url": found["subtitle"], "title": "English (subtitles)", "lang": "en"}]
+        # (yours, when you've saved some, chosen over the site's)
+        subs = [{"kind": "sub", "url": mine, "title": "Your subtitles", "lang": "en", "select": True}] if mine else []
+        subs += self._site_subs(found, choose=not mine)
+        if subs:
+            entry["extras"] = subs
         shared = {k: v for k, v in (found.get("headers") or {}).items() if k in ("Origin", "User-Agent")}  # (never cookies)
         entry["party"] = dict(self._party_meta(item, key), url=found["url"], referer=found["referer"],
                               headers=shared, sub=found.get("subtitle") or "", track=track,
@@ -4085,7 +4120,7 @@ class Handler(BaseHTTPRequestHandler):
     def _remote_gate(self, method, url):
         """A request over the network: True when it was answered here (not let in)."""
         path = url.path
-        if path.startswith(("/online/", "/hls/")) or (path.startswith("/stream/") and not path.startswith("/stream/web/")):
+        if path.startswith(("/online/", "/hls/", "/subs/")) or (path.startswith("/stream/") and not path.startswith("/stream/web/")):
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")         # (this computer's own player's)
             return True
         if path.startswith("/stream/web/"):
@@ -4170,6 +4205,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._online(url)
         if url.path.startswith("/hls/") and method in ("GET", "HEAD"):
             return self._hls(url)
+        if url.path.startswith("/subs/") and method in ("GET", "HEAD"):
+            return self._site_sub(url)
         if not url.path.startswith("/api/"):
             if method in ("GET", "HEAD"):
                 return self._static(url.path)
@@ -4253,6 +4290,20 @@ class Handler(BaseHTTPRequestHandler):
             pass                                  # (the player let go of it)
         finally:
             got[1].close()
+
+    def _site_sub(self, url):
+        """A site's subtitle file for this computer's player (App._sub_link)."""
+        m = re.fullmatch(r"/subs/([\w-]+)/(\w+)\.(vtt|srt|ass)", url.path)
+        link = self.app._sub_links.get(m.group(2)) if m and m.group(1) == self.app.torrents.token else None
+        if not link:
+            return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+        try:
+            with webplay.open_remote(link["url"], link["headers"], timeout=20) as r:
+                data = r.read(16 << 20)
+        except (OSError, ValueError, http.client.HTTPException) as e:
+            return self._send(HTTPStatus.BAD_GATEWAY, f"the subtitles couldn't be read ({e})".encode("utf-8", "replace"), "text/plain")
+        kind = {"vtt": "text/vtt", "srt": "application/x-subrip", "ass": "text/x-ssa"}[m.group(3)]
+        return self._send(HTTPStatus.OK, data, f"{kind}; charset=utf-8")
 
     STREAM_TYPES = {".mkv": "video/x-matroska", ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
                     ".avi": "video/x-msvideo", ".mov": "video/quicktime", ".ts": "video/mp2t"}

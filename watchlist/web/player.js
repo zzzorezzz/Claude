@@ -228,6 +228,8 @@ async function wpAttach(media, at, paused) {
     wpLoading(false);
     wpSubsLoad();
     wpAudioPick();
+    // (once for each episode: a new quality of it keeps the subtitles you chose)
+    if (s.subsFollowed !== media.key) { s.subsFollowed = media.key; wpSubsForSound(); }
     wpMediaSession();
     if (!paused) wpPlay();                // (no tap yet on this page: muted, with "Tap for sound")
   };
@@ -440,6 +442,34 @@ function wpAudioSet(i) {
   const v = wpV();
   if (WP.hls) WP.hls.audioTrack = i;
   else if (v.audioTracks) for (let k = 0; k < v.audioTracks.length; k += 1) v.audioTracks[k].enabled = k === i;
+  wpSubsForSound(i);
+}
+
+// A site's subtitles follow its sound's language: English sound gets the English signs only
+// (or none), any other the whole English subtitles (when the sound says what language it is).
+function wpSubsForSound(i) {
+  const s = WP.s;
+  const subs = s?.media?.subs || [];
+  if (!s || !s.media || s.media.how !== 'site' || !subs.length || subs.some((x) => x.mine)) return;
+  const v = wpV();
+  let lang = '';
+  if (WP.hls) lang = (WP.hls.audioTracks[i ?? WP.hls.audioTrack] || {}).lang || '';
+  else if (v.audioTracks && v.audioTracks.length) {
+    const at = v.audioTracks;
+    const k = i ?? [...Array(at.length).keys()].find((n) => at[n].enabled);
+    lang = (at[k] || {}).language || '';
+  }
+  if (!lang) return;
+  const en = (x) => /^en(g|-|$)/i.test(x || '');
+  const signs = (x) => /forced|signs|songs/i.test(x.label || '');
+  const pick = en(lang) ? subs.findIndex((x) => en(x.lang) && signs(x))
+    : subs.findIndex((x) => en(x.lang) && !signs(x) && !/dub/i.test(x.label || ''));
+  const on = wpPref(`wp-subs:${s.launch.item_id}`, 'on') !== 'off';
+  if (pick < 0 && !en(lang)) return;
+  const was = [s.subOn, s.subPick];
+  if (pick < 0) s.subOn = false;               // (English sound and no signs-only subtitles: none)
+  else { s.subPick = pick; s.subOn = on; }
+  if (was[0] !== s.subOn || was[1] !== s.subPick) wpSubsLoad();
 }
 
 // ---- the screen

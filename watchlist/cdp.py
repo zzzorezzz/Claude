@@ -598,7 +598,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
             seen[u] = headers
         if u.startswith(webtools.CLICKED):
             opts["clicked_at"] = time.time()
-        elif webtools.servers_signal(u, opts):
+        elif webtools.servers_signal(u, opts) or webtools.subs_signal(u, opts):
             pass
         elif u.startswith(webtools.NO_CLICK):
             opts["no_click"] = True
@@ -616,7 +616,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
             opts["subs"].append(u)
 
     from . import droidweb
-    scripts = [webtools.AUTOPLAY_JS, webtools.SERVERS_JS, droidweb.MANIFEST_JS]
+    scripts = [webtools.SUBS_JS, webtools.AUTOPLAY_JS, webtools.SERVERS_JS, droidweb.MANIFEST_JS]
     if click:
         scripts.append(webtools.CLICK_JS.replace("__WANT__", json.dumps(click)))
     if webtools.ADBLOCK:
@@ -656,6 +656,7 @@ def catch_video(url, timeout=30, click=None, open_page=None):
             best = min(after, key=lambda f: (webtools.learned_rank(url, f[0], f[1]),
                                              0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1, after.index(f)))
             return {"url": best[0], "headers": best[1], "subs": list(opts["subs"]), "servers": webtools.servers_of(opts, url),
+                    "listed": list(opts.get("listed") or []),
                     "videos": [f[0] for f in found]}
         except (CDPError, OSError):
             return None

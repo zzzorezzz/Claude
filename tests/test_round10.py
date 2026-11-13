@@ -232,9 +232,12 @@ class PageTest(unittest.TestCase):
         scraper.catch = mock.Mock(return_value={"url": "https://cdn.test/master.m3u8", "headers": {},
                                                 "subs": ["https://cdn.test/subs/en.vtt"]})
         [site] = scrape.clean([{"name": "RA", "url": "https://site.test/search?q={title}", "ra": True}])
-        with mock.patch.object(scraper, "episode_page", return_value=("https://site.test/watch/ep-1", {"url": "https://site.test/title"}, [])),                 mock.patch.object(scrape, "pick_subtitle", side_effect=lambda urls, headers=None: urls[0]) as pick:
+        tracks = lambda urls, headers=None, pages=(), listed=(): [{"url": urls[0], "label": "English", "lang": "en", "forced": False,  # noqa: E731
+                                                                   "dub": False, "format": "vtt", "lines": 300, "default": False}]
+        with mock.patch.object(scraper, "episode_page", return_value=("https://site.test/watch/ep-1", {"url": "https://site.test/title"}, [])),                 mock.patch.object(scrape, "site_subtitles", side_effect=tracks) as pick:
             got = scraper.resolve(site, anime("A show", id="ra-subs"), 1, 1)
         self.assertEqual(got["subtitle"], "https://cdn.test/subs/en.vtt")
+        self.assertEqual([x["label"] for x in got["subtitles"]], ["English"])
         pick.assert_called_once()
 
     def test_preview_thumbnails_are_not_subtitles_and_english_comes_first(self):

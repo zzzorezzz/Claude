@@ -68,7 +68,7 @@ def available():
 class Page:
     """A page in the phone's hidden WebView, the same calls as cdp._Page."""
 
-    def __init__(self, scripts, on_request=None, on_response=None, on_closed=None, adblock=None):
+    def __init__(self, scripts, on_request=None, on_response=None, on_closed=None, adblock=None, hidden=True):
         from . import webtools
         self.bridge = launcher.android_bridge
         self.on_request, self.on_response, self.on_closed = on_request, on_response, on_closed
@@ -76,7 +76,8 @@ class Page:
         self.seen = {}               # address -> its request's headers (for what MANIFEST_JS finds)
         self._peeks = 0
         blocked = sorted(webtools.AD_HOSTS) if (webtools.ADBLOCK if adblock is None else adblock) else []
-        self.id = str(self.bridge.pageOpen(json.dumps([MANIFEST_JS, *scripts]), json.dumps(blocked)))
+        quiet = [webtools.MUTE_JS] if hidden else []                    # (one you see - Find the video - is heard)
+        self.id = str(self.bridge.pageOpen(json.dumps([*quiet, MANIFEST_JS, *scripts]), json.dumps(blocked)))
         self.ua = str(self.bridge.pageUserAgent())
         self._open = True
         threading.Thread(target=self._watch, daemon=True).start()
@@ -175,7 +176,7 @@ def watch(url, job):
     def closed():
         job.closed()
         page.close()
-    page = Page([picker.TRACK_JS], on_request, on_response, on_closed=closed)
+    page = Page([picker.TRACK_JS], on_request, on_response, on_closed=closed, hidden=False)
     page.go(url)
     page.bridge.pageShow(page.id)
     return page.close

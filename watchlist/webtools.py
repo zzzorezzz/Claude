@@ -89,6 +89,18 @@ ADBLOCK_JS = r"""(() => {
 })();"""
 
 # Start the player of the page (and of every embedded player): muted, so it's allowed to.
+# A page in a hidden window is never heard: every video and sound on it kept muted as it plays
+# (the phone's hidden browser can't be muted itself; an older Edge engine neither).
+MUTE_JS = r"""(() => {
+  if (window.__waQuiet) return; window.__waQuiet = true;
+  const hush = (m) => { try { m.muted = true; m.volume = 0; } catch (e) { /* fine */ } };
+  const play = HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function () { hush(this); return play.apply(this, arguments); };
+  for (const name of ['play', 'playing', 'volumechange', 'loadedmetadata']) {
+    document.addEventListener(name, (e) => { if (e.target instanceof HTMLMediaElement && !e.target.muted) hush(e.target); }, true);
+  }
+})();"""
+
 AUTOPLAY_JS = r"""(() => {
   if (window.__waPlay) return; window.__waPlay = true;
   let n = 0;
@@ -520,6 +532,97 @@ SERVERS_JS = r"""(() => {
   for (const ms of [1200, 3000, 6000, 10000, 16000]) setTimeout(report, ms);
 })();""".replace("__SERVERS__", SERVERS).replace("__MENU_NAMED__", MENU_NAMED_JS)
 
+# The subtitle tracks a page's player is told of (its <track> tags, and the lists of them the
+# answers its scripts get carry - {"file", "label", "language", "forced"...}, as jwplayer, plyr
+# and video.js take them): every language, not only the one it loads first.
+SUBS = "https://watchanything.invalid/subs?d="
+SUBS_JS = r"""(() => {
+  if (window.__waSubs) return; window.__waSubs = true;
+  const FILE = /\.(?:vtt|srt|ass|ssa)(?:[?#]|$)/i, seen = new Set();
+  const tell = (list) => {
+    list = list.filter(x => x.u && !seen.has(x.u));
+    list.forEach(x => seen.add(x.u));
+    for (let i = 0; i < list.length && i < 60; i += 10) {
+      try { new Image().src = '__SUBS__' + encodeURIComponent(JSON.stringify(list.slice(i, i + 10))); } catch (e) { /* not allowed here */ }
+    }
+  };
+  const pick = (o, keys) => { for (const k of keys) if (typeof o[k] === 'string' && o[k]) return o[k]; return ''; };
+  const yes = (v) => v === true || v === 'yes' || v === 'true' || v === 1;
+  const walk = (x, out, depth) => {
+    if (!x || typeof x !== 'object' || depth > 8 || out.length > 60) return;
+    if (Array.isArray(x)) { x.forEach(v => walk(v, out, depth + 1)); return; }
+    const u = pick(x, ['file', 'src', 'url', 'path', 'link']), kind = String(x.kind || x.type || '').toLowerCase();
+    if (u && (FILE.test(u) || /^(captions|subtitles?)$/.test(kind)) && !/thumbnail|sprite|chapters?\b|storyboard|preview/i.test(u + ' ' + kind)) {
+      try {
+        out.push({ u: new URL(u, location.href).href, l: pick(x, ['label', 'title', 'name', 'display']).slice(0, 60),
+                   g: pick(x, ['srclang', 'language', 'lang', 'code']).slice(0, 30), f: yes(x.forced), d: yes(x.default) });
+      } catch (e) { /* not an address */ }
+    }
+    for (const v of Object.values(x)) if (v && typeof v === 'object') walk(v, out, depth + 1);
+  };
+  const look = (text) => {
+    if (typeof text !== 'string' || text.length > 3000000 || !/vtt|srt|\.ass|caption|subtitle/i.test(text)) return;
+    const t = text.trim();
+    if (t[0] !== '{' && t[0] !== '[') return;
+    try { const out = []; walk(JSON.parse(t), out, 0); tell(out); } catch (e) { /* not JSON */ }
+  };
+  const f = window.fetch;
+  if (f) {
+    window.fetch = function () {
+      const p = f.apply(this, arguments);
+      p.then(r => {
+        try {
+          // (small answers only - JSON, or text that says how long it is: never a stream, nor a video's piece)
+          const size = Number(r.headers.get('content-length') || 0), type = r.headers.get('content-type') || '';
+          if (size < 3000000 && (/json/i.test(type) || (size > 0 && /text\/plain|javascript/i.test(type)))) {
+            r.clone().text().then(look, () => {});
+          }
+        } catch (e) { /* an answer it can't read */ }
+      }, () => {});
+      return p;
+    };
+    window.fetch.toString = () => 'function fetch() { [native code] }';
+  }
+  const send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function () {
+    if (this.__waSubs) return send.apply(this, arguments);
+    this.__waSubs = true;
+    this.addEventListener('load', function () {
+      try {
+        if (!this.responseType || this.responseType === 'text') look(this.responseText);
+        else if (this.responseType === 'json') { const out = []; walk(this.response, out, 0); tell(out); }
+      } catch (e) { /* an answer it can't read */ }
+    });
+    return send.apply(this, arguments);
+  };
+  setInterval(() => {
+    const out = [];
+    document.querySelectorAll('track[src]').forEach(t => {
+      if (!/chapters|metadata/i.test(t.kind || '')) out.push({ u: t.src, l: t.label || '', g: t.srclang || '', f: false, d: !!t.default });
+    });
+    if (out.length) tell(out);
+  }, 2000);
+})();""".replace("__SUBS__", SUBS)
+
+
+def subs_signal(url, opts):
+    """A page telling the subtitle tracks its player was told of (SUBS_JS) into opts["listed"]:
+    whether it was that."""
+    if not url.startswith(SUBS):
+        return False
+    import json
+    try:
+        got = json.loads(urllib.parse.unquote(url[len(SUBS):]))
+    except ValueError:
+        return True
+    listed = opts.setdefault("listed", [])
+    for x in got if isinstance(got, list) else []:
+        if isinstance(x, dict) and str(x.get("u") or "").startswith(("http://", "https://")) \
+                and len(listed) < 60 and all(y["url"] != x["u"] for y in listed):
+            listed.append({"url": str(x["u"]), "label": str(x.get("l") or "")[:60], "lang": str(x.get("g") or "")[:30],
+                           "forced": bool(x.get("f")), "default": bool(x.get("d"))})
+    return True
+
 
 LIST_ALL_JS = "window.__waListAll = true;"     # (SERVERS_JS: every language's servers - the Servers list)
 
@@ -791,6 +894,13 @@ def _hook(opts, core):
     from . import droidweb
     from Microsoft.Web.WebView2.Core import CoreWebView2WebResourceContext
     catch = opts.get("catch")
+    if opts.get("hidden"):
+        # (a hidden window - finding a video, reading a page - is never heard: a page that plays
+        # by itself as it's read would otherwise play its sound out loud)
+        try:
+            core.IsMuted = True
+        except Exception:  # noqa: BLE001 - (an older Edge engine)
+            pass
     if not (opts.get("adblock") or catch):
         return
     try:
@@ -823,7 +933,7 @@ def _hook(opts, core):
             opts["no_click"] = True
             args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
             return
-        if servers_signal(url, opts):
+        if servers_signal(url, opts) or subs_signal(url, opts):
             args.Response = core.Environment.CreateWebResourceResponse(None, 204, "OK", "")
             return
         if catch and url.startswith(droidweb.MANIFEST):
@@ -868,16 +978,12 @@ def _hook(opts, core):
                 if url not in subs:
                     subs.append(url)
         core.WebResourceResponseReceived += on_response
-        if not watch:
-            try:
-                core.IsMuted = True
-            except Exception:  # noqa: BLE001 - (an older Edge engine)
-                pass
     scripts = []
     if watch:
         from .picker import TRACK_JS
         scripts.append(TRACK_JS)
     elif catch:
+        scripts.append(SUBS_JS)
         scripts.append(AUTOPLAY_JS)
         if opts.get("list_all"):
             scripts.append(LIST_ALL_JS)
@@ -888,6 +994,8 @@ def _hook(opts, core):
             scripts.append(CLICK_JS.replace("__WANT__", json.dumps(opts["click"])))
     if opts.get("adblock"):
         scripts.append(ADBLOCK_JS)
+    if opts.get("hidden"):
+        scripts.append(MUTE_JS)
     for script in scripts:
         core.AddScriptToExecuteOnDocumentCreatedAsync(script)
 
@@ -988,6 +1096,7 @@ def watch_window(url, job, at=None):
 def _hidden_window(url, opts, title="Watch Anything"):
     wv = _webview()
     patch()
+    opts["hidden"] = True
     _pending[url] = opts
     try:
         # Off the screen rather than hidden: a hidden page counts as not being looked
@@ -1133,7 +1242,7 @@ def catch_video(url, timeout=30, click=None):
                                              0 if ".m3u8" in f[0].lower() or ".mpd" in f[0].lower() else 1,
                                              after.index(f)))
             return {"url": best[0], "headers": best[1], "subs": list(opts.get("subs") or []), "videos": [f[0] for f in found],
-                    "servers": servers_of(opts, url)}
+                    "servers": servers_of(opts, url), "listed": list(opts.get("listed") or [])}
         finally:
             try:
                 win.destroy()
