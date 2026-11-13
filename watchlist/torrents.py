@@ -617,8 +617,15 @@ class Torrents:
                     shutil.move(path, dest)
             except OSError:
                 pass
-        threading.Timer(2, self._tidy_all, args=(rec,)).start()
+        self._later(self._tidy_all, rec)
         return {"ok": True, "kept": len(done)}
+
+    def _later(self, step, rec):
+        """A tidy-up two seconds on (libtorrent lets go of the files first); called off if the app closes meanwhile."""
+        timer = threading.Timer(2, step, args=(rec,))
+        timer.daemon = True
+        self._timers = [t for t in getattr(self, "_timers", []) if t.is_alive()] + [timer]
+        timer.start()
 
     def _tidy_all(self, rec):
         """After a torrent kept its finished files: what's left of it (unfinished ones) goes."""
@@ -641,7 +648,7 @@ class Torrents:
             self._save()
         if rec and delete_files:
             # What libtorrent leaves behind (its .parts file, empty folders).
-            threading.Timer(2, self._tidy, args=(rec,)).start()
+            self._later(self._tidy, rec)
         return {"ok": bool(rec)}
 
     @staticmethod
@@ -1791,6 +1798,8 @@ class Torrents:
         return written
 
     def shutdown(self):
+        for timer in getattr(self, "_timers", []):
+            timer.cancel()                       # (what's left over goes at the next start: clean_leftovers)
         try:
             if self.ses and not self._stop:
                 self._export_missing()           # (while the alerts that bring its pieces are still read)

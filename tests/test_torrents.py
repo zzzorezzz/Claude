@@ -434,11 +434,19 @@ class TorrentTest(test_server.ServerBase):
         skipped: written out before what the torrent has is written down."""
         h = self.add()
         tor = self.app.torrents
-        self.download(h, "1:2")
         rec = tor.records[h]
         sub = next(f for f in rec["files"] if f["path"].endswith(".ass"))
+        # (the episode sharing a piece with the subtitle - which one depends on the order the files are in)
+        ti = tor.handles[h].torrent_file()
+        fs, plen = ti.files(), ti.piece_length()
+        span = lambda f: set(range(fs.file_offset(f["index"]) // plen, (fs.file_offset(f["index"]) + f["size"] - 1) // plen + 1))
+        eps = tor.episodes(self.app.store.get(self.item["id"]))
+        key = next((k for k, v in eps.items() if span(tor._file(rec, v["index"])) & span(sub)), None)
+        if not key:
+            self.skipTest("no episode shares a piece with the subtitle in this order of files")
+        self.download(h, key)
         path = Path(tor.path_of(rec, sub))
-        # (episode 2's first piece holds the subtitle too: skipped, its bytes went to the .parts file)
+        # (that episode's piece holds the subtitle too: skipped, its bytes went to the .parts file)
         self.assertTrue(wait_for(lambda: tor._progress(h)[sub["index"]] >= sub["size"], 30))
         self.assertFalse(path.exists())
         self.assertEqual(tor._export_missing(), 0, "a file you don't want isn't written out")
