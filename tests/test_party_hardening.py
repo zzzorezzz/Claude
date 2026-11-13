@@ -335,7 +335,7 @@ class RelayReplayTest(unittest.TestCase):
         self.ann.say({"Hello": {"username": "Ann", "room": {"name": relay.ROOM}}})
 
     def guest(self, name="Ben"):
-        p = party.Party(relay.server_name(self.secret, 0), relay.ROOM, name, "guest").connect(timeout=5)
+        p = party.Party(relay.server_name(self.secret, 0, self.hub.fingerprint), relay.ROOM, name, "guest").connect(timeout=5)
         self.addCleanup(p.leave)
         return p
 
@@ -380,6 +380,28 @@ class RelayReplayTest(unittest.TestCase):
         time.sleep(0.1)
         replays = [m for m in list(ben.conn.inbox.queue) if m and "Hello" in m]
         self.assertEqual(replays, [])
+
+    def test_one_guest_cant_speak_as_another(self):
+        """Every guest has the invite's key: what they say is sealed again with a key of their own."""
+        ben = self.guest("Ben")
+        self.guest("Cat")
+        # Cat knows the party's key and has seen Ben's messages go by: one "from Ben" she makes is turned away...
+        forged = self.hub.box.seal(json.dumps({"s": ben.conn.sid, "n": 99, "t": time.time(),
+                                               "m": {"Chat": "I'm Ben, really"}}).encode())
+        self.broker.publish(self.hub.box.topic + "/h", forged)
+        # ...and so is Ben's key taken over with a new half of her own.
+        _, mine = relay._half()
+        self.broker.publish(self.hub.box.topic + "/h", self.hub.box.seal(json.dumps(
+            {"s": ben.conn.sid, "n": 100, "t": time.time(), "hi": format(mine, "x")}).encode()))
+        time.sleep(0.3)
+        self.assertEqual(self.chats("I'm Ben, really"), 0)
+        self.assertEqual(self.hub.keys[ben.conn.sid][0], ben.conn._public)
+        ben.conn.send({"Chat": "the real Ben"})
+        self.assertTrue(wait_for(lambda: self.chats("the real Ben") == 1))
+
+    def test_a_host_whose_key_isnt_the_invites_isnt_believed(self):
+        with self.assertRaises(OSError):
+            relay.Connection(self.secret, 0, b"\x00" * 10, timeout=1)
 
     def test_an_old_kind_of_message_is_dropped(self):
         old = self.hub.box.seal(json.dumps({"s": "abc", "m": {"Hello": {"username": "Old", "room": {"name": relay.ROOM}}}}).encode())
@@ -436,7 +458,9 @@ class VanishedGuestTest(_Server):
     def test_a_guest_hears_when_the_relay_goes_quiet(self):
         broker = _Broker()
         with mock.patch.object(relay, "Mqtt", broker.mqtt), mock.patch.object(relay, "IDLE", 0.3):
-            conn = relay.Connection(b"0123456789", 0)
+            hub = relay.Hub(b"0123456789", partyserver.PartyServer(), 0)
+            self.addCleanup(hub.close)
+            conn = relay.Connection(b"0123456789", 0, hub.fingerprint)
             with self.assertRaises(OSError):
                 conn.read()
 

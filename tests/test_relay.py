@@ -16,11 +16,13 @@ class RelayTest(unittest.TestCase):
         self.assertNotEqual(box.topic, relay.Box(b"another-key").topic)
 
     def test_a_relay_invite_carries_its_key_and_relay(self):
-        secret = bytes(range(10))
-        code = syncplay.relay_invite(secret, 1)
-        self.assertRegex(code, r"^WA-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-R1$")
+        secret, host_print = bytes(range(10)), bytes(range(10, 20))
+        code = syncplay.relay_invite(secret, 1, host_print)
+        self.assertRegex(code, r"^WA-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-R1(-[A-Z2-7]{4}){4}$")
         got = syncplay.read_invite(f"join me: {code.lower()} !")
-        self.assertEqual(relay.parse(got["server"]), (secret, 1))
+        self.assertEqual(relay.parse(got["server"]), (secret, 1, host_print))
+        with self.assertRaises(ValueError):                     # (an older host's: no fingerprint)
+            syncplay.read_invite(syncplay.relay_invite(secret, 1))
         self.assertEqual(got["room"], relay.ROOM)
 
     def test_short_invites_for_each_kind_of_server(self):

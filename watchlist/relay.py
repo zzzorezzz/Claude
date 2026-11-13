@@ -15,8 +15,15 @@ inside the seal each one says who sent it, who it's for, when, and its number fr
 sender: one numbered at or below the last heard from that sender (or from long ago, or for
 someone else) is turned away. A message without these (from an older app) is turned away
 too - it could be anyone's, sent again.
+
+Everyone in a party has its invite, so the invite's key alone would let one guest read
+another's messages or speak as them. So each guest also agrees a key of its own with the host
+(Diffie-Hellman, RFC 3526's 2048-bit group: only Python's own big numbers): the host's half
+is checked against a fingerprint in the invite, the guest's is new every time. What a guest
+and the host say to each other is sealed with that key too, inside the party's.
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -36,6 +43,44 @@ MAX_MESSAGE = 96 * 1024        # the biggest message taken from a guest
 MAX_GUESTS = 32                # guests at once through the relay
 REPLAY_WINDOW = 3600.0         # seconds: a message sent longer ago than this (or this far ahead) is old
 IDLE = 60.0                    # a guest hearing nothing from the party this long has lost it
+
+
+# RFC 3526, group 14 (2048 bits), generator 2.
+_P = int("FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DD"
+         "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE"
+         "386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D"
+         "23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C18"
+         "0E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AACAA"
+         "68FFFFFFFFFFFFFFFF", 16)
+_G = 2
+
+
+def _half():
+    """(private, public) for one side of a key agreement."""
+    private = secrets.randbits(256) | (1 << 255)
+    return private, pow(_G, private, _P)
+
+
+def _agreed(private, theirs):
+    """The key both sides get from one's private half and the other's public one (None for a
+    public half that isn't one)."""
+    if not isinstance(theirs, int) or not 1 < theirs < _P - 1:
+        return None
+    return hashlib.sha256(pow(theirs, private, _P).to_bytes(256, "big")).digest()
+
+
+def fingerprint(public):
+    """The host's public half, shortly (in the invite: a guest checks the host's is that one)."""
+    return hashlib.sha256(public.to_bytes(256, "big")).digest()[:10]
+
+
+def _inner(box, blob):
+    """A message sealed again with a guest's own key (inside the party's), or None."""
+    try:
+        data = box.open(base64.b64decode(blob))
+    except (ValueError, TypeError):
+        return None
+    return _envelope(data) if data is not None else None
 
 
 def _envelope(data):
@@ -284,6 +329,9 @@ class Hub:
         self.box, self.server, self.guests = Box(secret), server, {}
         self.heard = _Numbered()         # each guest's last message (kept after it leaves: no replays)
         self._sent, self._send_lock = {}, threading.Lock()
+        self._private, self.public = _half()
+        self.fingerprint = fingerprint(self.public)
+        self.keys = {}                   # guest -> (its public half, the box of the key agreed with it)
         self.mqtt = Mqtt(BROKERS[broker_index], [self.box.topic + "/h"], self._arrived)
 
     def _arrived(self, topic, blob):
@@ -292,11 +340,22 @@ class Hub:
         data = self.box.open(blob)
         if data is None:
             return
-        env = _envelope(data)
-        if env is None or "g" in env:
+        try:
+            env = json.loads(data.decode("utf-8"))
+        except (ValueError, RecursionError):
+            return
+        if not isinstance(env, dict) or "g" in env:
             return                       # (not a guest's: one of ours, sent back in)
         sid = env.get("s")
-        if not isinstance(sid, str) or not sid or len(sid) > 20 or not self.heard.fresh(sid, env["n"]):
+        if not isinstance(sid, str) or not sid or len(sid) > 20:
+            return
+        if "hi" in env:
+            self._hello(sid, env)
+            return
+        # (everything else sealed again with the key agreed with that guest: no one else can say it)
+        got = self.keys.get(sid)
+        env = _inner(got[1], env.get("x")) if got and isinstance(env.get("x"), str) else None
+        if env is None or not self.heard.fresh(sid, env["n"]):
             return
         conn = self.guests.get(sid)
         if env.get("bye"):
@@ -313,10 +372,38 @@ class Hub:
             self.server.serve(conn)
         conn.inbox.put(env["m"])
 
+    def _hello(self, sid, env):
+        """A guest arriving: its half of a key of its own; the host's half back (to the guest only)."""
+        if _envelope(json.dumps(env).encode("utf-8")) is None or not isinstance(env.get("hi"), str):
+            return
+        try:
+            theirs = int(env["hi"], 16)
+        except ValueError:
+            return
+        known = self.keys.get(sid)
+        if known and known[0] != theirs:
+            return                       # (that guest has a key already: not another's to take over)
+        if not known:
+            if len(self.keys) >= MAX_GUESTS * 4:
+                return
+            key = _agreed(self._private, theirs)
+            if key is None:
+                return
+            self.keys[sid] = (theirs, Box(key))
+        with self._send_lock:
+            n = self._sent[sid] = self._sent.get(sid, 0) + 1
+            blob = self.box.seal(json.dumps({"g": sid, "n": n, "t": round(time.time(), 3),
+                                             "key": format(self.public, "x")}).encode("utf-8"))
+            self.mqtt.publish(f"{self.box.topic}/g/{sid}", blob)
+
     def to_guest(self, sid, message):
+        got = self.keys.get(sid)
+        if not got:
+            return
         with self._send_lock:            # (numbered in the order they go)
             n = self._sent[sid] = self._sent.get(sid, 0) + 1
-            blob = self.box.seal(json.dumps({"g": sid, "n": n, "t": round(time.time(), 3), "m": message}).encode("utf-8"))
+            inner = got[1].seal(json.dumps({"n": n, "t": round(time.time(), 3), "m": message}).encode("utf-8"))
+            blob = self.box.seal(json.dumps({"g": sid, "x": base64.b64encode(inner).decode("ascii")}).encode("utf-8"))
             self.mqtt.publish(f"{self.box.topic}/g/{sid}", blob)
 
     def close(self):
@@ -348,13 +435,30 @@ class _NoSocket:
 class Connection:
     """A guest's way into a party through the relay: send(dict), read() -> dict or None."""
 
-    def __init__(self, secret, broker_index, timeout=10):
+    def __init__(self, secret, broker_index, host_print=b"", timeout=10):
+        """`host_print`: the host's fingerprint from the invite (its key is checked against it)."""
+        if not host_print:
+            raise OSError("that invite is from an older Watch Anything - ask for a new one")
         self.box, self.sid = Box(secret), secrets.token_hex(6)
         self.inbox, self.tls, self.sock = queue.Queue(), True, _NoSocket()
         self.heard = _Numbered()
         self._n, self._send_lock = 0, threading.Lock()
+        self._print, self.own = bytes(host_print), None
+        self._private, self._public = _half()
+        self._keyed = threading.Event()
         self.mqtt = Mqtt(BROKERS[broker_index], [f"{self.box.topic}/g/{self.sid}"], self._arrived,
                          on_lost=lambda: self.inbox.put(None), timeout=timeout)
+        # A key of its own with the host first (asked again now and then, until the host answers).
+        end = time.time() + timeout
+        while not self._keyed.is_set() and time.time() < end:
+            with self._send_lock:
+                self._n += 1
+                self.mqtt.publish(self.box.topic + "/h", self.box.seal(json.dumps(
+                    {"s": self.sid, "n": self._n, "t": round(time.time(), 3), "hi": format(self._public, "x")}).encode("utf-8")))
+            self._keyed.wait(min(2.0, max(0.1, end - time.time())))
+        if not self._keyed.is_set():
+            self.mqtt.close()
+            raise OSError("the party's host didn't answer through the relay")
 
     def _arrived(self, topic, blob):
         if len(blob) > MAX_PACKET:
@@ -362,16 +466,36 @@ class Connection:
         data = self.box.open(blob)
         if data is None:
             return
-        env = _envelope(data)
-        # (the host's, for this guest - not another guest's, nor an old one sent again)
-        if env is None or env.get("g") != self.sid or not self.heard.fresh("host", env["n"]):
+        try:
+            env = json.loads(data.decode("utf-8"))
+        except (ValueError, RecursionError):
+            return
+        if not isinstance(env, dict) or env.get("g") != self.sid:
+            return                       # (another guest's)
+        if "key" in env:
+            # (the host's half: only the one the invite's fingerprint is of)
+            if self.own is None and _envelope(data) is not None and isinstance(env["key"], str):
+                try:
+                    theirs = int(env["key"], 16)
+                except ValueError:
+                    return
+                if 1 < theirs < _P - 1 and hmac.compare_digest(fingerprint(theirs), self._print):
+                    key = _agreed(self._private, theirs)
+                    if key:
+                        self.own = Box(key)
+                        self._keyed.set()
+            return
+        # (the host's, sealed with this guest's own key - not an old one sent again)
+        env = _inner(self.own, env.get("x")) if self.own and isinstance(env.get("x"), str) else None
+        if env is None or not self.heard.fresh("host", env["n"]):
             return
         if isinstance(env.get("m"), dict):
             self.inbox.put(env["m"])
 
     def _seal(self, **what):
         self._n += 1
-        return self.box.seal(json.dumps(dict(what, s=self.sid, n=self._n, t=round(time.time(), 3))).encode("utf-8"))
+        inner = self.own.seal(json.dumps(dict(what, n=self._n, t=round(time.time(), 3))).encode("utf-8"))
+        return self.box.seal(json.dumps({"s": self.sid, "x": base64.b64encode(inner).decode("ascii")}).encode("utf-8"))
 
     def send(self, message):
         with self._send_lock:            # (numbered in the order they go)
@@ -395,20 +519,20 @@ class Connection:
         self.inbox.put(None)
 
 
-def server_name(secret: bytes, broker_index: int):
-    """How a relay party is named where a server's address would be ("relay:1:<key>")."""
-    return f"relay:{broker_index}:{secret.hex()}"
+def server_name(secret: bytes, broker_index: int, host_print: bytes = b""):
+    """How a relay party is named where a server's address would be ("relay:1:<key>:<host's fingerprint>")."""
+    return f"relay:{broker_index}:{secret.hex()}:{bytes(host_print).hex()}"
 
 
 def parse(server):
-    """(secret, broker index) of a relay party's name, or None."""
+    """(secret, broker index, host's fingerprint) of a relay party's name, or None."""
     if not str(server).startswith("relay:"):
         return None
     try:
-        _, index, key = server.split(":", 2)
+        _, index, key, *rest = server.split(":")
         index = int(index)
         if not 0 <= index < len(BROKERS):
             return None
-        return bytes.fromhex(key), index
+        return bytes.fromhex(key), index, bytes.fromhex(rest[0] if rest else "")
     except ValueError:
         return None

@@ -144,13 +144,19 @@ SHORT = re.compile(r"\bWA-([A-Z2-7]{4})-?([A-Z2-7]{4})(?:-([5-8])\b)?(?:@([A-Za-
 
 
 # A party through the backup relay: its key in the invite (only who has the invite can read
-# or join it): "WA-" + 16 letters + "-R" and which relay ("WA-ABCD-EFGH-IJKL-MNOP-R1").
-RELAY = re.compile(r"\bWA-([A-Z2-7]{4})-?([A-Z2-7]{4})-?([A-Z2-7]{4})-?([A-Z2-7]{4})-R(\d)\b", re.I)
+# or join it): "WA-" + 16 letters + "-R" and which relay, then the host's fingerprint (each guest
+# checks the host's own key is that one): "WA-ABCD-EFGH-IJKL-MNOP-R1-QRST-UVWX-YZ23-4567".
+RELAY = re.compile(r"\bWA-([A-Z2-7]{4})-?([A-Z2-7]{4})-?([A-Z2-7]{4})-?([A-Z2-7]{4})-R(\d)"
+                   r"(?:-([A-Z2-7]{4})-?([A-Z2-7]{4})-?([A-Z2-7]{4})-?([A-Z2-7]{4}))?\b", re.I)
 
 
-def relay_invite(secret, index):
+def relay_invite(secret, index, host_print=b""):
     letters = base64.b32encode(secret).decode("ascii")
-    return "WA-" + "-".join(letters[i:i + 4] for i in range(0, 16, 4)) + f"-R{index}"
+    code = "WA-" + "-".join(letters[i:i + 4] for i in range(0, 16, 4)) + f"-R{index}"
+    if host_print:
+        mark = base64.b32encode(bytes(host_print)).decode("ascii")
+        code += "-" + "-".join(mark[i:i + 4] for i in range(0, 16, 4))
+    return code
 
 
 def short_invite(server, room):
@@ -210,7 +216,10 @@ def read_invite(code):
         index = int(relayed.group(5))
         if index >= len(relay.BROKERS):
             raise ValueError("that watch-party code is from a newer Watch Anything - update the app")
-        return {"server": relay.server_name(secret, index), "room": relay.ROOM, "title": "", "year": None, "type": "",
+        if not relayed.group(6):
+            raise ValueError("that watch-party code is from an older Watch Anything - ask the host to update the app")
+        host_print = base64.b32decode("".join(relayed.group(i) for i in range(6, 10)).upper())
+        return {"server": relay.server_name(secret, index, host_print), "room": relay.ROOM, "title": "", "year": None, "type": "",
                 "source": "", "source_id": "", "host": None}
     short = SHORT.search(code)
     if short:

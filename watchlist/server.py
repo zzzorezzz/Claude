@@ -942,7 +942,7 @@ class App:
             own.stop()
             raise ApiError(f"none of the watch-party servers works right now, nor the backup relay ({e})",
                            HTTPStatus.BAD_GATEWAY, code="no_server") from e
-        party.invite = syncplay.relay_invite(secret, index)
+        party.invite = syncplay.relay_invite(secret, index, hub.fingerprint)
         party.via, party.backend = "relay", [hub, own]
         self._start_party(party)
         return party, "Syncplay's servers are down right now, so this party goes through the backup relay (encrypted)."
