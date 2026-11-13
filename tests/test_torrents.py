@@ -232,7 +232,9 @@ class TorrentTest(test_server.ServerBase):
         index = self._index(h, "02 [1080p].mkv")
         self.app.torrents.prepare(h, index)
         rec = self.app.torrents.records[h]
-        self.assertTrue(wait_for(lambda: self.app.torrents.complete(rec, self.app.torrents._file(rec, index))))
+        self.connect(h)
+        self.assertTrue(wait_for(lambda: self.app.torrents.complete(rec, self.app.torrents._file(rec, index))
+                                 or self.connect(h), 60))
         self.app.torrents.finished_watching(h, index)
         return index, rec
 
@@ -407,7 +409,7 @@ class TorrentTest(test_server.ServerBase):
         self.connect(h)
         rec = tor.records[h]
         f = tor._file(rec, index)
-        self.assertTrue(wait_for(lambda: tor.complete(rec, f, tor._progress(h)), 60), f"{key} downloaded")
+        self.assertTrue(wait_for(lambda: tor.complete(rec, f, tor._progress(h)) or self.connect(h), 60), f"{key} downloaded")
         return index, f
 
     def test_what_a_torrent_has_is_written_down_so_a_start_doesnt_check_it_again(self):
@@ -485,10 +487,14 @@ class TorrentTest(test_server.ServerBase):
                 mock.patch.object(tor, "_checking", return_value=True):
             # (as Delete connections does; straight, not through the app's server: a busy computer can
             # take longer to let go of the file than a request is given)
-            tor.replace_for(self.item["id"], "", keep_done=True)
+            rec = tor.records[h]
+            source = tor.path_of(rec, tor._file(rec, tor.episodes(self.app.store.get(self.item["id"]))["1:1"]["index"]))
+            have = dict(rec.get("have") or {})
+            got = tor.remove_keeping(h)
         self.assertNotIn(h, tor.records)
         kept = list((tor.dir / "kept").rglob("*01*.mkv"))
-        self.assertTrue(kept, "episode 1 was kept")
+        self.assertTrue(kept, f"episode 1 was kept - {got}, noted {have}, there still: {os.path.exists(source)}, "
+                              f"kept folder: {[str(p) for p in (tor.dir / 'kept').rglob('*')]}")
         self.assertEqual(kept[0].stat().st_size, len(self.data[1]))
 
     def test_playing_an_episode_doesnt_stop_another_downloading_whole(self):
