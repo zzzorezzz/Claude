@@ -58,6 +58,8 @@ class OnlineBase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.app = App(tmp.name)
         self.addCleanup(self.app.torrents.shutdown)
+        # (never a real hidden browser: the look-ahead would open one on the real sites)
+        self.app.scraper.can_render = self.app.scraper.can_catch = lambda: False
 
     def sites(self, *names, kind="tv"):
         self.app.settings.update({"video_sites": [{"name": n, "url": f"https://{n.lower()}.test/s?q={{title}}", "types": [kind]}

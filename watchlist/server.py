@@ -4099,6 +4099,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         device = self.app.remote.devices.check(self._cookie(remote.COOKIE))
         if not device:
+            self._drain()
             self._json({"error": "This device isn't connected to the app yet.", "code": "unpaired"},
                        HTTPStatus.UNAUTHORIZED)
             return True
@@ -4121,6 +4122,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, data, status=HTTPStatus.OK):
         self._send(status, json.dumps(data).encode("utf-8"), "application/json; charset=utf-8", self._out_headers)
+
+    def _drain(self):
+        """A request turned down: what it sent is read first (an answer before it, with its bytes
+        left unread, can make the connection be cut before the answer arrives)."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if 0 < length <= 1_000_000:
+                self.rfile.read(length)
+        except (ValueError, OSError):
+            pass
 
     def _body(self):
         try:
@@ -4164,12 +4175,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._static(url.path)
             return self._send(HTTPStatus.METHOD_NOT_ALLOWED, b"", "text/plain")
         if method != "GET" and self.headers.get("X-Watchlist") != "1":
+            self._drain()
             return self._json({"error": "missing X-Watchlist header"}, HTTPStatus.FORBIDDEN)
         self.query = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
         for route_method, pattern, name in self.ROUTES:
             m = re.fullmatch(pattern, url.path)
             if m and route_method == method:
                 if self.remote and name in self.LOCAL_ONLY:
+                    self._drain()
                     return self._json({"error": "only on the computer itself"}, HTTPStatus.FORBIDDEN)
                 guest = self.app.party_guest_of()
                 if guest and name in self.HOST_PLAYS:
